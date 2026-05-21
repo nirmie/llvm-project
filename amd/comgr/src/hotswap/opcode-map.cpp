@@ -130,10 +130,10 @@ static const Entry kCanonTable[] = {
     E(S_BARRIER_SIGNAL_IMM, S_BARRIER_SIGNAL),
     E(S_BARRIER_SIGNAL_M0, S_BARRIER_SIGNAL),
 
-    // GFX12+ standalone cache writeback. `GLOBAL_WB` is the pseudo; the gfx12
-    // and gfx13 real encodings map to it via `buildMcToPseudoMap` (the
-    // McToPseudo -> pseudo canonicalization step). The pseudo entry here is
-    // what `kCanonTable` looks up after canonicalization.
+    // GFX12+ standalone cache ops. The pseudo entries are what `kCanonTable`
+    // looks up after canonicalization; gfx12/gfx13 real encodings map to
+    // the pseudos via `buildMcToPseudoMap`.
+    E(GLOBAL_INV, GLOBAL_INV),
     E(GLOBAL_WB, GLOBAL_WB),
 
     // ---------------------------------------------------------------------
@@ -670,6 +670,19 @@ static const Entry kCanonTable[] = {
     // form is collapsed to e64 by getVOPe64 before lookup, so a
     // single e64 entry covers both encodings.
     E(V_RCP_F64_e64, V_RCP_F64),
+    // v_rsq_f64 / v_sqrt_f64: F64 transcendentals. The gfx12/gfx1250
+    // real MC opcodes map back to these pseudos via buildMcToPseudoMap.
+    E(V_RSQ_F64_e64, V_RSQ_F64),
+    E(V_SQRT_F64_e64, V_SQRT_F64),
+    // v_frexp_exp/mant_f64: F64 frexp family. e32 collapsed to e64
+    // by getVOPe64; gfx12 real MC opcodes via buildMcToPseudoMap.
+    E(V_FREXP_EXP_I32_F64_e64, V_FREXP_EXP_I32_F64),
+    E(V_FREXP_MANT_F64_e64, V_FREXP_MANT_F64),
+    // v_div_scale/fmas/fixup_f64: three-instruction IEEE F64 divide.
+    // VOP3-only so always e64; gfx12/gfx1250 via buildMcToPseudoMap.
+    E(V_DIV_SCALE_F64_e64, V_DIV_SCALE_F64),
+    E(V_DIV_FMAS_F64_e64, V_DIV_FMAS_F64),
+    E(V_DIV_FIXUP_F64_e64, V_DIV_FIXUP_F64),
     E(V_LDEXP_F64_e64, V_LDEXP_F64),
 
     // ---------------------------------------------------------------------

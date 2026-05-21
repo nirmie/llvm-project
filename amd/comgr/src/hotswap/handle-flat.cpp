@@ -224,6 +224,19 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
   // `ISAProfile::HasMfma` is true on exactly GFX940+ CDNA targets (gfx940,
   // gfx942, gfx950) and false on all earlier GFX9 targets, making it the
   // right predicate here (mirrors the `isNotGFX940Plus` TableGen guard).
+  // GFX12+ cache invalidate (`global_inv`).
+  // Mirrors the GLOBAL_WB lowering: on GFX940+ use `llvm.amdgcn.s.dcache.inv`
+  // (scalar L1/L2 invalidate, available on all GFX8+); on pre-GFX940 fall back
+  // to `llvm.amdgcn.buffer.wbinvl1` which wb+invs L1 (conservative-correct).
+  if (Sop == CanonicalOp::GLOBAL_INV) {
+    Intrinsic::ID InvId = Ctx.TargetIsa.HasMfma
+                              ? Intrinsic::amdgcn_s_dcache_inv
+                              : Intrinsic::amdgcn_buffer_wbinvl1;
+    Function *InvFn = Intrinsic::getOrInsertDeclaration(&Ctx.M, InvId);
+    Ctx.B.CreateCall(InvFn, {});
+    Hr.Handled = true;
+    return Hr;
+  }
   if (Sop == CanonicalOp::GLOBAL_WB) {
     Intrinsic::ID WbId = Ctx.TargetIsa.HasMfma
                              ? Intrinsic::amdgcn_s_dcache_wb
@@ -404,6 +417,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
 
     FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, IsByte ? 1 : 2,
                                         "GLOBAL_LOAD sub-dword");
+    if (!Fa.Ptr) return Hr;
     Value *Addr = Fa.Ptr;
     // SPE-gate the memory access itself, not just the VGPR write-back.
     // The store counterparts (GLOBAL_STORE_*, ~line 196 below) are
@@ -449,6 +463,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
 
     FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, LoadDwords * 4,
                                         "GLOBAL_LOAD dword");
+    if (!Fa.Ptr) return Hr;
     Value *Addr = Fa.Ptr;
 
     // Same SPE-gating rationale as the GLOBAL_LOAD sub-dword block
@@ -1020,6 +1035,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
         Op.srcReg(1).RegKind == ParsedReg::VGPR) {
       FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, IsByte ? 1 : 2,
                                           "FLAT_LOAD sub-dword (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
     } else {
       // Plain-flat form: VGPR64 holds the full per-lane flat address.
@@ -1102,6 +1118,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
         Op.srcReg(1).RegKind == ParsedReg::VGPR) {
       FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, LoadDwords * 4,
                                           "FLAT_LOAD dword (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
     } else {
       Addr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(0));
@@ -1190,6 +1207,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
         Op.srcReg(2).RegKind == ParsedReg::SGPR) {
       FlatAddr Fa = decodeGlobalStoreAddr(Ctx, Di, Op, ElemBytes,
                                            "FLAT_STORE (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
       StData = Fa.StData;
     } else {
@@ -1280,6 +1298,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
     if (IsSaddr) {
       FlatAddr Fa = decodeGlobalStoreAddr(Ctx, Di, Op, /*elemBytes=*/4,
                                            "FLAT_ATOMIC (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
       StData = Fa.StData;
     } else {
