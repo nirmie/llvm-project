@@ -62,6 +62,12 @@ enum class CanonicalOp : uint16_t {
   // LLVM `amdgcn.s.barrier` call.
   S_BARRIER, S_BARRIER_WAIT, S_BARRIER_SIGNAL,
 
+  // GFX12+ standalone cache writeback. `global_wb` writes back a cache level;
+  // on gfx950 this is lowered to `llvm.amdgcn.buffer.wbinvl1` (write-back and
+  // invalidate L1), which is conservative-correct: it ensures the write-back
+  // the source requested is performed before subsequent memory accesses.
+  GLOBAL_WB,
+
   // -- SMEM --
   S_LOAD_B32, S_LOAD_B64, S_LOAD_B96, S_LOAD_B128, S_LOAD_B256, S_LOAD_B512,
   // gfx12+ scalar narrow loads: fetch 1 or 2 bytes from a uniform address and

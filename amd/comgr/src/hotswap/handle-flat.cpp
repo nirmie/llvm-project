@@ -206,6 +206,23 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
   CanonicalOp Sop = Di.CanonOp;
 
   // ---------------------------------------------------------------------
+  // GFX12+ standalone cache writeback (`global_wb`).
+  //
+  // `global_wb` writes back a dirty cache level to a wider scope (e.g., L1
+  // dirty lines -> L2). On gfx950 there is no per-level write-back intrinsic
+  // that only writes without invalidating; the closest safe substitute is
+  // `llvm.amdgcn.buffer.wbinvl1`, which writes back and invalidates L1.
+  // This is conservative-correct: the writeback the source required happens,
+  // and the subsequent invalidate only improves coherence.
+  if (Sop == CanonicalOp::GLOBAL_WB) {
+    Function *WbFn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_buffer_wbinvl1);
+    Ctx.B.CreateCall(WbFn, {});
+    Hr.Handled = true;
+    return Hr;
+  }
+
+  // ---------------------------------------------------------------------
   // FLAT scratch family (`scratch_load_*`, `scratch_store_*`).
   //
   // `SIInstrFlags::FlatScratch` is the authoritative discriminator for the

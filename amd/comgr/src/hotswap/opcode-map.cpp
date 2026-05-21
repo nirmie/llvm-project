@@ -130,6 +130,12 @@ static const Entry kCanonTable[] = {
     E(S_BARRIER_SIGNAL_IMM, S_BARRIER_SIGNAL),
     E(S_BARRIER_SIGNAL_M0, S_BARRIER_SIGNAL),
 
+    // GFX12+ standalone cache writeback. `GLOBAL_WB` is the pseudo; the gfx12
+    // and gfx13 real encodings map to it via `buildMcToPseudoMap` (the
+    // McToPseudo -> pseudo canonicalization step). The pseudo entry here is
+    // what `kCanonTable` looks up after canonicalization.
+    E(GLOBAL_WB, GLOBAL_WB),
+
     // ---------------------------------------------------------------------
     // SMEM scalar loads
     // ---------------------------------------------------------------------
