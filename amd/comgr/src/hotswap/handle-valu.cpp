@@ -616,6 +616,17 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  // ---- v_illegal ----
+  // Hardware trap instruction (encoding 0x00000000). Lower to llvm.trap so the
+  // semantics (unconditional fault) are preserved in the translated binary.
+  if (Sop == CanonicalOp::V_ILLEGAL) {
+    Function *TrapFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::trap);
+    Ctx.B.CreateCall(TrapFn, {});
+    Ctx.B.CreateUnreachable();
+    Hr.Handled = true;
+    return Hr;
+  }
   // ---- v_mov_b32 ----
   if (Sop == CanonicalOp::V_MOV_B32) {
     Ctx.writeReg32(Op.dst(), Op.src(0));
@@ -2334,6 +2345,37 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
 
+  // F16 .NUM ternary min3/max3: NaN-pruning 3-source reduction with full
+  // source/destination op_sel handling.  Lowered as two chained minnum/maxnum
+  // calls on f16, identical in structure to the f32 V_MIN3_F32 handler except
+  // that src and dst halves are resolved via readOpSelF16 / writeOpSelF16.
+  if (Sop == CanonicalOp::V_MIN3_NUM_F16 ||
+      Sop == CanonicalOp::V_MAX3_NUM_F16) {
+    const bool IsMin = Sop == CanonicalOp::V_MIN3_NUM_F16;
+    StringRef OpName = IsMin ? "v_min3_num_f16" : "v_max3_num_f16";
+    bool DstHigh = false;
+    if (!requireDefaultVOP3FpValuOutputMods(Di, Hr, OpName) ||
+        !readVOP3F16DstHigh(Di, Hr, OpName, DstHigh))
+      return Hr;
+
+    SmallVector<Value *, 3> Srcs;
+    for (unsigned I = 0; I < 3; ++I) {
+      Value *Src = readOpSelF16(Ctx, Di, Op, Hr, I, OpName);
+      if (!Src)
+        return Hr;
+      Srcs.push_back(Src);
+    }
+
+    Intrinsic::ID IntrId = IsMin ? Intrinsic::minnum : Intrinsic::maxnum;
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, IntrId, {Ctx.F16Ty});
+    Value *R01 = Ctx.B.CreateCall(Fn, {Srcs[0], Srcs[1]},
+                                  Twine(OpName) + "_inner");
+    Value *R = Ctx.B.CreateCall(Fn, {R01, Srcs[2]}, OpName);
+    writeOpSelF16(Ctx, Op, R, DstHigh);
+    Hr.Handled = true;
+    return Hr;
+  }
+
   // F16 .NUM clamp pair: NaN-pruning minnum/maxnum semantics with full
   // source/destination op_sel handling.
   if (Sop == CanonicalOp::V_MINMAX_NUM_F16 ||
@@ -2517,6 +2559,71 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Value *VB = Ctx.Regs.readReg32(Ctx.B, DstB);
     Ctx.writeReg32(DstA, VB);
     Ctx.writeReg32(DstB, VA);
+    Hr.Handled = true;
+    return Hr;
+  }
+  // v_movrels_b32 vdst, vsrc_base
+  // Reads VGPR[base(vsrc) + M0] -> vdst. M0 is the runtime index; the
+  // register number of vsrc is the static base. Model as extractelement
+  // from a vector of consecutive VGPRs; the gfx950 backend re-lowers this
+  // to the native v_movrels_b32 instruction.
+  if (Sop == CanonicalOp::V_MOVRELS_B32) {
+    ParsedReg BaseReg = Op.srcReg(0);
+    if (BaseReg.RegKind != ParsedReg::VGPR) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP1", "v_movrels_b32: base register must be VGPR");
+      return Hr;
+    }
+    int Base = BaseReg.BaseIdx;
+    unsigned Cap = static_cast<unsigned>(AllocaRegFile::KVGPRCap);
+    unsigned N = (Base >= 0 && static_cast<unsigned>(Base) < Cap)
+                     ? std::min(Cap - static_cast<unsigned>(Base), 64u)
+                     : 64u;
+    Value *M0Val = Ctx.B.CreateLoad(Ctx.I32Ty, Ctx.Regs.M0, "movrels_m0");
+    auto *VecTy = FixedVectorType::get(Ctx.I32Ty, N);
+    Value *Vec = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I < N; ++I)
+      Vec = Ctx.B.CreateInsertElement(
+          Vec, Ctx.Regs.loadVGPR32(Ctx.B, Base + static_cast<int>(I)),
+          I, "movrels_ins");
+    Value *Result = Ctx.B.CreateExtractElement(Vec, M0Val, "movrels_result");
+    Ctx.writeReg32(Op.dst(), Result);
+    Hr.Handled = true;
+    return Hr;
+  }
+  // v_movreld_b32 vdst_base, vsrc
+  // Writes vsrc -> VGPR[base(vdst) + M0]. M0 is the runtime index; the
+  // register number of vdst is the static base. Model as insertelement
+  // into a vector of consecutive VGPRs followed by scatter back.
+  // MCInst layout (HasDst=0, EmitDst=1): [vdst_base, src0]; Op.srcReg(0)
+  // gives the base reg, Op.src(1) gives the value to write.
+  if (Sop == CanonicalOp::V_MOVRELD_B32) {
+    ParsedReg BaseReg = Op.srcReg(0);
+    if (BaseReg.RegKind != ParsedReg::VGPR) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP1", "v_movreld_b32: base register must be VGPR");
+      return Hr;
+    }
+    int Base = BaseReg.BaseIdx;
+    unsigned Cap = static_cast<unsigned>(AllocaRegFile::KVGPRCap);
+    unsigned N = (Base >= 0 && static_cast<unsigned>(Base) < Cap)
+                     ? std::min(Cap - static_cast<unsigned>(Base), 64u)
+                     : 64u;
+    Value *M0Val = Ctx.B.CreateLoad(Ctx.I32Ty, Ctx.Regs.M0, "movreld_m0");
+    Value *WriteVal = Ctx.B.CreateZExtOrTrunc(Op.src(1), Ctx.I32Ty,
+                                              "movreld_val");
+    auto *VecTy = FixedVectorType::get(Ctx.I32Ty, N);
+    Value *Vec = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I < N; ++I)
+      Vec = Ctx.B.CreateInsertElement(
+          Vec, Ctx.Regs.loadVGPR32(Ctx.B, Base + static_cast<int>(I)),
+          I, "movreld_ins");
+    Value *NewVec = Ctx.B.CreateInsertElement(Vec, WriteVal, M0Val,
+                                              "movreld_new");
+    for (unsigned I = 0; I < N; ++I) {
+      Value *Elem = Ctx.B.CreateExtractElement(NewVec, I, "movreld_ext");
+      Ctx.Regs.storeVGPR32(Ctx.B, Base + static_cast<int>(I), Elem);
+    }
     Hr.Handled = true;
     return Hr;
   }
