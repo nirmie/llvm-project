@@ -366,7 +366,7 @@ enum class CanonicalOp : uint16_t {
   S_ADD_NC_U64, S_SUB_NC_U64,
 
   // -- VOP1 --
-  V_MOV_B32, V_MOV_B64, V_MOV_B16, V_NOP, V_NOT_B32, V_BFREV_B32,
+  V_MOV_B32, V_MOV_B64, V_MOV_B16, V_NOP, V_ILLEGAL, V_NOT_B32, V_BFREV_B32,
   V_SWAP_B32,
   // M0-relative indirect VGPR read/write (GFX6+, used for indexed array access)
   V_MOVRELS_B32, V_MOVRELD_B32,

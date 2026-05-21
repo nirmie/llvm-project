@@ -377,12 +377,18 @@ static const Entry kCanonTable[] = {
     E(V_MOV_B32_e64, V_MOV_B32),
     E(V_MOV_B64_e64, V_MOV_B64),
     E(V_MOV_B64_PSEUDO, V_MOV_B64),
+    // M0-relative indirect VGPR read/write (GFX6+). The MCInst layout is
+    // special (vdst is a source-base, not a true def); handled in handleVALU.
+    // Both e32 and e64 pseudos exist; canonicalize to e64 via getVOPe64.
+    E(V_MOVRELD_B32_e64, V_MOVRELD_B32),
+    E(V_MOVRELS_B32_e64, V_MOVRELS_B32),
     // V_MOV_B16 is gfx11+ true16 / fake16. The pseudo-alias pass strips the
     // `_t16_` and `_fake16_` infixes before lookup so only the bare e64 form
     // needs an entry here.
     E(V_MOV_B16_e64, V_MOV_B16),
     E(V_SWAP_B32, V_SWAP_B32),
     E(V_NOP_e64, V_NOP),
+    E(V_ILLEGAL, V_ILLEGAL),
     E(V_NOT_B32_e64, V_NOT_B32),
     E(V_BFREV_B32_e64, V_BFREV_B32),
     E(V_FFBH_U32_e64, V_FFBH_U32),

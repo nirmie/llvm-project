@@ -616,6 +616,17 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  // ---- v_illegal ----
+  // Hardware trap instruction (encoding 0x00000000). Lower to llvm.trap so the
+  // semantics (unconditional fault) are preserved in the translated binary.
+  if (Sop == CanonicalOp::V_ILLEGAL) {
+    Function *TrapFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::trap);
+    Ctx.B.CreateCall(TrapFn, {});
+    Ctx.B.CreateUnreachable();
+    Hr.Handled = true;
+    return Hr;
+  }
   // ---- v_mov_b32 ----
   if (Sop == CanonicalOp::V_MOV_B32) {
     Ctx.writeReg32(Op.dst(), Op.src(0));
@@ -2548,6 +2559,71 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Value *VB = Ctx.Regs.readReg32(Ctx.B, DstB);
     Ctx.writeReg32(DstA, VB);
     Ctx.writeReg32(DstB, VA);
+    Hr.Handled = true;
+    return Hr;
+  }
+  // v_movrels_b32 vdst, vsrc_base
+  // Reads VGPR[base(vsrc) + M0] -> vdst. M0 is the runtime index; the
+  // register number of vsrc is the static base. Model as extractelement
+  // from a vector of consecutive VGPRs; the gfx950 backend re-lowers this
+  // to the native v_movrels_b32 instruction.
+  if (Sop == CanonicalOp::V_MOVRELS_B32) {
+    ParsedReg BaseReg = Op.srcReg(0);
+    if (BaseReg.RegKind != ParsedReg::VGPR) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP1", "v_movrels_b32: base register must be VGPR");
+      return Hr;
+    }
+    int Base = BaseReg.BaseIdx;
+    unsigned Cap = static_cast<unsigned>(AllocaRegFile::KVGPRCap);
+    unsigned N = (Base >= 0 && static_cast<unsigned>(Base) < Cap)
+                     ? std::min(Cap - static_cast<unsigned>(Base), 64u)
+                     : 64u;
+    Value *M0Val = Ctx.B.CreateLoad(Ctx.I32Ty, Ctx.Regs.M0, "movrels_m0");
+    auto *VecTy = FixedVectorType::get(Ctx.I32Ty, N);
+    Value *Vec = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I < N; ++I)
+      Vec = Ctx.B.CreateInsertElement(
+          Vec, Ctx.Regs.loadVGPR32(Ctx.B, Base + static_cast<int>(I)),
+          I, "movrels_ins");
+    Value *Result = Ctx.B.CreateExtractElement(Vec, M0Val, "movrels_result");
+    Ctx.writeReg32(Op.dst(), Result);
+    Hr.Handled = true;
+    return Hr;
+  }
+  // v_movreld_b32 vdst_base, vsrc
+  // Writes vsrc -> VGPR[base(vdst) + M0]. M0 is the runtime index; the
+  // register number of vdst is the static base. Model as insertelement
+  // into a vector of consecutive VGPRs followed by scatter back.
+  // MCInst layout (HasDst=0, EmitDst=1): [vdst_base, src0]; Op.srcReg(0)
+  // gives the base reg, Op.src(1) gives the value to write.
+  if (Sop == CanonicalOp::V_MOVRELD_B32) {
+    ParsedReg BaseReg = Op.srcReg(0);
+    if (BaseReg.RegKind != ParsedReg::VGPR) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP1", "v_movreld_b32: base register must be VGPR");
+      return Hr;
+    }
+    int Base = BaseReg.BaseIdx;
+    unsigned Cap = static_cast<unsigned>(AllocaRegFile::KVGPRCap);
+    unsigned N = (Base >= 0 && static_cast<unsigned>(Base) < Cap)
+                     ? std::min(Cap - static_cast<unsigned>(Base), 64u)
+                     : 64u;
+    Value *M0Val = Ctx.B.CreateLoad(Ctx.I32Ty, Ctx.Regs.M0, "movreld_m0");
+    Value *WriteVal = Ctx.B.CreateZExtOrTrunc(Op.src(1), Ctx.I32Ty,
+                                              "movreld_val");
+    auto *VecTy = FixedVectorType::get(Ctx.I32Ty, N);
+    Value *Vec = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I < N; ++I)
+      Vec = Ctx.B.CreateInsertElement(
+          Vec, Ctx.Regs.loadVGPR32(Ctx.B, Base + static_cast<int>(I)),
+          I, "movreld_ins");
+    Value *NewVec = Ctx.B.CreateInsertElement(Vec, WriteVal, M0Val,
+                                              "movreld_new");
+    for (unsigned I = 0; I < N; ++I) {
+      Value *Elem = Ctx.B.CreateExtractElement(NewVec, I, "movreld_ext");
+      Ctx.Regs.storeVGPR32(Ctx.B, Base + static_cast<int>(I), Elem);
+    }
     Hr.Handled = true;
     return Hr;
   }
