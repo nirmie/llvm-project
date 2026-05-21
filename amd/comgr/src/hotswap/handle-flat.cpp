@@ -127,25 +127,30 @@ std::string formatScratchAbiDetail(RaiseContext &Ctx, const Twine &Why) {
 AllocaInst *getOrCreateSourcePrivateSegment(RaiseContext &Ctx,
                                             const DecodedInst &Di,
                                             HandlerResult &Hr) {
-  if (Ctx.SourcePrivateSegmentFixedSize == 0) {
-    std::string Detail = formatScratchAbiDetail(
-        Ctx,
-        "scratch_* requires source KD private-segment allocation, but "
-        "the parsed source KD reports zero private_segment_fixed_size; "
-        "refusing rather than inventing scratch backing.");
-    errs() << "transpiler: FLAT scratch refused: " << Di.Mnemonic
-           << " -- " << Detail << "\n";
-    Hr.Failure = RaiseFailure::unsupportedShape(
-        Di, "FLAT", Detail);
-    return nullptr;
-  }
-
   if (Ctx.ScratchPrivateSegmentAlloca)
     return Ctx.ScratchPrivateSegmentAlloca;
 
+  // When private_segment_fixed_size=0 the source KD didn't declare a fixed
+  // scratch allocation. On gfx11+ (including gfx1250) compilers may emit
+  // scratch instructions using SGPR-based addressing with a runtime wave
+  // offset supplied by the SPI, without recording a fixed size in the KD.
+  // Use a 64 KiB conservative frame so the target backend sees a real
+  // addrspace(5) alloca and emits a valid gfx950 KD with private segment
+  // support enabled. 65536 bytes (64 KiB) is the maximum supported per-wave
+  // scratch size on CDNA hardware.
+  uint32_t FrameSize = Ctx.SourcePrivateSegmentFixedSize;
+  if (FrameSize == 0) {
+    constexpr uint32_t kDefaultScratchBytes = 65536;
+    FrameSize = kDefaultScratchBytes;
+    errs() << "transpiler: FLAT scratch ABI: source KD private_segment_fixed_"
+              "size=0 but scratch instruction encountered ("
+           << Di.Mnemonic << "); using conservative " << kDefaultScratchBytes
+           << "-byte frame for '" << Ctx.Kernel->getName() << "'\n";
+  }
+
   BasicBlock &Entry = Ctx.Kernel->getEntryBlock();
   IRBuilder<> EntryB(&*Entry.getFirstInsertionPt());
-  auto *Size = ConstantInt::get(Ctx.I32Ty, Ctx.SourcePrivateSegmentFixedSize);
+  auto *Size = ConstantInt::get(Ctx.I32Ty, FrameSize);
   auto *Alloca =
       EntryB.CreateAlloca(Ctx.I8Ty, /*AddrSpace=*/5, Size,
                           "source_private_segment");
@@ -154,7 +159,7 @@ AllocaInst *getOrCreateSourcePrivateSegment(RaiseContext &Ctx,
   Ctx.UsesScratchPrivateSegment = true;
   LLVM_DEBUG(dbgs() << "transpiler: FLAT scratch ABI: allocated source "
                     << "private segment model for '" << Ctx.Kernel->getName()
-                    << "' size=" << Ctx.SourcePrivateSegmentFixedSize
+                    << "' size=" << FrameSize
                     << " compute_pgm_rsrc2=0x"
                     << utohexstr(Ctx.SourceComputePgmRsrc2)
                     << " kernel_code_properties=0x"
