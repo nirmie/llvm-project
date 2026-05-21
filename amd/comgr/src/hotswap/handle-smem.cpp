@@ -160,8 +160,11 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
           Value *Ep = (D == 0) ? Gep
                                : Ctx.B.CreateInBoundsGEP(
                                      Ctx.I8Ty, Gep, Ctx.B.getInt64(D * 4));
-          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D,
-                               Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_load"));
+          Value *Loaded = Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_load");
+          if (D == 0 && Dest.RegKind != ParsedReg::SGPR)
+            Ctx.Regs.writeReg32(Ctx.B, Dest, Loaded);
+          else
+            Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, Loaded);
         }
         Hr.Handled = true;
         return Hr;
@@ -183,7 +186,10 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
                   : Dw.FailureDetail);
           return Hr;
         }
-        Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, Dw.Value);
+        if (D == 0 && Dest.RegKind != ParsedReg::SGPR)
+          Ctx.Regs.writeReg32(Ctx.B, Dest, Dw.Value);
+        else
+          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, Dw.Value);
       }
       Hr.Handled = true;
       return Hr;
@@ -227,8 +233,17 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
         Value *Ep = (D == 0) ? Ptr
                              : Ctx.B.CreateInBoundsGEP(Ctx.I8Ty, Ptr,
                                                        Ctx.B.getInt64(D * 4));
-        Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D,
-                             Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "smem_load"));
+        Value *Loaded = Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "smem_load");
+        // Non-SGPR destinations (e.g. vcc_hi written by s_load_b32) have
+        // ParsedReg::BaseIdx == -1 (the default), which would cause
+        // storeSGPR32 to access Sgpr[-1] and crash. Route D==0 non-SGPR
+        // writes through writeReg32, which handles VCC, EXEC, M0, TTMP, etc.
+        // Multi-dword SMEM to a non-SGPR destination is not architecturally
+        // valid (VCC/EXEC are single dwords), so D>0 always targets SGPR.
+        if (D == 0 && Dest.RegKind != ParsedReg::SGPR)
+          Ctx.Regs.writeReg32(Ctx.B, Dest, Loaded);
+        else
+          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, Loaded);
       }
     }
     Hr.Handled = true;
@@ -296,7 +311,7 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
                 RaiseFailure::unsupportedShape(Di, "SMEM", Hidden.FailureDetail);
             return Hr;
           }
-          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx, Hidden.Value);
+          Ctx.Regs.writeReg32(Ctx.B, Dest, Hidden.Value);
           Hr.Handled = true;
           return Hr;
         }
@@ -321,7 +336,7 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
     Value *Ext = IsSigned
                      ? Ctx.B.CreateSExt(Narrow, Ctx.I32Ty, ExtName)
                      : Ctx.B.CreateZExt(Narrow, Ctx.I32Ty, ExtName);
-    Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx, Ext);
+    Ctx.Regs.writeReg32(Ctx.B, Dest, Ext);
     Hr.Handled = true;
     return Hr;
   }
