@@ -200,19 +200,26 @@ ParsedReg RaiseContext::parseReg(MCRegister Reg, int MciOpIdx) const {
     Pr.RegKind = ParsedReg::SRC_SCC;
     Pr.Width = 1;
     return Pr;
-  // Aperture / runtime-defined source registers: SRC_SHARED_BASE /
-  // _LIMIT, SRC_PRIVATE_BASE / _LIMIT, SRC_FLAT_SCRATCH_BASE_LO /
-  // _HI, SRC_POPS_EXITING_WAVE_ID. Their values are set per-queue by
-  // the firmware and have no compile-time-knowable IR encoding, so
-  // we cannot lower them principledly. Classify as OTHER so parseReg
-  // does not crash; readOp32 / readOp64 will route OTHER through
-  // `recordReadFailure(unsupportedShape)` and the per-instruction
-  // dispatch loop in raiser.cpp will surface it as a clean
-  // unsupported-shape failure rather than a SIGABRT.
+  // Aperture registers whose value on gfx950 is always 0: gfx1250 uses
+  // flat-LDS / flat-scratch addressing with non-zero base addresses held in
+  // SRC_SHARED_BASE / _LIMIT and SRC_PRIVATE_BASE / _LIMIT; on gfx950
+  // these address spaces do not exist and the base is effectively 0.
+  // Classify as APERTURE so readOp32 / readOp64 can materialise a zero
+  // constant, allowing `s_mov_b64 dst, src_shared_base` to lower cleanly.
+  // The 64-bit parent register (e.g. SRC_SHARED_BASE) resolves here via
+  // `sub0(SRC_SHARED_BASE) = SRC_SHARED_BASE_LO` (see parseReg preamble).
   case AMDGPU::SRC_SHARED_BASE_LO:
   case AMDGPU::SRC_SHARED_LIMIT_LO:
   case AMDGPU::SRC_PRIVATE_BASE_LO:
   case AMDGPU::SRC_PRIVATE_LIMIT_LO:
+    Pr.RegKind = ParsedReg::APERTURE;
+    Pr.Width = Width;
+    return Pr;
+  // Remaining runtime-defined registers that cannot be trivially zeroed.
+  // Classify as OTHER so readOp32 / readOp64 route through
+  // `recordReadFailure(unsupportedShape)` and the per-instruction
+  // dispatch loop in raiser.cpp surfaces a clean failure rather than a
+  // SIGABRT.
   case AMDGPU::SRC_POPS_EXITING_WAVE_ID:
   case AMDGPU::SRC_FLAT_SCRATCH_BASE_LO:
   case AMDGPU::SRC_FLAT_SCRATCH_BASE_HI:
@@ -326,9 +333,17 @@ Value *RaiseContext::readOp32(const DecodedInst &Di, unsigned OpIdx) {
       return ConstantInt::get(I32Ty, 0);
     if (Pr.RegKind == ParsedReg::MODE)
       return ConstantInt::get(I32Ty, 0);
+    // APERTURE: gfx1250 aperture-base registers (SRC_SHARED_BASE / _LIMIT,
+    // SRC_PRIVATE_BASE / _LIMIT) whose value is 0 on gfx950 because
+    // flat-LDS / flat-scratch addressing does not exist there.  Reading them
+    // as i32 returns 0 (hardware note: the upper 32 bits hold the real value
+    // in the 64-bit form, but both are 0 on gfx950 where these registers
+    // don't exist in a meaningful sense).
+    if (Pr.RegKind == ParsedReg::APERTURE)
+      return ConstantInt::get(I32Ty, 0);
     // OTHER is the parser's "I recognised the register but cannot
     // model it" channel, used today for runtime-defined aperture
-    // registers (SRC_SHARED_BASE / SRC_FLAT_SCRATCH_BASE_LO etc.,
+    // registers (SRC_FLAT_SCRATCH_BASE_LO etc.,
     // see parseReg's switch). Surface a clean unsupported-shape
     // failure on the dispatch loop and return undef so we don't
     // crash mid-handler -- the next instruction-boundary check in
@@ -397,6 +412,10 @@ Value *RaiseContext::readOp64(const DecodedInst &Di, unsigned OpIdx) {
       Value *Zero = ConstantInt::get(Exec->getType(), 0);
       return B.CreateZExt(B.CreateICmpEQ(Exec, Zero, "execz"), I64Ty);
     }
+    // APERTURE: zero on gfx950 for the same reason as readOp32.  The 64-bit
+    // form (s_mov_b64 dst, src_shared_base) writes i64 0 to the SGPR pair.
+    if (Pr.RegKind == ParsedReg::APERTURE)
+      return ConstantInt::get(I64Ty, 0);
     if (Pr.RegKind == ParsedReg::OTHER) {
       recordReadFailure(RaiseFailure::unsupportedShape(
           Di, "operand-read",
