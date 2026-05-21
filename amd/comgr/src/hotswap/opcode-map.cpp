@@ -1007,6 +1007,14 @@ static const Entry kCanonTable[] = {
     E(DS_WRITE_B16_D16_HI, DS_WRITE_B16_D16_HI),
     E(DS_WRITE_B8_D16_HI, DS_WRITE_B8_D16_HI),
     E(DS_BPERMUTE_B32, DS_BPERMUTE_B32),
+    // GFX11+ LDS compare-and-store atomic: ds_cmpstore_b32 (no-return)
+    // and ds_cmpstore_rtn_b32 (return). Unlike DS_ADD_RTN_U32 (where _RTN
+    // is a suffix and the alias rule strips it), DS_CMPSTORE_RTN_B32 has
+    // _RTN as an infix before _B32, so buildPseudoAliasMap's suffix rule
+    // does not fire. Both variants share the same lowering; the raiser
+    // derives "publishes old value" from Di.NumDefs rather than the opcode.
+    E(DS_CMPSTORE_B32, DS_CMPSTORE_B32),
+    E(DS_CMPSTORE_RTN_B32, DS_CMPSTORE_B32),
     // ds_swizzle_b32 -- wave-width-specific cross-lane shuffle. The
     // handler refuses with `unsupportedShape` until the P6 rewrite
     // lands (see the ds_swizzle_b32 row of hotswap/docs/wave-size-
