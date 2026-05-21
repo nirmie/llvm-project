@@ -717,6 +717,42 @@ HandlerResult handleDS(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
 
+  if (Sop == CanonicalOp::DS_CMPSTORE_B32) {
+    // GFX11+ LDS compare-and-store (atomic CAS). Operand layout per
+    // DSInstructions.td DS_1A2D_RET / DS_1A2D_NORET:
+    //   src(0) = addr (i32 LDS byte address)
+    //   src(1) = data0 = new value (swap)
+    //   src(2) = data1 = compare value
+    //   imm    = offset (byte, via the generic DS imm-scan below)
+    // Note: GFX11+ swapped data0/data1 vs pre-GFX11 DS_CMPST_* where
+    // data0=cmp, data1=new. The _RTN form (Di.NumDefs > 0) writes back
+    // the pre-modification value of the LDS word.
+    Value *Addr = Ctx.B.CreateZExt(Op.src(0), Ctx.I64Ty, "ds_cas_addr");
+    for (unsigned K = 1; K < Op.nSrcs(); K++) {
+      if (Di.isImm(Op.srcIdx(K))) {
+        int64_t Imm = Di.getImm(Op.srcIdx(K));
+        if (Imm != 0)
+          Addr = Ctx.B.CreateAdd(Addr, ConstantInt::get(Ctx.I64Ty, Imm),
+                                 "ds_cas_off");
+        break;
+      }
+    }
+    Value *Ptr = Ctx.B.CreateIntToPtr(Addr, PointerType::get(Ctx.C, 3));
+    Value *NewVal = Op.src(1);
+    Value *CmpVal = Op.src(2);
+    Ctx.emitUnderExec([&] {
+      auto *Cas = Ctx.B.CreateAtomicCmpXchg(
+          Ptr, CmpVal, NewVal, MaybeAlign(),
+          AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
+      if (Di.NumDefs > 0)
+        Ctx.writeReg32(Op.dst(),
+                       Ctx.B.CreateExtractValue(Cas, 0, "ds_cas_old"));
+    });
+    Hr.Handled = true;
+    return Hr;
+  }
+
   if (Sop == CanonicalOp::DS_BPERMUTE_B32) {
     // Backwards permute: per-lane GATHER. Each lane reads the `src1`
     // value from a *source* lane whose index is `src0 >> 2` (the
