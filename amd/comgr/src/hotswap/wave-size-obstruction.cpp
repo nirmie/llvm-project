@@ -285,6 +285,18 @@ public:
     return false;
   }
 
+  // Check whether source K (0-based SrcMap index) is tainted.  Returns false
+  // if K is out of range or the operand is not a register.
+  bool sourceTainted(const DecodedInst &Di, unsigned K) const {
+    if (K >= Di.NumSrcs)
+      return false;
+    unsigned OpIdx = Di.SrcMap[K];
+    if (OpIdx >= Di.Inst.getNumOperands())
+      return false;
+    const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+    return Op.isReg() && isRegTainted(Op.getReg());
+  }
+
   bool execTainted() const {
     return isRegTainted(AMDGPU::EXEC_LO) || isRegTainted(AMDGPU::EXEC_HI) ||
            isRegTainted(AMDGPU::EXEC);
@@ -430,6 +442,22 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
     if (Sop == CanonicalOp::V_MBCNT_LO_U32_B32 ||
         Sop == CanonicalOp::V_MBCNT_HI_U32_B32) {
       ExplicitDefsTainted = true;
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
+    } else if (Sop == CanonicalOp::DS_BPERMUTE_B32) {
+      // ds_bpermute_b32 vDST, ADDR, DATA0: the destination carries the DATA0
+      // value gathered from the source lane selected by ADDR.  ADDR is often
+      // lane-ID-derived (v_mbcnt_* scaled and biased), but that only
+      // determines *which* lane's DATA0 is returned -- not the returned value
+      // itself.  Taint propagation from ADDR into vDST would cause every
+      // downstream consumer of a shuffle result to appear lane-ID-dependent,
+      // which in turn flags subsequent v_cmpx instructions as CmpxFromLaneId
+      // even when they compare shuffled data values (not the lane index).
+      // DS_BPERMUTE_B32 is already tagged as DsBpermuteGather (P1 implemented)
+      // by buildObstructionReport's main walk; here we only need to propagate
+      // taint from DATA0 (SrcMap[1]), not from ADDR (SrcMap[0]).
+      ExplicitDefsTainted = Tracker.sourceTainted(Di, 1);
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
