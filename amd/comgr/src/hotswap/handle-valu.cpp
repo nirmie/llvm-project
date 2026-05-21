@@ -616,6 +616,17 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  // ---- v_illegal ----
+  // Hardware trap instruction (encoding 0x00000000). Lower to llvm.trap so the
+  // semantics (unconditional fault) are preserved in the translated binary.
+  if (Sop == CanonicalOp::V_ILLEGAL) {
+    Function *TrapFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::trap);
+    Ctx.B.CreateCall(TrapFn, {});
+    Ctx.B.CreateUnreachable();
+    Hr.Handled = true;
+    return Hr;
+  }
   // ---- v_mov_b32 ----
   if (Sop == CanonicalOp::V_MOV_B32) {
     Ctx.writeReg32(Op.dst(), Op.src(0));
