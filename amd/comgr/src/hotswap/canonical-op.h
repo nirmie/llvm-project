@@ -145,6 +145,16 @@ enum class CanonicalOp : uint16_t {
   S_AND_SAVEEXEC_B32, S_OR_SAVEEXEC_B32, S_XOR_SAVEEXEC_B32,
   S_ANDN2_SAVEEXEC_B32, S_ORN2_SAVEEXEC_B32,
   S_GETPC_B64,
+  // SOP1 direct PC-relative branch (gfx1250 / gfx13 only, opcode 0x04b).
+  // `s_add_pc_i64 imm64` — no destination register (SOP1_1_REGIMM64 class,
+  // `has_sdst = 0`). Hardware: PC_next = (PC_after_instruction) + imm64.
+  // The corpus always emits this as a literal immediate long-branch
+  // trampoline (LLVM BranchRelaxation): `s_cbranch_<cond> 1; s_add_pc_i64 imm`.
+  // The 12-byte instruction's target is fully static:
+  //   target = instruction_offset + 12 + sign_extend(imm64)
+  // `collectBranchTargets` in decode.cpp special-cases this CanonicalOp.
+  // Lowered to `br label %BB_<target_offset>`. No setpc_analysis involvement.
+  S_ADD_PC_I64,
   // SOP1 indirect set-PC. gfx1250 asm rename for `S_SETPC_B64`
   // (SOPInstructions.td:323 declares `isBranch + isIndirectBranch`,
   // line 2208 renames the asm string to `s_set_pc_i64`). The source
@@ -358,6 +368,8 @@ enum class CanonicalOp : uint16_t {
   // -- VOP1 --
   V_MOV_B32, V_MOV_B64, V_MOV_B16, V_NOP, V_NOT_B32, V_BFREV_B32,
   V_SWAP_B32,
+  // M0-relative indirect VGPR read/write (GFX6+, used for indexed array access)
+  V_MOVRELS_B32, V_MOVRELD_B32,
   V_CVT_F32_I32, V_CVT_F32_U32, V_CVT_I32_F32, V_CVT_U32_F32,
   V_CVT_U32_U16,
   V_CVT_F16_F32, V_CVT_F32_F16, V_CVT_F32_BF16,
@@ -583,6 +595,9 @@ enum class CanonicalOp : uint16_t {
   // VOP3Instructions.td:453,2312,2601 (any_fma SDNode).
   V_FMA_F16,
   V_MAX_F16, V_MIN_F16,
+  // F16 ternary `.NUM` min3/max3: NaN-pruning 3-source reduction. Honor
+  // source/dst op_sel and preserve the unselected destination half.
+  V_MIN3_NUM_F16, V_MAX3_NUM_F16,
   // F16 ternary clamp `.NUM` pair. Like the IEEE f16 forms below, these
   // preserve the unselected destination half and honor source/dst op_sel.
   V_MINMAX_NUM_F16, V_MAXMIN_NUM_F16,
@@ -949,6 +964,12 @@ enum class CanonicalOp : uint16_t {
   // a separate set with their own tied-source dest_in handling.
   DS_WRITE_B16_D16_HI, DS_WRITE_B8_D16_HI,
   DS_BPERMUTE_B32,
+  // GFX11+ LDS compare-and-store atomic. DS_CMPSTORE_B32 is the
+  // no-return form; DS_CMPSTORE_RTN_B32 aliases to it via the _RTN
+  // alias rule in opcode-map.cpp. On GFX11+ the operand order is
+  // (addr, data0=new, data1=cmp, offset) — swapped vs pre-GFX11
+  // DS_CMPST_*. The handler differentiates RTN/no-RTN via NumDefs.
+  DS_CMPSTORE_B32,
   // Class 2 DsSwizzle (hotswap/docs/wave-size-translation.md §6).
   // Wave-width-specific cross-lane shuffle. The handler refuses with
   // `unsupportedShape` until the P6 rewrite (lift through

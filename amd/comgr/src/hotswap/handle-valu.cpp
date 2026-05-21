@@ -2334,6 +2334,37 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
 
+  // F16 .NUM ternary min3/max3: NaN-pruning 3-source reduction with full
+  // source/destination op_sel handling.  Lowered as two chained minnum/maxnum
+  // calls on f16, identical in structure to the f32 V_MIN3_F32 handler except
+  // that src and dst halves are resolved via readOpSelF16 / writeOpSelF16.
+  if (Sop == CanonicalOp::V_MIN3_NUM_F16 ||
+      Sop == CanonicalOp::V_MAX3_NUM_F16) {
+    const bool IsMin = Sop == CanonicalOp::V_MIN3_NUM_F16;
+    StringRef OpName = IsMin ? "v_min3_num_f16" : "v_max3_num_f16";
+    bool DstHigh = false;
+    if (!requireDefaultVOP3FpValuOutputMods(Di, Hr, OpName) ||
+        !readVOP3F16DstHigh(Di, Hr, OpName, DstHigh))
+      return Hr;
+
+    SmallVector<Value *, 3> Srcs;
+    for (unsigned I = 0; I < 3; ++I) {
+      Value *Src = readOpSelF16(Ctx, Di, Op, Hr, I, OpName);
+      if (!Src)
+        return Hr;
+      Srcs.push_back(Src);
+    }
+
+    Intrinsic::ID IntrId = IsMin ? Intrinsic::minnum : Intrinsic::maxnum;
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, IntrId, {Ctx.F16Ty});
+    Value *R01 = Ctx.B.CreateCall(Fn, {Srcs[0], Srcs[1]},
+                                  Twine(OpName) + "_inner");
+    Value *R = Ctx.B.CreateCall(Fn, {R01, Srcs[2]}, OpName);
+    writeOpSelF16(Ctx, Op, R, DstHigh);
+    Hr.Handled = true;
+    return Hr;
+  }
+
   // F16 .NUM clamp pair: NaN-pruning minnum/maxnum semantics with full
   // source/destination op_sel handling.
   if (Sop == CanonicalOp::V_MINMAX_NUM_F16 ||
