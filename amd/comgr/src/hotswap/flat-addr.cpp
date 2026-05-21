@@ -68,12 +68,22 @@ FlatAddr decodeGlobalLoadAddr(RaiseContext &Ctx, const DecodedInst &Di,
   Value *Addr = nullptr;
 
   // SADDR form: saddr(SGPR64), vaddr(VGPR32), ... -- LLVM MC places the
-  // SGPR first in the decoded operand order.
-  if (Op.nSrcs() >= 2 && Op.isSrcReg(0) && Op.isSrcReg(1) &&
-      Op.srcReg(0).RegKind == ParsedReg::SGPR &&
-      Op.srcReg(1).RegKind == ParsedReg::VGPR) {
+  // SGPR first in the decoded operand order.  VCC is a valid SGPR64 source
+  // in this position (the compiler uses it as a general-purpose SGPR pair
+  // for pointer arithmetic, e.g. `s_mul_u64 vcc, ...; global_load_b32 vd,
+  // va, vcc`). When VCC appears as saddr, read its raw 64-bit scalar value
+  // from the VccRaw64 shadow alloca (written by writeReg64(VCC)) rather than
+  // routing through readVCCAsWaveMask, which produces a ballot-derived
+  // wave-mask rather than the original SGPR64 pointer value.
+  bool SaddrIsVcc = (Op.nSrcs() >= 2 && Op.isSrcReg(0) && Op.isSrcReg(1) &&
+                     Op.srcReg(0).RegKind == ParsedReg::VCC &&
+                     Op.srcReg(1).RegKind == ParsedReg::VGPR);
+  if ((Op.nSrcs() >= 2 && Op.isSrcReg(0) && Op.isSrcReg(1) &&
+       Op.srcReg(0).RegKind == ParsedReg::SGPR &&
+       Op.srcReg(1).RegKind == ParsedReg::VGPR) || SaddrIsVcc) {
     Out.HasSaddr = true;
-    Value *Saddr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(0));
+    Value *Saddr = SaddrIsVcc ? Ctx.Regs.readVccRaw64(Ctx.B)
+                              : Ctx.Regs.readReg64(Ctx.B, Op.srcReg(0));
     Value *Vaddr = Ctx.B.CreateSExt(Ctx.Regs.readReg32(Ctx.B, Op.srcReg(1)),
                                     Ctx.I64Ty, "voff_sext");
     if (Di.HasScaleOffset)
@@ -89,10 +99,10 @@ FlatAddr decodeGlobalLoadAddr(RaiseContext &Ctx, const DecodedInst &Di,
     // let readReg64 enforce the 64-bit shape.
     Addr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(0));
   } else {
-    // Unrecognized address shape (e.g. VCC as saddr). Record a clean
-    // UnsupportedShape failure rather than crashing -- the dispatch loop
-    // checks PendingFailure after each handler and aborts the kernel raise.
-    // Return Out with Ptr==nullptr; callers must guard against this.
+    // Unrecognized address shape. Record a clean UnsupportedShape failure
+    // rather than crashing -- the dispatch loop checks PendingFailure after
+    // each handler and aborts the kernel raise.  Return Out with
+    // Ptr==nullptr; callers must guard against this.
     std::string Msg;
     raw_string_ostream Os(Msg);
     Os << "unrecognized " << DiagLabel
@@ -113,13 +123,20 @@ FlatAddr decodeGlobalStoreAddr(RaiseContext &Ctx, const DecodedInst &Di,
   FlatAddr Out;
   Value *Addr = nullptr;
 
-  // SADDR form: vaddr(VGPR32), vdata(VGPR*), saddr(SGPR64), ...
-  if (Op.nSrcs() >= 3 && Op.isSrcReg(0) && Op.isSrcReg(1) && Op.isSrcReg(2) &&
-      Op.srcReg(0).RegKind == ParsedReg::VGPR &&
-      Op.srcReg(1).RegKind == ParsedReg::VGPR &&
-      Op.srcReg(2).RegKind == ParsedReg::SGPR) {
+  // SADDR form: vaddr(VGPR32), vdata(VGPR*), saddr(SGPR64|VCC), ...
+  // VCC may appear as saddr (same rationale as decodeGlobalLoadAddr above).
+  bool StoreSaddrIsVcc = (Op.nSrcs() >= 3 && Op.isSrcReg(0) && Op.isSrcReg(1) &&
+                          Op.isSrcReg(2) &&
+                          Op.srcReg(0).RegKind == ParsedReg::VGPR &&
+                          Op.srcReg(1).RegKind == ParsedReg::VGPR &&
+                          Op.srcReg(2).RegKind == ParsedReg::VCC);
+  if ((Op.nSrcs() >= 3 && Op.isSrcReg(0) && Op.isSrcReg(1) && Op.isSrcReg(2) &&
+       Op.srcReg(0).RegKind == ParsedReg::VGPR &&
+       Op.srcReg(1).RegKind == ParsedReg::VGPR &&
+       Op.srcReg(2).RegKind == ParsedReg::SGPR) || StoreSaddrIsVcc) {
     Out.HasSaddr = true;
-    Value *Saddr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(2));
+    Value *Saddr = StoreSaddrIsVcc ? Ctx.Regs.readVccRaw64(Ctx.B)
+                                   : Ctx.Regs.readReg64(Ctx.B, Op.srcReg(2));
     Value *Vaddr = Ctx.B.CreateSExt(Ctx.Regs.readReg32(Ctx.B, Op.srcReg(0)),
                                     Ctx.I64Ty, "st_voff_sext");
     if (Di.HasScaleOffset)

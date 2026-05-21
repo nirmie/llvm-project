@@ -69,6 +69,12 @@ struct AllocaRegFile {
   llvm::SmallVector<llvm::AllocaInst *> Agpr;
   llvm::SmallVector<llvm::AllocaInst *> Ttmp;
   llvm::AllocaInst *Vcc = nullptr;
+  // Raw 64-bit backing store for VCC when used as a plain SGPR pair (e.g.
+  // `s_mul_u64 vcc, ...` followed by `global_load_b32 vdst, vaddr, vcc`).
+  // Written in parallel with the i1 `Vcc` alloca whenever writeReg64(VCC)
+  // fires.  Read by readVccRaw64() in decodeGlobalLoadAddr when VCC appears
+  // as the SADDR operand of a global load.
+  llvm::AllocaInst *VccRaw64 = nullptr;
   llvm::AllocaInst *Scc = nullptr;
   llvm::AllocaInst *Exec = nullptr;
   llvm::AllocaInst *M0 = nullptr;
@@ -151,6 +157,10 @@ struct AllocaRegFile {
 
   void storeVCC(llvm::IRBuilder<> &B, llvm::Value *V);
   llvm::Value *loadVCC(llvm::IRBuilder<> &B);
+  // Read the raw 64-bit SGPR value stored in VCC (via writeReg64(VCC)).
+  // Returns nullptr if VccRaw64 was never written (i.e. VCC was only ever
+  // written as a condition code via writeReg32/writeRegExecWidth).
+  llvm::Value *readVccRaw64(llvm::IRBuilder<> &B);
   void storeSCC(llvm::IRBuilder<> &B, llvm::Value *V);
   llvm::Value *loadSCC(llvm::IRBuilder<> &B);
   llvm::Value *loadExec(llvm::IRBuilder<> &B);
