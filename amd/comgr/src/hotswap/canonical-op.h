@@ -62,6 +62,15 @@ enum class CanonicalOp : uint16_t {
   // LLVM `amdgcn.s.barrier` call.
   S_BARRIER, S_BARRIER_WAIT, S_BARRIER_SIGNAL,
 
+  // GFX12+ standalone cache invalidate/writeback ops.
+  // `global_inv` invalidates a cache level; `global_wb` writes it back.
+  GLOBAL_INV,
+  // GFX12+ standalone cache writeback. `global_wb` writes back a cache level.
+  // Lowered to `llvm.amdgcn.s.dcache.wb` on GFX940+ targets (gfx940/942/950)
+  // where `buffer_wbinvl1` is removed, and to `llvm.amdgcn.buffer.wbinvl1`
+  // on earlier GFX9 targets.  Both are conservative-correct substitutes.
+  GLOBAL_WB,
+
   // -- SMEM --
   S_LOAD_B32, S_LOAD_B64, S_LOAD_B96, S_LOAD_B128, S_LOAD_B256, S_LOAD_B512,
   // gfx12+ scalar narrow loads: fetch 1 or 2 bytes from a uniform address and
@@ -85,9 +94,11 @@ enum class CanonicalOp : uint16_t {
   S_CMP_EQ_F32, S_CMP_LG_F32, S_CMP_GT_F32, S_CMP_GE_F32,
   S_CMP_LT_F32, S_CMP_LE_F32, S_CMP_NEQ_F32,
   S_CMP_NGT_F32, S_CMP_NGE_F32, S_CMP_NLT_F32, S_CMP_NLE_F32, S_CMP_NLG_F32,
+  S_CMP_O_F32, S_CMP_U_F32,
   S_CMP_EQ_F16, S_CMP_LG_F16, S_CMP_GT_F16, S_CMP_GE_F16,
   S_CMP_LT_F16, S_CMP_LE_F16, S_CMP_NEQ_F16,
   S_CMP_NGT_F16, S_CMP_NGE_F16, S_CMP_NLT_F16, S_CMP_NLE_F16, S_CMP_NLG_F16,
+  S_CMP_O_F16, S_CMP_U_F16,
 
   // -- SOPK --
   S_MOVK_I32, S_ADDK_I32, S_MULK_I32,
@@ -337,7 +348,7 @@ enum class CanonicalOp : uint16_t {
   // family that maps to LLVM's `maximum` intrinsic, distinct from the
   // `S_MAX_NUM_F32` NUM family.
   S_MAXIMUM_F32,
-  S_BFE_U32, S_BFE_I32, S_BFM_B32, S_BFM_B64,
+  S_BFE_U32, S_BFE_I32, S_BFE_I64, S_BFM_B32, S_BFM_B64,
   S_CSELECT_B32, S_CSELECT_B64,
   S_MIN_I32, S_MIN_U32, S_MAX_I32, S_MAX_U32,
   S_PACK_LL_B32_B16, S_PACK_LH_B32_B16,
@@ -352,7 +363,7 @@ enum class CanonicalOp : uint16_t {
   V_CVT_F16_F32, V_CVT_F32_F16, V_CVT_F32_BF16,
   V_CVT_F32_UBYTE0, V_CVT_F32_UBYTE1, V_CVT_F32_UBYTE2, V_CVT_F32_UBYTE3,
   V_CVT_F32_F64, V_CVT_F64_F32,
-  V_CVT_F64_U32, V_CVT_F64_I32, V_CVT_U32_F64,
+  V_CVT_F64_U32, V_CVT_F64_I32, V_CVT_U32_F64, V_CVT_I32_F64,
   V_RCP_IFLAG_F32, V_RCP_F32, V_RSQ_F32, V_SQRT_F32, V_EXP_F32, V_LOG_F32,
   // gfx12+ VOP3 pseudo-scalar f32 transcendentals: scalar input and scalar
   // output variants of the corresponding VOP1 special-function instructions.
@@ -360,8 +371,7 @@ enum class CanonicalOp : uint16_t {
   // non-default output modifiers are refused until modeled exactly.
   V_S_EXP_F32, V_S_LOG_F32, V_S_RCP_F32, V_S_RSQ_F32, V_S_SQRT_F32,
   V_LDEXP_F32,
-  V_FLOOR_F32, V_CEIL_F32, V_TRUNC_F32, V_RNDNE_F32, V_FRACT_F32,
-  V_CEIL_F64,
+  V_FLOOR_F32, V_FLOOR_F64, V_CEIL_F32, V_CEIL_F64, V_TRUNC_F32, V_TRUNC_F64, V_RNDNE_F32, V_FRACT_F32,
   V_READFIRSTLANE_B32,
   // VOP1 packed FP8/BF8 -> 2x F32 expansion (VOP1Instructions.td:652-
   // 653, profile VOPProfileCVT_PK_F32_F8). Reads 16 bits of the i32
@@ -584,7 +594,7 @@ enum class CanonicalOp : uint16_t {
   // half.
   V_MAXIMUM3_F16, V_MINIMUM3_F16,
   V_MAXIMUMMINIMUM_F16, V_MINIMUMMAXIMUM_F16,
-  V_LDEXP_F16, V_FLOOR_F16, V_CVT_F16_U16, V_CVT_U16_F16,
+  V_LDEXP_F16, V_FLOOR_F16, V_CVT_F16_U16, V_CVT_U16_F16, V_CVT_F16_I16, V_CVT_I16_F16,
   V_ASHRREV_I16, V_LSHRREV_B16, V_LSHLREV_B16,
   V_MAX_U16, V_MIN_U16, V_MAX_I16, V_MIN_I16,
   // 16-bit integer arith (gfx8+, VOP2Instructions.td). Plain i16
@@ -630,6 +640,20 @@ enum class CanonicalOp : uint16_t {
   // sequence on gfx942 unless `arcp`/fast-math flags are set, which
   // would be a silent semantics change versus the source op.
   V_RCP_F64,
+  // v_rsq_f64: F64 reciprocal square root approximation (~26-bit).
+  // Lifted to llvm.amdgcn.rsq so the backend isels back to v_rsq_f64.
+  V_RSQ_F64,
+  // v_sqrt_f64: F64 square root. Lifted to llvm.sqrt.f64.
+  V_SQRT_F64,
+  // v_frexp_exp_i32_f64: extract biased exponent from F64 (result I32).
+  // v_frexp_mant_f64:    extract mantissa fraction from F64 (result F64).
+  // Both lifted to llvm.amdgcn.frexp.exp / llvm.amdgcn.frexp.mant.
+  V_FREXP_EXP_I32_F64, V_FREXP_MANT_F64,
+  // v_div_scale_f64 / v_div_fmas_f64 / v_div_fixup_f64: the three-
+  // instruction IEEE-compliant F64 divide sequence. Lifted to the
+  // corresponding llvm.amdgcn.* intrinsics so the backend emits the
+  // same hardware ops.
+  V_DIV_SCALE_F64, V_DIV_FMAS_F64, V_DIV_FIXUP_F64,
   // VOP3 FP64 ldexp: F64 src0 * 2^(I32 src1). Lifted to the generic
   // `llvm.ldexp.f64.i32` intrinsic; the AMDGPU backend lowers this back
   // to v_ldexp_f64 on targets that have the op natively. No e32 form
@@ -691,6 +715,28 @@ enum class CanonicalOp : uint16_t {
   V_PK_ADD_BF16, V_PK_MUL_BF16,
   V_PK_MIN_NUM_BF16, V_PK_MAX_NUM_BF16,
   V_PK_FMA_BF16,
+  // VOP3P packed f16 maximumNumber / minimumNumber (gfx9+, available on
+  // gfx942 / gfx1250 -- TableGen pseudos `V_PK_MAX_F16` /
+  // `V_PK_MIN_F16` mapped to `fmaxnum_like` / `fminnum_like`;
+  // gfx12/gfx1250 reals are spelled `v_pk_max_num_f16` /
+  // `v_pk_min_num_f16`, VOP3PInstructions.td:140-141 + :2591-2592).
+  // Lifted to `llvm.maxnum.v2f16` / `llvm.minnum.v2f16`; on gfx942 the
+  // backend reselects `v_pk_{max,min}_f16` from these intrinsic calls
+  // exactly (gfx942 keeps both real and pseudo names) and re-emits the
+  // packed form. Operand modifiers (`neg_lo / neg_hi / op_sel / op_sel_hi`)
+  // and the clamp bit follow the same packed-`<2 x half>` contract as
+  // V_PK_ADD_F16 / V_PK_MUL_F16; the handler reuses the same shared
+  // packed-source reader for symmetry.
+  V_PK_MAX_NUM_F16, V_PK_MIN_NUM_F16,
+  // VOP3P packed f16 ternary `min3` / `max3` (gfx1250-only:
+  // VOP3PInstructions.td:182-183 + :2612-2613). gfx950 has neither
+  // `v_pk_min3_num_f16` nor `v_pk_max3_num_f16` natively (the feature
+  // `HasMin3Max3PKF16` is gated to gfx1250 in AMDGPU.td:202).
+  // Lifted to nested `llvm.{minnum,maxnum}.v2f16` calls so the backend
+  // re-emits a pair of packed `v_pk_{min,max}_num_f16` on gfx12+, or
+  // two scalar f16 nested compares on earlier ISAs.  Operand modifier
+  // contract is the same packed-`<2 x half>` shape as V_PK_FMA_F16.
+  V_PK_MIN3_NUM_F16, V_PK_MAX3_NUM_F16,
 
   // VOP3P packed-pair `<2 x i16>` int ops (gfx9+, available on both
   // gfx942 and gfx1250 -- same MC encoding family). Operand profile is
@@ -780,19 +826,35 @@ enum class CanonicalOp : uint16_t {
   SCRATCH_STORE_DWORD, SCRATCH_STORE_DWORDX2, SCRATCH_STORE_DWORDX3, SCRATCH_STORE_DWORDX4,
 
   // -- FLAT atomics --
+  // The handler in handle-flat.cpp dispatches by the range
+  //   [FLAT_ATOMIC_ADD, FLAT_ATOMIC_ADD_F64]
+  // so new flat atomics MUST be inserted before FLAT_ATOMIC_ADD_F64 (or the
+  // sentinel must be moved). FLAT_ATOMIC_ADD_F64 lifts to a `atomicrmw fadd
+  // double` on the per-lane address; gfx940+/gfx950 retain the matching
+  // `flat_atomic_add_f64` instruction (FLATInstructions.td:2972), so the
+  // backend re-emits it natively on the cross-target lower.
   FLAT_ATOMIC_ADD, FLAT_ATOMIC_SUB,
   FLAT_ATOMIC_AND, FLAT_ATOMIC_OR, FLAT_ATOMIC_XOR,
   FLAT_ATOMIC_SMIN, FLAT_ATOMIC_SMAX, FLAT_ATOMIC_UMIN, FLAT_ATOMIC_UMAX,
   FLAT_ATOMIC_SWAP, FLAT_ATOMIC_CMPSWAP,
   FLAT_ATOMIC_ADD_F32,
+  FLAT_ATOMIC_ADD_F64,
 
   // -- GLOBAL atomics --
+  // The handler in handle-flat.cpp dispatches by the range
+  //   [GLOBAL_ATOMIC_ADD, GLOBAL_ATOMIC_ADD_F64]
+  // (sentinel moved from GLOBAL_ATOMIC_PK_ADD_F16 to GLOBAL_ATOMIC_ADD_F64
+  // when 64-bit f64 atomics landed); keep this block contiguous.
+  // GLOBAL_ATOMIC_ADD_F64 lifts to `atomicrmw fadd double` on the per-lane
+  // global pointer; gfx940+/gfx950 retain the matching
+  // `global_atomic_add_f64` instruction (FLATInstructions.td:2975).
   GLOBAL_ATOMIC_ADD, GLOBAL_ATOMIC_SUB,
   GLOBAL_ATOMIC_AND, GLOBAL_ATOMIC_OR, GLOBAL_ATOMIC_XOR,
   GLOBAL_ATOMIC_SMIN, GLOBAL_ATOMIC_SMAX, GLOBAL_ATOMIC_UMIN, GLOBAL_ATOMIC_UMAX,
   GLOBAL_ATOMIC_SWAP, GLOBAL_ATOMIC_CMPSWAP,
   GLOBAL_ATOMIC_ADD_F32,
   GLOBAL_ATOMIC_PK_ADD_BF16, GLOBAL_ATOMIC_PK_ADD_F16,
+  GLOBAL_ATOMIC_ADD_F64,
 
   // -- SMEM atomics --
   // gfx8+ scalar-cache atomics.  Lifted to `atomicrmw` IR via handle-smem.cpp;

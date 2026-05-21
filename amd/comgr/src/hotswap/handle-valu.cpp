@@ -1233,6 +1233,135 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  if (Sop == CanonicalOp::V_RSQ_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Function *Rsq = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_rsq, {F64Ty});
+    Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(
+        Ctx.B.CreateCall(Rsq, {S}, "vrsq_f64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_SQRT_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Function *SqrtFn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::sqrt, {F64Ty});
+    Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(
+        Ctx.B.CreateCall(SqrtFn, {S}, "vsqrt_f64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_FREXP_EXP_I32_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Function *FrexpExp = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_frexp_exp, {Ctx.I32Ty, F64Ty});
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateCall(FrexpExp, {S}, "vfrexp_exp_f64"));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_FREXP_MANT_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Function *FrexpMant = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_frexp_mant, {F64Ty});
+    Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(
+        Ctx.B.CreateCall(FrexpMant, {S}, "vfrexp_mant_f64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_DIV_SCALE_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    // Same operand-identity decode as V_DIV_SCALE_F32 -- see the detailed
+    // comment on that handler above. src2 duplicates either src0 or src1
+    // to signal which operand (numer vs denom) is being scaled.
+    auto SameOperand = [&](unsigned A, unsigned B) -> bool {
+      bool AIsReg = Op.isSrcReg(A), BIsReg = Op.isSrcReg(B);
+      if (AIsReg != BIsReg) return false;
+      if (AIsReg) {
+        ParsedReg Ra = Op.srcReg(A), Rb = Op.srcReg(B);
+        return Ra.RegKind == Rb.RegKind && Ra.BaseIdx == Rb.BaseIdx;
+      }
+      unsigned Ai = Op.srcIdx(A), Bi = Op.srcIdx(B);
+      if (!Op.Di.isImm(Ai) || !Op.Di.isImm(Bi)) return false;
+      return Op.Di.getImm(Ai) == Op.Di.getImm(Bi);
+    };
+    bool Src0EqSrc2 = SameOperand(0, 2);
+    bool Src0EqSrc1 = SameOperand(0, 1);
+    bool ScaleNumerator;
+    if (Src0EqSrc2 && !Src0EqSrc1) {
+      ScaleNumerator = true;
+    } else if (Src0EqSrc1 && !Src0EqSrc2) {
+      ScaleNumerator = false;
+    } else {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3",
+          "v_div_scale_f64 operand triple does not match a known "
+          "divide-scaling shape: expected (numer,denom,numer) or "
+          "(denom,denom,numer).");
+      return Hr;
+    }
+    unsigned Peer = ScaleNumerator ? 2u : 1u;
+    if (Op.srcMod(0) != Op.srcMod(Peer)) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3",
+          "v_div_scale_f64 has asymmetric FP modifiers on the duplicated "
+          "operand pair; cannot represent faithfully in lifted IR.");
+      return Hr;
+    }
+    Value *Numer = Ctx.B.CreateBitCast(
+        ScaleNumerator ? Op.src64(0) : Op.src64(2), F64Ty);
+    Value *Denom = Ctx.B.CreateBitCast(Op.src64(1), F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_div_scale, {F64Ty});
+    Value *R = Ctx.B.CreateCall(
+        Fn, {Numer, Denom,
+             ScaleNumerator ? Ctx.B.getTrue() : Ctx.B.getFalse()},
+        "divscale_f64");
+    Ctx.writeReg64(Op.dst(0),
+        Ctx.B.CreateBitCast(Ctx.B.CreateExtractValue(R, 0), Ctx.I64Ty));
+    Value *Flag = Ctx.B.CreateExtractValue(R, 1);
+    if (Di.NumDefs >= 2 && Di.isReg(1)) {
+      ParsedReg FlagDst = Op.dst(1);
+      if (FlagDst.RegKind == ParsedReg::VCC)
+        Ctx.Regs.storeVCC(Ctx.B, Flag);
+      else if (FlagDst.RegKind == ParsedReg::SGPR && FlagDst.BaseIdx >= 0)
+        Ctx.Regs.storeSGPR32(Ctx.B, FlagDst.BaseIdx,
+                             Ctx.B.CreateZExt(Flag, Ctx.I32Ty));
+    } else {
+      Ctx.Regs.storeVCC(Ctx.B, Flag);
+    }
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_DIV_FIXUP_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S0 = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Value *S1 = Ctx.B.CreateBitCast(Op.src64(1), F64Ty);
+    Value *S2 = Ctx.B.CreateBitCast(Op.src64(2), F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_div_fixup, {F64Ty});
+    Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(
+        Ctx.B.CreateCall(Fn, {S0, S1, S2}, "divfixup_f64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_DIV_FMAS_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S0 = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Value *S1 = Ctx.B.CreateBitCast(Op.src64(1), F64Ty);
+    Value *S2 = Ctx.B.CreateBitCast(Op.src64(2), F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_div_fmas, {F64Ty});
+    // The VCC flag from a preceding v_div_scale feeds this instruction.
+    Value *Vcc = Ctx.Regs.loadVCC(Ctx.B);
+    Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(
+        Ctx.B.CreateCall(Fn, {S0, S1, S2, Vcc}, "divfmas_f64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
   // v_ldexp_f64: VOP3-only F64 ldexp. src0 is F64 (with abs/neg
   // modifiers), src1 is the I32 exponent (no modifiers). Lift to the
   // generic `llvm.ldexp.f64.i32` intrinsic; the AMDGPU backend isels it
@@ -1317,6 +1446,13 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     auto *F64Ty = Type::getDoubleTy(Ctx.C);
     Value *V = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateFPToUI(V, Ctx.I32Ty, "cvt_u32_f64"));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_CVT_I32_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *V = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateFPToSI(V, Ctx.I32Ty, "cvt_i32_f64"));
     Hr.Handled = true;
     return Hr;
   }

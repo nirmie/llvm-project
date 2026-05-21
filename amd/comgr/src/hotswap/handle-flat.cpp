@@ -222,6 +222,48 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
   CanonicalOp Sop = Di.CanonOp;
 
   // ---------------------------------------------------------------------
+  // GFX12+ standalone cache writeback (`global_wb`).
+  //
+  // `global_wb` writes back a dirty cache level to a wider scope (e.g., L1
+  // dirty lines -> L2).  The substitute intrinsic depends on the target:
+  //
+  //   GFX940+ (gfx940, gfx942, gfx950): `llvm.amdgcn.buffer.wbinvl1` is
+  //     removed (SubtargetPredicate = isNotGFX940Plus in BUFInstructions.td).
+  //     Use `llvm.amdgcn.s.dcache.wb` (scalar data-cache writeback), which
+  //     is available on all GFX8+ targets and conservatively correct: the
+  //     writeback the source required happens, with no additional semantic.
+  //
+  //   Pre-GFX940 (gfx9-series before CDNA3): `llvm.amdgcn.buffer.wbinvl1`
+  //     writes back and invalidates L1.  The extra invalidate only improves
+  //     coherence, so it is conservative-correct.
+  //
+  // `ISAProfile::HasMfma` is true on exactly GFX940+ CDNA targets (gfx940,
+  // gfx942, gfx950) and false on all earlier GFX9 targets, making it the
+  // right predicate here (mirrors the `isNotGFX940Plus` TableGen guard).
+  // GFX12+ cache invalidate (`global_inv`).
+  // Mirrors the GLOBAL_WB lowering: on GFX940+ use `llvm.amdgcn.s.dcache.inv`
+  // (scalar L1/L2 invalidate, available on all GFX8+); on pre-GFX940 fall back
+  // to `llvm.amdgcn.buffer.wbinvl1` which wb+invs L1 (conservative-correct).
+  if (Sop == CanonicalOp::GLOBAL_INV) {
+    Intrinsic::ID InvId = Ctx.TargetIsa.HasMfma
+                              ? Intrinsic::amdgcn_s_dcache_inv
+                              : Intrinsic::amdgcn_buffer_wbinvl1;
+    Function *InvFn = Intrinsic::getOrInsertDeclaration(&Ctx.M, InvId);
+    Ctx.B.CreateCall(InvFn, {});
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::GLOBAL_WB) {
+    Intrinsic::ID WbId = Ctx.TargetIsa.HasMfma
+                             ? Intrinsic::amdgcn_s_dcache_wb
+                             : Intrinsic::amdgcn_buffer_wbinvl1;
+    Function *WbFn = Intrinsic::getOrInsertDeclaration(&Ctx.M, WbId);
+    Ctx.B.CreateCall(WbFn, {});
+    Hr.Handled = true;
+    return Hr;
+  }
+
+  // ---------------------------------------------------------------------
   // FLAT scratch family (`scratch_load_*`, `scratch_store_*`).
   //
   // `SIInstrFlags::FlatScratch` is the authoritative discriminator for the
@@ -391,6 +433,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
 
     FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, IsByte ? 1 : 2,
                                         "GLOBAL_LOAD sub-dword");
+    if (!Fa.Ptr) return Hr;
     Value *Addr = Fa.Ptr;
     // SPE-gate the memory access itself, not just the VGPR write-back.
     // The store counterparts (GLOBAL_STORE_*, ~line 196 below) are
@@ -436,6 +479,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
 
     FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, LoadDwords * 4,
                                         "GLOBAL_LOAD dword");
+    if (!Fa.Ptr) return Hr;
     Value *Addr = Fa.Ptr;
 
     // Same SPE-gating rationale as the GLOBAL_LOAD sub-dword block
@@ -477,22 +521,13 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
       Sop == CanonicalOp::GLOBAL_STORE_DWORDX4) {
     int StoreDwords = 1;
     int StoreBits = 32;
-    // `_D16_HI` variants store bits [31:16] of the source VGPR rather
-    // than [15:0] -- a half-register selector baked into the opcode
-    // (AMDGPU ISA; see `global_store_d16_hi_b16` in
-    // FLATInstructions.td and handle-ds.cpp's DS_WRITE_B16_D16_HI for
-    // the existing DS-family precedent).  The compiler emits this
-    // form to write the upper-16-bits half of a 32-bit value without
-    // an explicit `v_lshrrev_b32` shift -- idiomatic in the fp32->bf16
-    // round-to-nearest-even epilogue (`v_add3_u32 v, bits, odd_bit,
-    // 0x7fff` produces the RNE-biased sum in a 32-bit VGPR, and
-    // `global_store_d16_hi_b16` writes its upper 16 bits = the bf16
-    // result).  Pre-fix, `storeHiHalf=false` for
-    // `GLOBAL_STORE_SHORT_D16_HI` was silently wrong: every bf16-cast-
-    // store kernel (Triton's `.to(tl.bfloat16) + tl.store` shape, which
-    // the observed-production `topk_forward_bisect_m_laneprobe` recipe
-    // exercises with no cross-lane ops) stored the LOW 16 bits of the
-    // biased sum, reading as NaN-ish (`0x7FFF`) for typical values.
+    // `_D16_HI` variants store bits from the upper half of the source VGPR
+    // rather than the lower half -- a half-register selector baked into the
+    // opcode (AMDGPU ISA; see `global_store_d16_hi_b16` / `global_store_d16_hi_b8`
+    // in FLATInstructions.td and handle-ds.cpp's DS_WRITE_B16_D16_HI for
+    // the existing DS-family precedent).
+    //   `_D16_HI` byte  (b8):  bits [23:16] -- shift 16, trunc to i8
+    //   `_D16_HI` short (b16): bits [31:16] -- shift 16, trunc to i16
     bool StoreHiHalf = false;
     if (Sop == CanonicalOp::GLOBAL_STORE_DWORDX4) StoreDwords = 4;
     else if (Sop == CanonicalOp::GLOBAL_STORE_DWORDX3) StoreDwords = 3;
@@ -1013,6 +1048,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
         Op.srcReg(1).RegKind == ParsedReg::VGPR) {
       FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, IsByte ? 1 : 2,
                                           "FLAT_LOAD sub-dword (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
     } else {
       // Plain-flat form: VGPR64 holds the full per-lane flat address.
@@ -1095,6 +1131,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
         Op.srcReg(1).RegKind == ParsedReg::VGPR) {
       FlatAddr Fa = decodeGlobalLoadAddr(Ctx, Di, Op, LoadDwords * 4,
                                           "FLAT_LOAD dword (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
     } else {
       Addr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(0));
@@ -1183,6 +1220,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
         Op.srcReg(2).RegKind == ParsedReg::SGPR) {
       FlatAddr Fa = decodeGlobalStoreAddr(Ctx, Di, Op, ElemBytes,
                                            "FLAT_STORE (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
       StData = Fa.StData;
     } else {
@@ -1223,7 +1261,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
   }
 
   // flat_atomic_* -- same as global_atomic but flat address space
-  if (Sop >= CanonicalOp::FLAT_ATOMIC_ADD && Sop <= CanonicalOp::FLAT_ATOMIC_ADD_F32) {
+  if (Sop >= CanonicalOp::FLAT_ATOMIC_ADD && Sop <= CanonicalOp::FLAT_ATOMIC_ADD_F64) {
     // Contract: the RTN/non-RTN collapse in OpcodeMap relies on
     // IsAtomicRet <=> (numDefs > 0) to decide result writeback below.
     assert(((Di.TsFlags & SIInstrFlags::IsAtomicRet) != 0) == (Di.NumDefs > 0) &&
@@ -1273,6 +1311,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
     if (IsSaddr) {
       FlatAddr Fa = decodeGlobalStoreAddr(Ctx, Di, Op, /*elemBytes=*/4,
                                            "FLAT_ATOMIC (SADDR)");
+      if (!Fa.Ptr) return Hr;
       Addr = Fa.Ptr;
       StData = Fa.StData;
     } else {
@@ -1291,7 +1330,11 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
       if (MemOffset != 0) Addr = Ctx.B.CreateInBoundsGEP(Ctx.I8Ty, Addr, Ctx.B.getInt64(MemOffset));
       StData = Op.srcReg(DataIdx);
     }
-    Value *Data = Ctx.Regs.readReg32(Ctx.B, StData);
+    // F64 flat atomic-add reads a 2-VGPR data pair and writes a 2-VGPR
+    // result; all the other CanonicalOps in this range work on i32 / f32.
+    const bool IsF64 = Sop == CanonicalOp::FLAT_ATOMIC_ADD_F64;
+    Value *Data = IsF64 ? Ctx.Regs.readReg64(Ctx.B, StData)
+                        : Ctx.Regs.readReg32(Ctx.B, StData);
 
     if (Sop == CanonicalOp::FLAT_ATOMIC_CMPSWAP) {
       // CMPSWAP's vdata is a 2-vgpr pair (cmp, new); read low half as
@@ -1329,20 +1372,29 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
     case CanonicalOp::FLAT_ATOMIC_ADD_F32:
       AtomicOp = AtomicRMWInst::FAdd; IsFp = true;
       Data = Ctx.B.CreateBitCast(Data, Ctx.F32Ty); AtomicTy = Ctx.F32Ty; break;
+    case CanonicalOp::FLAT_ATOMIC_ADD_F64:
+      AtomicOp = AtomicRMWInst::FAdd; IsFp = true;
+      Data = Ctx.B.CreateBitCast(Data, Ctx.F64Ty); AtomicTy = Ctx.F64Ty; break;
     default:
       llvm::errs() << "transpiler: Unhandled flat atomic: " << Mn << "\n";
       Hr.Failure = RaiseFailure::unsupportedShape(Di, "FLAT",
                                                    "unhandled flat atomic");
       return Hr;
     }
+    (void)AtomicTy;
     Ctx.emitUnderExec([&] {
       auto *Rmw = Ctx.B.CreateAtomicRMW(
           AtomicOp, Addr, Data, MaybeAlign(),
           AtomicOrdering::SequentiallyConsistent);
       if (Di.NumDefs > 0) {
         Value *RetVal = Rmw;
-        if (IsFp) RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I32Ty);
-        Ctx.Regs.writeReg32(Ctx.B, Op.dst(), RetVal);
+        if (IsF64) {
+          if (IsFp) RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I64Ty);
+          Ctx.Regs.writeReg64(Ctx.B, Op.dst(), RetVal);
+        } else {
+          if (IsFp) RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I32Ty);
+          Ctx.Regs.writeReg32(Ctx.B, Op.dst(), RetVal);
+        }
       }
     });
     Hr.Handled = true;
@@ -1350,7 +1402,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
   }
 
   // ---- Global atomics ----
-  if (Sop >= CanonicalOp::GLOBAL_ATOMIC_ADD && Sop <= CanonicalOp::GLOBAL_ATOMIC_PK_ADD_F16) {
+  if (Sop >= CanonicalOp::GLOBAL_ATOMIC_ADD && Sop <= CanonicalOp::GLOBAL_ATOMIC_ADD_F64) {
     assert(((Di.TsFlags & SIInstrFlags::IsAtomicRet) != 0) == (Di.NumDefs > 0) &&
            "global atomic: IsAtomicRet disagrees with numDefs");
     // Delegate addressing to `decodeGlobalStoreAddr`.  Global atomics
@@ -1395,18 +1447,22 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
     //
     // Element size for `scale_offset`: every atomic in the CanonicalOp range
     // [GLOBAL_ATOMIC_ADD, GLOBAL_ATOMIC_PK_ADD_F16] operates on a
-    // 32-bit memory slot (the 64-bit `_X2` variants are outside this
-    // range), so elemBytes=4 is correct for all of
-    //   ADD/SUB/AND/OR/XOR/MIN/MAX/SWAP/ADD_F32/PK_ADD_{BF16,F16}/CMPSWAP
-    // When `hasScaleOffset` is false the multiply is elided by the
-    // decoder.
-    FlatAddr Fa = decodeGlobalStoreAddr(Ctx, Di, Op, /*elemBytes=*/4,
+    // 32-bit memory slot.  `GLOBAL_ATOMIC_ADD_F64` (now also in this range
+    // for handler-dispatch purposes) operates on an 8-byte slot and the
+    // `scale_offset` multiplier accordingly scales by 8.
+    //   ADD/SUB/AND/OR/XOR/MIN/MAX/SWAP/ADD_F32/PK_ADD_{BF16,F16}/CMPSWAP -> 4
+    //   ADD_F64                                                            -> 8
+    // When `hasScaleOffset` is false the multiply is elided by the decoder.
+    const bool IsF64 = Sop == CanonicalOp::GLOBAL_ATOMIC_ADD_F64;
+    FlatAddr Fa = decodeGlobalStoreAddr(Ctx, Di, Op,
+                                         /*elemBytes=*/IsF64 ? 8 : 4,
                                          "GLOBAL_ATOMIC");
     Value *Addr = Fa.Ptr;
     // `stData` points to the base of the vdata VGPR range (32-bit for
     // the scalar atomics; CMPSWAP treats it as a 2-vgpr pair
-    // cmp/new -- see the CMPSWAP branch below).
-    Value *Data = Ctx.Regs.readReg32(Ctx.B, Fa.StData);
+    // cmp/new -- see the CMPSWAP branch below; F64 reads a 2-vgpr pair).
+    Value *Data = IsF64 ? Ctx.Regs.readReg64(Ctx.B, Fa.StData)
+                        : Ctx.Regs.readReg32(Ctx.B, Fa.StData);
 
     if (Sop == CanonicalOp::GLOBAL_ATOMIC_CMPSWAP) {
       // CMPSWAP's vdata is declared as VReg_64 in the .td (a 2-vgpr
@@ -1449,6 +1505,8 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
     case CanonicalOp::GLOBAL_ATOMIC_PK_ADD_F16:
       AtomicOp = AtomicRMWInst::FAdd;
       AtomicTy = FixedVectorType::get(Type::getHalfTy(Ctx.C), 2); IsFp = true; break;
+    case CanonicalOp::GLOBAL_ATOMIC_ADD_F64:
+      AtomicOp = AtomicRMWInst::FAdd; AtomicTy = Ctx.F64Ty; IsFp = true; break;
     default:
       llvm::errs() << "transpiler: Unsupported global atomic variant: " << Mn << "\n";
       Hr.Failure = RaiseFailure::unsupportedShape(
@@ -1460,8 +1518,13 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
       Value *Prev = Ctx.B.CreateAtomicRMW(AtomicOp, Addr, Data, MaybeAlign(),
                                           AtomicOrdering::Monotonic);
       if (Di.NumDefs > 0) {
-        if (IsFp) Prev = Ctx.B.CreateBitCast(Prev, Ctx.I32Ty);
-        Ctx.Regs.writeReg32(Ctx.B, Op.dst(), Prev);
+        if (IsF64) {
+          if (IsFp) Prev = Ctx.B.CreateBitCast(Prev, Ctx.I64Ty);
+          Ctx.Regs.writeReg64(Ctx.B, Op.dst(), Prev);
+        } else {
+          if (IsFp) Prev = Ctx.B.CreateBitCast(Prev, Ctx.I32Ty);
+          Ctx.Regs.writeReg32(Ctx.B, Op.dst(), Prev);
+        }
       }
     });
     Hr.Handled = true;

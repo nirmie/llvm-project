@@ -237,6 +237,17 @@ void driftCheckSrcN(DecodedInst &Di, const MCInstrDesc &Desc) {
   bool IsMadmk = ImmIdx >= 0 && Src0Idx >= 0 && Src1Idx >= 0 &&
                  Src0Idx < ImmIdx && ImmIdx < Src1Idx;
 
+  // MOVREL exception: v_movreld_b32, v_movrels_b32, v_movrelsd_b32,
+  // s_movreld_b32, s_movreld_b64 use vdst as a source base register
+  // (HasDst=0, EmitDst=1).  The MCInst layout is [vdst, src0] with no
+  // output defs, so buildSrcMap starts at index 0 and produces
+  // SrcMap[0]=0 (vdst), while OpName::src0 is at MC index 1.  This is
+  // intentional: handlers for these ops read the base register via
+  // Op.src(0) which maps to MCInst[0], and src0 (the actual source) via
+  // Op.src(1) = MCInst[1].  Skip the srcMap check at K=0 for this class.
+  int VdstIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst);
+  bool IsMovrel = Desc.getNumDefs() == 0 && VdstIdx == 0 && Src0Idx > 0;
+
   for (unsigned K = 0; K < 3; ++K) {
     int NamedSrc = AMDGPU::getNamedOperandIdx(Opc, KSrcNames[K]);
     if (NamedSrc < 0)
@@ -246,7 +257,8 @@ void driftCheckSrcN(DecodedInst &Di, const MCInstrDesc &Desc) {
     // (src0) still receives the strict check, so a hypothetical
     // future drift in src0's MCInst position is still caught even
     // for MADMK opcodes.
-    bool SkipThis = IsMadmk && K == 1;
+    // Skip K=0 for MOVREL (vdst base register vs. OpName::src0 drift).
+    bool SkipThis = (IsMadmk && K == 1) || (IsMovrel && K == 0);
     if (!SkipThis && OurSrc != NamedSrc)
       ReportErr("transpiler: srcMap disagrees with OpName::srcN table",
                 static_cast<int>(K), OurSrc, NamedSrc);

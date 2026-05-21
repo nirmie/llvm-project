@@ -89,12 +89,17 @@ FlatAddr decodeGlobalLoadAddr(RaiseContext &Ctx, const DecodedInst &Di,
     // let readReg64 enforce the 64-bit shape.
     Addr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(0));
   } else {
+    // Unrecognized address shape (e.g. VCC as saddr). Record a clean
+    // UnsupportedShape failure rather than crashing -- the dispatch loop
+    // checks PendingFailure after each handler and aborts the kernel raise.
+    // Return Out with Ptr==nullptr; callers must guard against this.
     std::string Msg;
     raw_string_ostream Os(Msg);
-    Os << "transpiler: unrecognized " << DiagLabel
+    Os << "unrecognized " << DiagLabel
        << " operand shape (expected plain VGPR64 or SADDR SGPR64+VGPR32): \""
-       << Di.FullText << "\" (mnemonic=" << Di.RawMnemonic << ")";
-    report_fatal_error(StringRef(Os.str()));
+       << Di.FullText << "\"";
+    Ctx.recordReadFailure(RaiseFailure::unsupportedShape(Di, "FLAT", Os.str()));
+    return Out;
   }
 
   Out.MemOffset = firstImmOffset(Di, Op, Out.HasSaddr ? 2 : 1);
@@ -130,10 +135,11 @@ FlatAddr decodeGlobalStoreAddr(RaiseContext &Ctx, const DecodedInst &Di,
   } else {
     std::string Msg;
     raw_string_ostream Os(Msg);
-    Os << "transpiler: unrecognized " << DiagLabel
+    Os << "unrecognized " << DiagLabel
        << " operand shape (expected plain VGPR+VGPR or SADDR VGPR+VGPR+SGPR): \""
-       << Di.FullText << "\" (mnemonic=" << Di.RawMnemonic << ")";
-    report_fatal_error(StringRef(Os.str()));
+       << Di.FullText << "\"";
+    Ctx.recordReadFailure(RaiseFailure::unsupportedShape(Di, "FLAT", Os.str()));
+    return Out;
   }
 
   Out.MemOffset = firstImmOffset(Di, Op, Out.HasSaddr ? 3 : 2);

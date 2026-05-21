@@ -62,6 +62,28 @@ Value *dispatchPtr(SourceHiddenArgContext &Ctx) {
   return Ctx.B.CreateCall(DispatchPtrFn, {}, "dispatch_ptr");
 }
 
+Value *implicitArgPtr(SourceHiddenArgContext &Ctx) {
+  Function *ImplicitArgPtrFn = Intrinsic::getOrInsertDeclaration(
+      &Ctx.M, Intrinsic::amdgcn_implicitarg_ptr);
+  return Ctx.B.CreateCall(ImplicitArgPtrFn, {}, "implicitarg_ptr");
+}
+
+// hidden_global_offset_{x,y,z} are 64-bit values placed at the very start
+// of the implicit-arg block (offsets 0, 8, 16) by the HSA runtime on both
+// gfx9 and gfx12.  They carry the host-side global work offset supplied to
+// clEnqueueNDRangeKernel / hipLaunchKernelGGL.  The source and target ABI
+// are identical for these fields, so synthesise by loading directly from
+// the target's `amdgcn_implicitarg_ptr` at the same relative offset.
+Value *emitHiddenGlobalOffset(SourceHiddenArgContext &Ctx, unsigned Dim) {
+  // Offsets within the implicit-arg block per AMDHSA COV4/COV5 layout.
+  constexpr unsigned GlobalOffsetByteOffsets[3] = {0, 8, 16};
+  unsigned ByteOff = GlobalOffsetByteOffsets[Dim];
+  Value *Ptr = Ctx.B.CreateConstInBoundsGEP1_32(Ctx.I8Ty, implicitArgPtr(Ctx),
+                                                 ByteOff);
+  return Ctx.B.CreateLoad(Ctx.I64Ty, Ptr,
+                          Twine("source_hidden_global_offset_") + Twine(Dim));
+}
+
 Value *loadDispatchU16(SourceHiddenArgContext &Ctx, unsigned ByteOffset,
                        const Twine &Name) {
   Value *Ptr =
@@ -147,6 +169,12 @@ SourceHiddenArgValue emitHiddenArgValue(SourceHiddenArgContext &Ctx,
     Result.Value = emitHiddenRemainder(Ctx, 2);
   else if (Kind == SourceHiddenArgKind::HiddenGridDims)
     Result.Value = emitGridDims(Ctx);
+  else if (Kind == SourceHiddenArgKind::HiddenGlobalOffsetX)
+    Result.Value = emitHiddenGlobalOffset(Ctx, 0);
+  else if (Kind == SourceHiddenArgKind::HiddenGlobalOffsetY)
+    Result.Value = emitHiddenGlobalOffset(Ctx, 1);
+  else if (Kind == SourceHiddenArgKind::HiddenGlobalOffsetZ)
+    Result.Value = emitHiddenGlobalOffset(Ctx, 2);
   else
     return unsupportedHiddenKind("<unknown>");
   return Result;
