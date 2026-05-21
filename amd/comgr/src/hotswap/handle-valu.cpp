@@ -1320,6 +1320,13 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  if (Sop == CanonicalOp::V_CVT_I32_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *V = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateFPToSI(V, Ctx.I32Ty, "cvt_i32_f64"));
+    Hr.Handled = true;
+    return Hr;
+  }
 
   // ---- Reversed-operand shifts ----
   if (Sop == CanonicalOp::V_LSHRREV_B32) {

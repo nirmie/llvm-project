@@ -3,12 +3,11 @@
 ;
 ; global_wb is a GFX12+ standalone cache writeback instruction (FLAT format).
 ; It writes dirty L1/L2 cache lines back to the next cache level without
-; necessarily invalidating the cache. On gfx950 there is no per-level
-; write-only intrinsic, so it is conservatively lowered to
-; llvm.amdgcn.buffer.wbinvl1 (write-back and invalidate L1).
+; necessarily invalidating the cache. On gfx950 (HasMfma/GFX940+) the nearest
+; equivalent is llvm.amdgcn.s.dcache.wb (gfx9+ scalar D$ writeback).
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_wb_kernel(
-; CHECK: call void @llvm.amdgcn.buffer.wbinvl1()
+; CHECK: call void @llvm.amdgcn.s.dcache.wb()
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6

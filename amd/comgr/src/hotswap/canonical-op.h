@@ -62,10 +62,10 @@ enum class CanonicalOp : uint16_t {
   // LLVM `amdgcn.s.barrier` call.
   S_BARRIER, S_BARRIER_WAIT, S_BARRIER_SIGNAL,
 
-  // GFX12+ standalone cache writeback. `global_wb` writes back a cache level;
-  // on gfx950 this is lowered to `llvm.amdgcn.buffer.wbinvl1` (write-back and
-  // invalidate L1), which is conservative-correct: it ensures the write-back
-  // the source requested is performed before subsequent memory accesses.
+  // GFX12+ standalone cache writeback. `global_wb` writes back a cache level.
+  // Lowered to `llvm.amdgcn.s.dcache.wb` on GFX940+ targets (gfx940/942/950)
+  // where `buffer_wbinvl1` is removed, and to `llvm.amdgcn.buffer.wbinvl1`
+  // on earlier GFX9 targets.  Both are conservative-correct substitutes.
   GLOBAL_WB,
 
   // -- SMEM --
@@ -91,9 +91,11 @@ enum class CanonicalOp : uint16_t {
   S_CMP_EQ_F32, S_CMP_LG_F32, S_CMP_GT_F32, S_CMP_GE_F32,
   S_CMP_LT_F32, S_CMP_LE_F32, S_CMP_NEQ_F32,
   S_CMP_NGT_F32, S_CMP_NGE_F32, S_CMP_NLT_F32, S_CMP_NLE_F32, S_CMP_NLG_F32,
+  S_CMP_O_F32, S_CMP_U_F32,
   S_CMP_EQ_F16, S_CMP_LG_F16, S_CMP_GT_F16, S_CMP_GE_F16,
   S_CMP_LT_F16, S_CMP_LE_F16, S_CMP_NEQ_F16,
   S_CMP_NGT_F16, S_CMP_NGE_F16, S_CMP_NLT_F16, S_CMP_NLE_F16, S_CMP_NLG_F16,
+  S_CMP_O_F16, S_CMP_U_F16,
 
   // -- SOPK --
   S_MOVK_I32, S_ADDK_I32, S_MULK_I32,
@@ -330,7 +332,7 @@ enum class CanonicalOp : uint16_t {
   // matching LLVM's `maximumnum` / `minimumnum` intrinsic contract without
   // fast-math flags.
   S_MAX_NUM_F32, S_MIN_NUM_F32,
-  S_BFE_U32, S_BFE_I32, S_BFM_B32, S_BFM_B64,
+  S_BFE_U32, S_BFE_I32, S_BFE_I64, S_BFM_B32, S_BFM_B64,
   S_CSELECT_B32, S_CSELECT_B64,
   S_MIN_I32, S_MIN_U32, S_MAX_I32, S_MAX_U32,
   S_PACK_LL_B32_B16, S_PACK_LH_B32_B16,
@@ -345,7 +347,7 @@ enum class CanonicalOp : uint16_t {
   V_CVT_F16_F32, V_CVT_F32_F16, V_CVT_F32_BF16,
   V_CVT_F32_UBYTE0, V_CVT_F32_UBYTE1, V_CVT_F32_UBYTE2, V_CVT_F32_UBYTE3,
   V_CVT_F32_F64, V_CVT_F64_F32,
-  V_CVT_F64_U32, V_CVT_F64_I32, V_CVT_U32_F64,
+  V_CVT_F64_U32, V_CVT_F64_I32, V_CVT_U32_F64, V_CVT_I32_F64,
   V_RCP_IFLAG_F32, V_RCP_F32, V_RSQ_F32, V_SQRT_F32, V_EXP_F32, V_LOG_F32,
   // gfx12+ VOP3 pseudo-scalar f32 transcendentals: scalar input and scalar
   // output variants of the corresponding VOP1 special-function instructions.
@@ -353,7 +355,7 @@ enum class CanonicalOp : uint16_t {
   // non-default output modifiers are refused until modeled exactly.
   V_S_EXP_F32, V_S_LOG_F32, V_S_RCP_F32, V_S_RSQ_F32, V_S_SQRT_F32,
   V_LDEXP_F32,
-  V_FLOOR_F32, V_CEIL_F32, V_TRUNC_F32, V_RNDNE_F32, V_FRACT_F32,
+  V_FLOOR_F32, V_FLOOR_F64, V_CEIL_F32, V_TRUNC_F32, V_TRUNC_F64, V_RNDNE_F32, V_FRACT_F32,
   V_READFIRSTLANE_B32,
   // VOP1 packed FP8/BF8 -> 2x F32 expansion (VOP1Instructions.td:652-
   // 653, profile VOPProfileCVT_PK_F32_F8). Reads 16 bits of the i32
@@ -576,7 +578,7 @@ enum class CanonicalOp : uint16_t {
   // half.
   V_MAXIMUM3_F16, V_MINIMUM3_F16,
   V_MAXIMUMMINIMUM_F16, V_MINIMUMMAXIMUM_F16,
-  V_LDEXP_F16, V_FLOOR_F16, V_CVT_F16_U16, V_CVT_U16_F16,
+  V_LDEXP_F16, V_FLOOR_F16, V_CVT_F16_U16, V_CVT_U16_F16, V_CVT_F16_I16, V_CVT_I16_F16,
   V_ASHRREV_I16, V_LSHRREV_B16, V_LSHLREV_B16,
   V_MAX_U16, V_MIN_U16, V_MAX_I16, V_MIN_I16,
   // 16-bit integer arith (gfx8+, VOP2Instructions.td). Plain i16
@@ -759,7 +761,8 @@ enum class CanonicalOp : uint16_t {
   GLOBAL_LOAD_UBYTE, GLOBAL_LOAD_SBYTE, GLOBAL_LOAD_USHORT, GLOBAL_LOAD_SSHORT,
   GLOBAL_LOAD_SHORT_D16_HI,
   GLOBAL_LOAD_DWORD, GLOBAL_LOAD_DWORDX2, GLOBAL_LOAD_DWORDX3, GLOBAL_LOAD_DWORDX4,
-  GLOBAL_STORE_BYTE, GLOBAL_STORE_SHORT, GLOBAL_STORE_SHORT_D16_HI,
+  GLOBAL_STORE_BYTE, GLOBAL_STORE_BYTE_D16_HI,
+  GLOBAL_STORE_SHORT, GLOBAL_STORE_SHORT_D16_HI,
   GLOBAL_STORE_DWORD, GLOBAL_STORE_DWORDX2, GLOBAL_STORE_DWORDX3, GLOBAL_STORE_DWORDX4,
   SCRATCH_LOAD_DWORD, SCRATCH_LOAD_DWORDX2, SCRATCH_LOAD_DWORDX3, SCRATCH_LOAD_DWORDX4,
   SCRATCH_STORE_DWORD, SCRATCH_STORE_DWORDX2, SCRATCH_STORE_DWORDX3, SCRATCH_STORE_DWORDX4,

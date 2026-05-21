@@ -350,8 +350,17 @@ static bool raiseAndCompileKernel(const TextSection &text,
   std::string llcBin = std::string(LLVM_TOOLS_DIR) + "/llc";
   std::string mcpuLlc = ("-mcpu=" + targetISA).str();
   auto llcStart = timingStart(options.CollectTimings);
-  if (runTool(llcBin, {llcBin, "-march=amdgcn", mcpuLlc, "-filetype=asm", "-o",
-                       asmPath, irPath}) != 0) {
+  // GCNSubtarget unconditionally enables FeatureGFX1250B0 via a cl::opt that
+  // defaults to true, which causes AMDGPUHSAMetadataStreamer to emit a
+  // `.gfx1250_revision: B0` note even when compiling for gfx950 or older.
+  // The ROCm runtime rejects code objects with this field set on non-gfx1250
+  // hardware.  Suppress it for any non-gfx1250 target.
+  llvm::SmallVector<llvm::StringRef, 10> llcArgs = {
+      llcBin, "-march=amdgcn", mcpuLlc, "-filetype=asm"};
+  if (!targetISA.contains("gfx1250"))
+    llcArgs.push_back("-amdgpu-gfx1250-b0-specific=false");
+  llcArgs.append({"-o", asmPath, irPath});
+  if (runTool(llcBin, llcArgs) != 0) {
     result.Timings.llcSeconds += timingElapsed(options.CollectTimings, llcStart);
     llvm::errs() << "transpiler: llc failed for '" << kernelName << "'\n";
     return false;

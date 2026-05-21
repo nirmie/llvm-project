@@ -209,14 +209,26 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
   // GFX12+ standalone cache writeback (`global_wb`).
   //
   // `global_wb` writes back a dirty cache level to a wider scope (e.g., L1
-  // dirty lines -> L2). On gfx950 there is no per-level write-back intrinsic
-  // that only writes without invalidating; the closest safe substitute is
-  // `llvm.amdgcn.buffer.wbinvl1`, which writes back and invalidates L1.
-  // This is conservative-correct: the writeback the source required happens,
-  // and the subsequent invalidate only improves coherence.
+  // dirty lines -> L2).  The substitute intrinsic depends on the target:
+  //
+  //   GFX940+ (gfx940, gfx942, gfx950): `llvm.amdgcn.buffer.wbinvl1` is
+  //     removed (SubtargetPredicate = isNotGFX940Plus in BUFInstructions.td).
+  //     Use `llvm.amdgcn.s.dcache.wb` (scalar data-cache writeback), which
+  //     is available on all GFX8+ targets and conservatively correct: the
+  //     writeback the source required happens, with no additional semantic.
+  //
+  //   Pre-GFX940 (gfx9-series before CDNA3): `llvm.amdgcn.buffer.wbinvl1`
+  //     writes back and invalidates L1.  The extra invalidate only improves
+  //     coherence, so it is conservative-correct.
+  //
+  // `ISAProfile::HasMfma` is true on exactly GFX940+ CDNA targets (gfx940,
+  // gfx942, gfx950) and false on all earlier GFX9 targets, making it the
+  // right predicate here (mirrors the `isNotGFX940Plus` TableGen guard).
   if (Sop == CanonicalOp::GLOBAL_WB) {
-    Function *WbFn = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::amdgcn_buffer_wbinvl1);
+    Intrinsic::ID WbId = Ctx.TargetIsa.HasMfma
+                             ? Intrinsic::amdgcn_s_dcache_wb
+                             : Intrinsic::amdgcn_buffer_wbinvl1;
+    Function *WbFn = Intrinsic::getOrInsertDeclaration(&Ctx.M, WbId);
     Ctx.B.CreateCall(WbFn, {});
     Hr.Handled = true;
     return Hr;
@@ -471,28 +483,20 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
 
-  if (Sop == CanonicalOp::GLOBAL_STORE_BYTE || Sop == CanonicalOp::GLOBAL_STORE_SHORT ||
+  if (Sop == CanonicalOp::GLOBAL_STORE_BYTE || Sop == CanonicalOp::GLOBAL_STORE_BYTE_D16_HI ||
+      Sop == CanonicalOp::GLOBAL_STORE_SHORT ||
       Sop == CanonicalOp::GLOBAL_STORE_SHORT_D16_HI || Sop == CanonicalOp::GLOBAL_STORE_DWORD ||
       Sop == CanonicalOp::GLOBAL_STORE_DWORDX2 || Sop == CanonicalOp::GLOBAL_STORE_DWORDX3 ||
       Sop == CanonicalOp::GLOBAL_STORE_DWORDX4) {
     int StoreDwords = 1;
     int StoreBits = 32;
-    // `_D16_HI` variants store bits [31:16] of the source VGPR rather
-    // than [15:0] -- a half-register selector baked into the opcode
-    // (AMDGPU ISA; see `global_store_d16_hi_b16` in
-    // FLATInstructions.td and handle-ds.cpp's DS_WRITE_B16_D16_HI for
-    // the existing DS-family precedent).  The compiler emits this
-    // form to write the upper-16-bits half of a 32-bit value without
-    // an explicit `v_lshrrev_b32` shift -- idiomatic in the fp32->bf16
-    // round-to-nearest-even epilogue (`v_add3_u32 v, bits, odd_bit,
-    // 0x7fff` produces the RNE-biased sum in a 32-bit VGPR, and
-    // `global_store_d16_hi_b16` writes its upper 16 bits = the bf16
-    // result).  Pre-fix, `storeHiHalf=false` for
-    // `GLOBAL_STORE_SHORT_D16_HI` was silently wrong: every bf16-cast-
-    // store kernel (Triton's `.to(tl.bfloat16) + tl.store` shape, which
-    // the observed-production `topk_forward_bisect_m_laneprobe` recipe
-    // exercises with no cross-lane ops) stored the LOW 16 bits of the
-    // biased sum, reading as NaN-ish (`0x7FFF`) for typical values.
+    // `_D16_HI` variants store bits from the upper half of the source VGPR
+    // rather than the lower half -- a half-register selector baked into the
+    // opcode (AMDGPU ISA; see `global_store_d16_hi_b16` / `global_store_d16_hi_b8`
+    // in FLATInstructions.td and handle-ds.cpp's DS_WRITE_B16_D16_HI for
+    // the existing DS-family precedent).
+    //   `_D16_HI` byte  (b8):  bits [23:16] -- shift 16, trunc to i8
+    //   `_D16_HI` short (b16): bits [31:16] -- shift 16, trunc to i16
     bool StoreHiHalf = false;
     if (Sop == CanonicalOp::GLOBAL_STORE_DWORDX4) StoreDwords = 4;
     else if (Sop == CanonicalOp::GLOBAL_STORE_DWORDX3) StoreDwords = 3;
@@ -503,9 +507,11 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
       StoreBits = 16;
       StoreDwords = 0;
       StoreHiHalf = (Sop == CanonicalOp::GLOBAL_STORE_SHORT_D16_HI);
-    } else if (Sop == CanonicalOp::GLOBAL_STORE_BYTE) {
+    } else if (Sop == CanonicalOp::GLOBAL_STORE_BYTE ||
+               Sop == CanonicalOp::GLOBAL_STORE_BYTE_D16_HI) {
       StoreBits = 8;
       StoreDwords = 0;
+      StoreHiHalf = (Sop == CanonicalOp::GLOBAL_STORE_BYTE_D16_HI);
     }
 
     // scale_offset on stores scales the per-lane vaddr by the access
@@ -524,11 +530,19 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
       Value *Src32 = Ctx.Regs.readReg32(Ctx.B, StData);
       // `_D16_HI` variant routes through the shared half-register
       // helper that emits `lshr 16 + trunc to i16`; the non-
-      // `_D16_HI` short / byte path takes a plain trunc to `memTy`.
-      Value *Val = StoreHiHalf
-                      ? emitD16HiHalfTruncI16(Ctx, Src32)
-                      : Ctx.B.CreateTrunc(
-                            Src32, Type::getIntNTy(Ctx.C, StoreBits));
+      // `_D16_HI` variants shift right 16 then trunc to the store width.
+      // Short (b16): trunc to i16 via the shared helper.
+      // Byte  (b8):  trunc to i8  (bits [23:16] of the source VGPR).
+      Value *Val;
+      if (StoreHiHalf) {
+        Value *Shifted = Ctx.B.CreateLShr(Src32,
+                                          ConstantInt::get(Ctx.I32Ty, 16),
+                                          "d16hi_shift");
+        Val = Ctx.B.CreateTrunc(Shifted, Type::getIntNTy(Ctx.C, StoreBits),
+                                "d16hi_trunc");
+      } else {
+        Val = Ctx.B.CreateTrunc(Src32, Type::getIntNTy(Ctx.C, StoreBits));
+      }
       Ctx.emitUnderExec([&] { Ctx.B.CreateStore(Val, Addr); });
     } else if (StoreDwords == 1) {
       Value *Val = Ctx.Regs.readReg32(Ctx.B, StData);

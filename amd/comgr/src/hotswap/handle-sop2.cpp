@@ -734,6 +734,33 @@ HandlerResult handleSOP2(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  if (Sop == CanonicalOp::S_BFE_I64) {
+    Value *Src = Op.src64(0), *Ctrl = Op.src(1);
+    Value *C63 = ConstantInt::get(Ctx.I64Ty, 0x3F);
+    Value *C64 = ConstantInt::get(Ctx.I64Ty, 64);
+    Value *ShiftExt = Ctx.B.CreateZExt(
+        Ctx.B.CreateAnd(Ctrl, ConstantInt::get(Ctx.I32Ty, 0x3F)), Ctx.I64Ty);
+    Value *LengthExt = Ctx.B.CreateZExt(
+        Ctx.B.CreateAnd(Ctx.B.CreateLShr(Ctrl, 16),
+                        ConstantInt::get(Ctx.I32Ty, 0x7F)),
+        Ctx.I64Ty);
+    Value *Sum = Ctx.B.CreateAdd(ShiftExt, LengthExt);
+    Value *IsShortEnough = Ctx.B.CreateICmpULT(Sum, C64);
+    Value *ShlAmt = Ctx.B.CreateAnd(Ctx.B.CreateSub(C64, Sum), C63);
+    Value *ShiftedLeft = Ctx.B.CreateShl(Src, ShlAmt);
+    Value *ShrAmt = Ctx.B.CreateAnd(Ctx.B.CreateSub(C64, LengthExt), C63);
+    Value *Sx = Ctx.B.CreateAShr(ShiftedLeft, ShrAmt, "sbfe64_i");
+    Value *Fallthrough = Ctx.B.CreateAShr(Src, ShiftExt, "sbfe64_i_sat");
+    Value *Computed = Ctx.B.CreateSelect(IsShortEnough, Sx, Fallthrough);
+    Value *IsZero = Ctx.B.CreateICmpEQ(LengthExt, ConstantInt::get(Ctx.I64Ty, 0));
+    Value *Result = Ctx.B.CreateSelect(IsZero,
+                                       ConstantInt::get(Ctx.I64Ty, 0),
+                                       Computed);
+    Hr.SccResult = Ctx.B.CreateTrunc(Result, Ctx.I32Ty);
+    Ctx.Regs.writeReg64(Ctx.B, Op.dst(), Result);
+    Hr.Handled = true;
+    return Hr;
+  }
   if (Sop == CanonicalOp::S_PACK_LL_B32_B16) {
     Value *Lo = Ctx.B.CreateAnd(Op.src(0), ConstantInt::get(Ctx.I32Ty, 0xFFFF));
     Value *Hi = Ctx.B.CreateShl(
