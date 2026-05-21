@@ -1014,6 +1014,16 @@ static const Entry kCanonTable[] = {
     // flags it as a Class 2 obstruction (wave-size-translation.md
     // §6) in the cross-wave case.
     E(DS_SWIZZLE_B32, DS_SWIZZLE_B32),
+    // GFX11+ LDS compare-and-store atomics (renamed from DS_CMPST_* in GFX11,
+    // with src/cmp operand order swapped vs pre-GFX11 variants). The RTN
+    // variants return the original LDS value; non-RTN variants perform the
+    // conditional store without a return value. The canonicalization chain
+    // collapses DS_CMPSTORE_RTN_B32_gfx9 / _agpr onto DS_CMPSTORE_RTN_B32,
+    // and similarly for the B64 and non-RTN forms.
+    E(DS_CMPSTORE_RTN_B32, DS_CMPSTORE_RTN_B32),
+    E(DS_CMPSTORE_RTN_B64, DS_CMPSTORE_RTN_B64),
+    E(DS_CMPSTORE_B32, DS_CMPSTORE_B32),
+    E(DS_CMPSTORE_B64, DS_CMPSTORE_B64),
 
     // ---------------------------------------------------------------------
     // MUBUF direct-to-LDS loads (distinct semantics from VGPR-dest loads)
