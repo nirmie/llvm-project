@@ -941,6 +941,55 @@ HandlerResult handleDS(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+
+  if (Sop == CanonicalOp::DS_CMPSTORE_RTN_B32 ||
+      Sop == CanonicalOp::DS_CMPSTORE_RTN_B64 ||
+      Sop == CanonicalOp::DS_CMPSTORE_B32 ||
+      Sop == CanonicalOp::DS_CMPSTORE_B64) {
+    const bool IsB64 = (Sop == CanonicalOp::DS_CMPSTORE_RTN_B64 ||
+                        Sop == CanonicalOp::DS_CMPSTORE_B64);
+    const bool IsRtn = (Sop == CanonicalOp::DS_CMPSTORE_RTN_B32 ||
+                        Sop == CanonicalOp::DS_CMPSTORE_RTN_B64);
+
+    Value *Addr = Ctx.B.CreateZExt(Op.src(0), Ctx.I64Ty, "ds_addr");
+    for (unsigned K = 1; K < Op.nSrcs(); K++) {
+      if (Di.isImm(Op.srcIdx(K))) {
+        int64_t Imm = Di.getImm(Op.srcIdx(K));
+        if (Imm != 0)
+          Addr = Ctx.B.CreateAdd(Addr, ConstantInt::get(Ctx.I64Ty, Imm),
+                                 "ds_off");
+        break;
+      }
+    }
+
+    auto *LdsPtrTy = PointerType::get(Ctx.C, 3);
+    Value *Ptr = Ctx.B.CreateIntToPtr(Addr, LdsPtrTy, "ds_cmpst_ptr");
+
+    ParsedReg CmpReg = Op.srcReg(1);
+    ParsedReg NewReg = Op.srcReg(2);
+
+    Value *CmpVal = IsB64 ? Ctx.Regs.readReg64(Ctx.B, CmpReg)
+                          : Ctx.Regs.readReg32(Ctx.B, CmpReg);
+    Value *NewVal = IsB64 ? Ctx.Regs.readReg64(Ctx.B, NewReg)
+                          : Ctx.Regs.readReg32(Ctx.B, NewReg);
+
+    Ctx.emitUnderExec([&] {
+      auto *Cas = Ctx.B.CreateAtomicCmpXchg(
+          Ptr, CmpVal, NewVal, MaybeAlign(),
+          AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
+      if (IsRtn) {
+        Value *OldVal = Ctx.B.CreateExtractValue(Cas, 0, "ds_cmpst_old");
+        if (IsB64)
+          Ctx.Regs.writeReg64(Ctx.B, Op.dst(), OldVal);
+        else
+          Ctx.Regs.writeReg32(Ctx.B, Op.dst(), OldVal);
+      }
+    });
+    Hr.Handled = true;
+    return Hr;
+  }
+
   return Hr;
 }
 

@@ -957,6 +957,13 @@ enum class CanonicalOp : uint16_t {
   // (wave-size-obstruction.cpp) flags it before the handler is even
   // dispatched in the cross-wave case.
   DS_SWIZZLE_B32,
+  // GFX11+ LDS compare-and-store atomics. Renamed from DS_CMPST_* in GFX11;
+  // operand order also changed: pre-GFX11 had (addr, newval, cmpval), while
+  // GFX11+ has (addr, cmpval, newval). RTN variants return the original value;
+  // non-RTN variants perform the store without a return. All lower to
+  // LLVM `cmpxchg` IR on LDS address-space pointers.
+  DS_CMPSTORE_RTN_B32, DS_CMPSTORE_RTN_B64,
+  DS_CMPSTORE_B32, DS_CMPSTORE_B64,
 
   // -- MUBUF --
   BUFFER_LOAD_DWORD, BUFFER_LOAD_DWORDX2, BUFFER_LOAD_DWORDX3, BUFFER_LOAD_DWORDX4,
