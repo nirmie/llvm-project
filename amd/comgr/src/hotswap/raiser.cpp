@@ -1148,7 +1148,16 @@ static RaiseResult raiseToIRImpl(llvm::ArrayRef<uint8_t> TextBytes,
     const uint64_t Flags = Di.TsFlags;
     const unsigned Opc = Di.Inst.getOpcode();
     HandlerResult Hr;
-    if (AMDGPU::isVOPD(Opc))
+    // v_illegal (encoding 0x00000000) carries no format flag bits in TSFlags
+    // and would otherwise fall through to the unsupported-opcode error path.
+    // Lower it here as llvm.trap + unreachable to preserve its trap semantics.
+    if (Di.CanonOp == CanonicalOp::V_ILLEGAL) {
+      Function *TrapFn =
+          Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::trap);
+      Ctx.B.CreateCall(TrapFn, {});
+      Ctx.B.CreateUnreachable();
+      Hr.Handled = true;
+    } else if (AMDGPU::isVOPD(Opc))
       Hr = handleVOPD(Ctx, Di, Op);
     else if (Flags & SIInstrFlags::IsMAI)
       Hr = handleMFMA(Ctx, Di, Op);
