@@ -723,6 +723,20 @@ static const Entry kCanonTable[] = {
     E(V_PK_MIN_NUM_BF16, V_PK_MIN_NUM_BF16),
     E(V_PK_MAX_NUM_BF16, V_PK_MAX_NUM_BF16),
     E(V_PK_FMA_BF16, V_PK_FMA_BF16),
+    // VOP3P packed f16 maximumNumber / minimumNumber. LLVM's TableGen
+    // pseudos are `V_PK_MAX_F16` / `V_PK_MIN_F16` (VOP3PInstructions.td:140
+    // & 141); gfx12/gfx1250 reals are spelled `v_pk_max_num_f16` /
+    // `v_pk_min_num_f16` via the `_with_name` alias rule
+    // (VOP3PInstructions.td:2591-2592, :2640-2641) and collapse onto the
+    // bare pseudo through the disassembler's pseudo-alias step.
+    E(V_PK_MAX_F16, V_PK_MAX_NUM_F16),
+    E(V_PK_MIN_F16, V_PK_MIN_NUM_F16),
+    // VOP3P packed f16 ternary min3 / max3 (gfx1250-only; AMDGPU.td:202
+    // `HasMin3Max3PKF16`).  LLVM TableGen pseudos are `V_PK_MIN3_NUM_F16` /
+    // `V_PK_MAX3_NUM_F16` (VOP3PInstructions.td:182-183), real opcodes at
+    // VOP3PInstructions.td:2612-2613.
+    E(V_PK_MIN3_NUM_F16, V_PK_MIN3_NUM_F16),
+    E(V_PK_MAX3_NUM_F16, V_PK_MAX3_NUM_F16),
     // LLVM has no `V_PK_MAX_F32`/`V_PK_MIN_F32` pseudo (only F16 variants);
     // leave the matching CanonicalOps unmapped until one appears.
     E(V_PK_MOV_B32, V_PK_MOV_B32),
@@ -883,6 +897,11 @@ static const Entry kCanonTable[] = {
     E(FLAT_ATOMIC_SWAP, FLAT_ATOMIC_SWAP),
     E(FLAT_ATOMIC_CMPSWAP, FLAT_ATOMIC_CMPSWAP),
     E(FLAT_ATOMIC_ADD_F32, FLAT_ATOMIC_ADD_F32),
+    // gfx940+/gfx950/gfx1250 f64 flat atomic-add (FLATInstructions.td:1060,
+    // realtriples at :2943 / :2972 / :3739).  Lifts to `atomicrmw fadd double`;
+    // the backend re-emits the native `flat_atomic_add_f64` on every target
+    // in this family because they all share the same TableGen lowering.
+    E(FLAT_ATOMIC_ADD_F64, FLAT_ATOMIC_ADD_F64),
 
     // ---------------------------------------------------------------------
     // GLOBAL atomics
@@ -901,6 +920,11 @@ static const Entry kCanonTable[] = {
     E(GLOBAL_ATOMIC_ADD_F32, GLOBAL_ATOMIC_ADD_F32),
     E(GLOBAL_ATOMIC_PK_ADD_BF16, GLOBAL_ATOMIC_PK_ADD_BF16),
     E(GLOBAL_ATOMIC_PK_ADD_F16, GLOBAL_ATOMIC_PK_ADD_F16),
+    // gfx940+/gfx950/gfx1250 f64 global atomic-add (FLATInstructions.td:1061,
+    // realtriples at :2946 / :2975 / :3743).  Lifts to `atomicrmw fadd double`
+    // on the global pointer; the backend reselects the native
+    // `global_atomic_add_f64` exactly.
+    E(GLOBAL_ATOMIC_ADD_F64, GLOBAL_ATOMIC_ADD_F64),
 
     // ---------------------------------------------------------------------
     // SMEM atomics (enumerate addressing forms: IMM / SGPR / SGPR_IMM)

@@ -702,6 +702,28 @@ enum class CanonicalOp : uint16_t {
   V_PK_ADD_BF16, V_PK_MUL_BF16,
   V_PK_MIN_NUM_BF16, V_PK_MAX_NUM_BF16,
   V_PK_FMA_BF16,
+  // VOP3P packed f16 maximumNumber / minimumNumber (gfx9+, available on
+  // gfx942 / gfx1250 -- TableGen pseudos `V_PK_MAX_F16` /
+  // `V_PK_MIN_F16` mapped to `fmaxnum_like` / `fminnum_like`;
+  // gfx12/gfx1250 reals are spelled `v_pk_max_num_f16` /
+  // `v_pk_min_num_f16`, VOP3PInstructions.td:140-141 + :2591-2592).
+  // Lifted to `llvm.maxnum.v2f16` / `llvm.minnum.v2f16`; on gfx942 the
+  // backend reselects `v_pk_{max,min}_f16` from these intrinsic calls
+  // exactly (gfx942 keeps both real and pseudo names) and re-emits the
+  // packed form. Operand modifiers (`neg_lo / neg_hi / op_sel / op_sel_hi`)
+  // and the clamp bit follow the same packed-`<2 x half>` contract as
+  // V_PK_ADD_F16 / V_PK_MUL_F16; the handler reuses the same shared
+  // packed-source reader for symmetry.
+  V_PK_MAX_NUM_F16, V_PK_MIN_NUM_F16,
+  // VOP3P packed f16 ternary `min3` / `max3` (gfx1250-only:
+  // VOP3PInstructions.td:182-183 + :2612-2613). gfx950 has neither
+  // `v_pk_min3_num_f16` nor `v_pk_max3_num_f16` natively (the feature
+  // `HasMin3Max3PKF16` is gated to gfx1250 in AMDGPU.td:202).
+  // Lifted to nested `llvm.{minnum,maxnum}.v2f16` calls so the backend
+  // re-emits a pair of packed `v_pk_{min,max}_num_f16` on gfx12+, or
+  // two scalar f16 nested compares on earlier ISAs.  Operand modifier
+  // contract is the same packed-`<2 x half>` shape as V_PK_FMA_F16.
+  V_PK_MIN3_NUM_F16, V_PK_MAX3_NUM_F16,
 
   // VOP3P packed-pair `<2 x i16>` int ops (gfx9+, available on both
   // gfx942 and gfx1250 -- same MC encoding family). Operand profile is
@@ -785,19 +807,35 @@ enum class CanonicalOp : uint16_t {
   SCRATCH_STORE_DWORD, SCRATCH_STORE_DWORDX2, SCRATCH_STORE_DWORDX3, SCRATCH_STORE_DWORDX4,
 
   // -- FLAT atomics --
+  // The handler in handle-flat.cpp dispatches by the range
+  //   [FLAT_ATOMIC_ADD, FLAT_ATOMIC_ADD_F64]
+  // so new flat atomics MUST be inserted before FLAT_ATOMIC_ADD_F64 (or the
+  // sentinel must be moved). FLAT_ATOMIC_ADD_F64 lifts to a `atomicrmw fadd
+  // double` on the per-lane address; gfx940+/gfx950 retain the matching
+  // `flat_atomic_add_f64` instruction (FLATInstructions.td:2972), so the
+  // backend re-emits it natively on the cross-target lower.
   FLAT_ATOMIC_ADD, FLAT_ATOMIC_SUB,
   FLAT_ATOMIC_AND, FLAT_ATOMIC_OR, FLAT_ATOMIC_XOR,
   FLAT_ATOMIC_SMIN, FLAT_ATOMIC_SMAX, FLAT_ATOMIC_UMIN, FLAT_ATOMIC_UMAX,
   FLAT_ATOMIC_SWAP, FLAT_ATOMIC_CMPSWAP,
   FLAT_ATOMIC_ADD_F32,
+  FLAT_ATOMIC_ADD_F64,
 
   // -- GLOBAL atomics --
+  // The handler in handle-flat.cpp dispatches by the range
+  //   [GLOBAL_ATOMIC_ADD, GLOBAL_ATOMIC_ADD_F64]
+  // (sentinel moved from GLOBAL_ATOMIC_PK_ADD_F16 to GLOBAL_ATOMIC_ADD_F64
+  // when 64-bit f64 atomics landed); keep this block contiguous.
+  // GLOBAL_ATOMIC_ADD_F64 lifts to `atomicrmw fadd double` on the per-lane
+  // global pointer; gfx940+/gfx950 retain the matching
+  // `global_atomic_add_f64` instruction (FLATInstructions.td:2975).
   GLOBAL_ATOMIC_ADD, GLOBAL_ATOMIC_SUB,
   GLOBAL_ATOMIC_AND, GLOBAL_ATOMIC_OR, GLOBAL_ATOMIC_XOR,
   GLOBAL_ATOMIC_SMIN, GLOBAL_ATOMIC_SMAX, GLOBAL_ATOMIC_UMIN, GLOBAL_ATOMIC_UMAX,
   GLOBAL_ATOMIC_SWAP, GLOBAL_ATOMIC_CMPSWAP,
   GLOBAL_ATOMIC_ADD_F32,
   GLOBAL_ATOMIC_PK_ADD_BF16, GLOBAL_ATOMIC_PK_ADD_F16,
+  GLOBAL_ATOMIC_ADD_F64,
 
   // -- SMEM atomics --
   // gfx8+ scalar-cache atomics.  Lifted to `atomicrmw` IR via handle-smem.cpp;

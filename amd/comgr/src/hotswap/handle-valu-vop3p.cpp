@@ -373,6 +373,90 @@ HandlerResult handleValuVoP3P(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  case CanonicalOp::V_PK_MAX_NUM_F16:
+  case CanonicalOp::V_PK_MIN_NUM_F16:
+  case CanonicalOp::V_PK_MIN3_NUM_F16:
+  case CanonicalOp::V_PK_MAX3_NUM_F16: {
+    // VOP3P packed f16 maximumNumber / minimumNumber (2-source) and
+    // packed f16 min3/max3 (3-source).  The 2-source forms exist on
+    // gfx9+ (TableGen pseudos V_PK_{MAX,MIN}_F16 mapped to fmaxnum_like
+    // / fminnum_like, VOP3PInstructions.td:140-141); the gfx12/gfx1250
+    // ISA spells the real opcodes `v_pk_{max,min}_num_f16` via the
+    // `_with_name` alias (line 2591-2592). The 3-source min3 / max3
+    // forms are gfx1250-only (HasMin3Max3PKF16 in AMDGPU.td:202;
+    // VOP3PInstructions.td:182-183 / :2612-2613).  All four share the
+    // packed-`<2 x half>` operand layout and the same modifier contract
+    // (neg_lo / neg_hi / op_sel / op_sel_hi).
+    constexpr unsigned KnownPkF16Mods =
+        SISrcMods::NEG | SISrcMods::NEG_HI | SISrcMods::OP_SEL_0 |
+        SISrcMods::OP_SEL_1;
+    const bool IsTernary = Sop == CanonicalOp::V_PK_MIN3_NUM_F16 ||
+                           Sop == CanonicalOp::V_PK_MAX3_NUM_F16;
+    const unsigned NumSrcs = IsTernary ? 3 : 2;
+    unsigned Mods[3] = {};
+    if (!readPackedSrcMods(Di, Op, NumSrcs, KnownPkF16Mods, Mods, Hr))
+      return Hr;
+
+    int ClampIdx = AMDGPU::getNamedOperandIdx(Di.Inst.getOpcode(),
+                                              AMDGPU::OpName::clamp);
+    if (ClampIdx < 0 || !Di.isImm(static_cast<unsigned>(ClampIdx))) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3P",
+          (diagnosticMnemonic(Di) + " missing immediate clamp operand").str());
+      return Hr;
+    }
+    int64_t ClampImm = Di.getImm(static_cast<unsigned>(ClampIdx));
+    if (ClampImm != 0 && ClampImm != 1) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3P",
+          (diagnosticMnemonic(Di) + " clamp operand is not 0 or 1").str());
+      return Hr;
+    }
+
+    auto *V2f16 = FixedVectorType::get(Ctx.F16Ty, 2);
+    PackedSrcOptions Opts;
+    Opts.ApplyFloatNeg = true;
+    Opts.Name = "pk_f16_src";
+    Value *S0 = readPacked2Src(Ctx, Op, 0, Ctx.F16Ty, Mods[0], Opts);
+    Value *S1 = readPacked2Src(Ctx, Op, 1, Ctx.F16Ty, Mods[1], Opts);
+
+    const bool IsMin = Sop == CanonicalOp::V_PK_MIN_NUM_F16 ||
+                       Sop == CanonicalOp::V_PK_MIN3_NUM_F16;
+    Intrinsic::ID Id = IsMin ? Intrinsic::minnum : Intrinsic::maxnum;
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, Id, {V2f16});
+
+    const char *Name = nullptr;
+    switch (Sop) {
+    case CanonicalOp::V_PK_MAX_NUM_F16:  Name = "pk_max_num_f16";  break;
+    case CanonicalOp::V_PK_MIN_NUM_F16:  Name = "pk_min_num_f16";  break;
+    case CanonicalOp::V_PK_MIN3_NUM_F16: Name = "pk_min3_num_f16"; break;
+    case CanonicalOp::V_PK_MAX3_NUM_F16: Name = "pk_max3_num_f16"; break;
+    default: llvm_unreachable("filtered by outer switch");
+    }
+    Value *Res = Ctx.B.CreateCall(Fn, {S0, S1}, Name);
+    if (IsTernary) {
+      Value *S2 = readPacked2Src(Ctx, Op, 2, Ctx.F16Ty, Mods[2], Opts);
+      Res = Ctx.B.CreateCall(Fn, {Res, S2}, Twine(Name) + "_3");
+    }
+
+    if (ClampImm != 0) {
+      Function *MaxFn = Intrinsic::getOrInsertDeclaration(
+          &Ctx.M, Intrinsic::maxnum, {V2f16});
+      Function *MinFn = Intrinsic::getOrInsertDeclaration(
+          &Ctx.M, Intrinsic::minnum, {V2f16});
+      Value *Zero = ConstantVector::getSplat(
+          ElementCount::getFixed(2), ConstantFP::get(Ctx.F16Ty, 0.0));
+      Value *One = ConstantVector::getSplat(
+          ElementCount::getFixed(2), ConstantFP::get(Ctx.F16Ty, 1.0));
+      Res = Ctx.B.CreateCall(MaxFn, {Res, Zero}, Twine(Name) + "_clamp_lo");
+      Res = Ctx.B.CreateCall(MinFn, {Res, One}, Twine(Name) + "_clamp");
+    }
+
+    Ctx.writeReg32(Op.dst(),
+                   Ctx.B.CreateBitCast(Res, Ctx.I32Ty, Twine(Name) + "_pack"));
+    Hr.Handled = true;
+    return Hr;
+  }
   case CanonicalOp::V_PK_ADD_BF16:
   case CanonicalOp::V_PK_MUL_BF16:
   case CanonicalOp::V_PK_MIN_NUM_BF16:
