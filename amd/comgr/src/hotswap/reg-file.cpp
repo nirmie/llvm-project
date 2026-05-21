@@ -110,6 +110,8 @@ void AllocaRegFile::init(IRBuilder<> &B, Type *I32Ty, Type *I1Ty,
   // subsequent `emitLaneActiveBit` call.
   Vcc = B.CreateAlloca(I1Ty, nullptr, "Vcc");
   B.CreateStore(ConstantInt::getFalse(I1Ty), Vcc);
+  VccRaw64 = B.CreateAlloca(B.getInt64Ty(), nullptr, "VccRaw64");
+  B.CreateStore(B.getInt64(0), VccRaw64);
   Scc = B.CreateAlloca(I1Ty, nullptr, "Scc");
   B.CreateStore(ConstantInt::getFalse(I1Ty), Scc);
   Exec = B.CreateAlloca(ExecTy, nullptr, "exec");
@@ -278,6 +280,10 @@ void AllocaRegFile::storeVCC(IRBuilder<> &B, Value *V) {
 
 Value *AllocaRegFile::loadVCC(IRBuilder<> &B) {
   return B.CreateLoad(B.getInt1Ty(), Vcc);
+}
+
+Value *AllocaRegFile::readVccRaw64(IRBuilder<> &B) {
+  return B.CreateLoad(B.getInt64Ty(), VccRaw64, "vcc_raw64");
 }
 
 void AllocaRegFile::storeSCC(IRBuilder<> &B, Value *V) {
@@ -509,6 +515,12 @@ void AllocaRegFile::writeReg64(IRBuilder<> &B, ParsedReg Pr, Value *V) {
   if (Pr.RegKind == ParsedReg::VCC) {
     assert(Projection && "writeReg64(VCC) requires a WaveProjection");
     storeVCC(B, Projection->extractLaneBitFromWaveMask(B, V));
+    // Also preserve the raw 64-bit value so VCC can be read back as a plain
+    // SGPR64 pointer when used as the SADDR operand in global_load_b*/b64.
+    Value *Raw = V;
+    if (Raw->getType() != B.getInt64Ty())
+      Raw = B.CreateBitOrPointerCast(Raw, B.getInt64Ty());
+    B.CreateStore(Raw, VccRaw64);
     return;
   }
   if (Pr.RegKind == ParsedReg::EXEC) {
@@ -651,6 +663,7 @@ void AllocaRegFile::collectAllocas(SmallVectorImpl<AllocaInst *> &Out) {
   for (auto *A : Vgpr) if (A) Out.push_back(A);
   for (auto *A : Agpr) if (A) Out.push_back(A);
   if (Vcc) Out.push_back(Vcc);
+  if (VccRaw64) Out.push_back(VccRaw64);
   if (Scc) Out.push_back(Scc);
   if (Exec) Out.push_back(Exec);
   if (M0) Out.push_back(M0);
