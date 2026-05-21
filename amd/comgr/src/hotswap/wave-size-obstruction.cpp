@@ -339,8 +339,16 @@ private:
       Lane = Reg;
     Out.push_back(static_cast<unsigned>(AMDGPU::mc2PseudoReg(Lane)));
 
-    const unsigned MaxSubIdx = MRI.getNumSubRegIndices();
-    for (unsigned SubIdx = AMDGPU::sub1; SubIdx < MaxSubIdx; ++SubIdx) {
+    // The AMDGPU sub-register index enum is non-sequential: sub0=3, sub1=11,
+    // sub2=21, sub3=31, sub4=41, sub5=51, sub6=61, etc. Sequential iteration
+    // from sub1 (=11) picks up sub1_hi16 (=12), sub1_lo16 (=13), etc. and
+    // breaks before reaching sub2 (=21) or sub3 (=31). Use the named constants
+    // directly so every DWORD lane of a wide tuple is enumerated correctly.
+    static const unsigned DwordSubIdxs[] = {
+        AMDGPU::sub1, AMDGPU::sub2, AMDGPU::sub3, AMDGPU::sub4,
+        AMDGPU::sub5, AMDGPU::sub6, AMDGPU::sub7,
+    };
+    for (unsigned SubIdx : DwordSubIdxs) {
       MCRegister Sub = MRI.getSubReg(Reg, SubIdx);
       if (!Sub)
         break;
@@ -497,8 +505,11 @@ bool readsTtmp8Source(const DecodedInst &Di, const MCRegisterInfo &MRI) {
     // Also check sub1..subN in case TTMP8 appears in the upper half of a
     // pair that starts earlier (unusual but possible in tuple-aligned
     // encodings).
-    const unsigned MaxSubIdx = MRI.getNumSubRegIndices();
-    for (unsigned SubIdx = AMDGPU::sub1; SubIdx < MaxSubIdx; ++SubIdx) {
+    static const unsigned DwordSubIdxs[] = {
+        AMDGPU::sub1, AMDGPU::sub2, AMDGPU::sub3, AMDGPU::sub4,
+        AMDGPU::sub5, AMDGPU::sub6, AMDGPU::sub7,
+    };
+    for (unsigned SubIdx : DwordSubIdxs) {
       MCRegister S = MRI.getSubReg(Reg, SubIdx);
       if (!S)
         break;
