@@ -301,11 +301,26 @@ struct ObstructionReport {
 // that want to pin the pre-rewrite REFUSE contract (lit fixtures for
 // the `c1_wave_id_lift_scalarized` REFUSE sibling, etc.) pass `false`
 // explicitly. See wave-size-translation.md §5.6.3.
+//
+// `enableWaveNative` tells the classifier that the raiser will use
+// WaveNativeProjection (init_whole_wave + SPE diamonds) rather than
+// ModuloReplicationProjection. Under wave-native, vector non-commutative
+// atomics (GLOBAL/FLAT/BUFFER _CMPSWAP/_SWAP) are NOT a race: each target
+// lane has a unique workitem-id-derived address, and the SPE diamond gates
+// every atomic through `br i1 %lane_active` so only the appropriate
+// source-wave lanes fire. The lane-i vs lane-i+W_s replica race that
+// ClassifyNonCommutativeAtomic models is a modulo-replication artefact;
+// wave-native's independent-half model has no such replicas. Scalar atomics
+// (S_ATOMIC_*) remain obstructions under both projections because the scalar
+// unit fires once per hardware wave regardless of the vector EXEC gate.
+// Default `false` preserves the existing MODREP-only contract for callers
+// that do not supply the argument.
 ObstructionReport buildObstructionReport(llvm::ArrayRef<DecodedInst> Insts,
                                           const MCState &Mc,
                                           const ISAProfile &Src,
                                           const ISAProfile &Tgt,
-                                          bool EnableWritelaneRewrite = true);
+                                          bool EnableWritelaneRewrite = true,
+                                          bool EnableWaveNative = false);
 
 // ----------------------------------------------------------------------------
 // Render the report into a human-readable trace. Intended for

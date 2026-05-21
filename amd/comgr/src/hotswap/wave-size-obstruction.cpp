@@ -559,7 +559,8 @@ ObstructionReport buildObstructionReport(ArrayRef<DecodedInst> Insts,
                                           const MCState &Mc,
                                           const ISAProfile &Src,
                                           const ISAProfile &Tgt,
-                                          bool EnableWritelaneRewrite) {
+                                          bool EnableWritelaneRewrite,
+                                          bool EnableWaveNative) {
   ObstructionReport Report;
   if (Src.WaveSize == Tgt.WaveSize)
     return Report;
@@ -934,12 +935,21 @@ ObstructionReport buildObstructionReport(ArrayRef<DecodedInst> Insts,
     // non-commutative binops the two possible orderings produce
     // different terminal values, and the source program has no way to
     // restore the intended single-wave ordering.
+    //
+    // Under WaveNativeProjection this race does NOT exist: each target
+    // lane has a unique workitem-id-derived address (no two lanes share
+    // a slot), and the SPE `emitUnderExec` diamond gates every atomic
+    // through `br i1 %lane_active` so only the source-wave's own lanes
+    // fire. The lane-i vs lane-i+W_s collision is a modulo-replication
+    // artefact; wave-native's independent-half model has no replicas.
     if (Sop == CanonicalOp::GLOBAL_ATOMIC_SWAP ||
         Sop == CanonicalOp::GLOBAL_ATOMIC_CMPSWAP ||
         Sop == CanonicalOp::FLAT_ATOMIC_SWAP ||
         Sop == CanonicalOp::FLAT_ATOMIC_CMPSWAP ||
         Sop == CanonicalOp::BUFFER_ATOMIC_SWAP ||
         Sop == CanonicalOp::BUFFER_ATOMIC_CMPSWAP) {
+      if (EnableWaveNative)
+        continue; // SPE diamond isolates replicas; no race under wave-native.
       ObstructionSite Site;
       Site.Inst = &Di;
       Site.Kind = ObstructionKind::NonCommutativeAtomic;

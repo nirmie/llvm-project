@@ -1,10 +1,18 @@
 ; RUN: %llvm_mc -mcpu=gfx1250 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
-; RUN:   && %not raise_cli %t.hsaco --target-isa=gfx942 --emit-ir=c3_atomic_cas_kernel 2>&1 | %FileCheck %s --check-prefix=STDERR
+; RUN:   && %not raise_cli %t.hsaco --target-isa=gfx942 --disable-wave-native \
+; RUN:     --emit-ir=c3_atomic_cas_kernel 2>&1 | %FileCheck %s --check-prefix=STDERR
 ;
-; Class 3 "inter-replica race via shared state" — see hotswap/docs/
-; wave-size-translation.md §6. Non-commutative atomics have no
-; rewrite that preserves the source semantics on a wider target
-; wave. The classifier must refuse.
+; Under WaveNativeProjection (the default) the Class 3 race is resolved:
+; each target lane has a unique workitem-id and the SPE diamond gates the
+; atomic through `br i1 %lane_active`, so no two lanes race on the same
+; address slot. The kernel should lift cleanly and produce `cmpxchg` IR.
+; RUN: raise_cli %t.hsaco --target-isa=gfx942 \
+; RUN:     --emit-ir=c3_atomic_cas_kernel 2>/dev/null | %FileCheck %s --check-prefix=WAVENATIVE
+;
+; Class 3 "inter-replica race via shared state" under modulo-replication —
+; see hotswap/docs/wave-size-translation.md §6. Non-commutative atomics
+; have no rewrite that preserves the source semantics on a wider target
+; wave under MODREP. Under WaveNative the SPE diamond eliminates the race.
 ;
 ; The audited corpus did not exercise this pattern, so this test exists
 ; as a guard / regression fence, not because any corpus kernel trips it.
@@ -23,6 +31,11 @@
 
 ; STDERR: raise_cli: kernel 'c3_atomic_cas_kernel' failed to raise:
 ; STDERR-SAME: cmpswap
+
+; WAVENATIVE-LABEL: define amdgpu_kernel void @c3_atomic_cas_kernel(
+; Under WaveNative the handler's `cmpxchg` IR is emitted; there is no
+; pre-translation abort.
+; WAVENATIVE: cmpxchg ptr addrspace(1)
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
