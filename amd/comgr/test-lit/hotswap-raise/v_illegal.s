@@ -1,11 +1,14 @@
 ; RUN: %llvm_mc -mcpu=gfx1250 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
 ; RUN:   && %raise_cli %t.hsaco --target-isa=gfx942 --emit-ir=v_illegal_kernel 2>/dev/null | %FileCheck %s
+; RUN: %llvm_mc -mcpu=gfx1250 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
+; RUN:   && %raise_cli %t.hsaco --target-isa=gfx950 --emit-ir=v_illegal_kernel 2>/dev/null | %FileCheck %s
 ;
 ; v_illegal (encoding 0x00000000) is a hardware-trap instruction. The raiser
 ; must lower it to llvm.trap + unreachable so its fault semantics are preserved
-; in the translated gfx942 binary. This instruction carries no VOP/SOP format
+; in the translated binary. This instruction carries no VOP/SOP format
 ; flag bits in TSFlags, so the dispatch path is handled by a canonical-op check
 ; before the format-flag dispatch in raiser.cpp.
+; Tests both gfx942 and gfx950 targets (wave64 targets for gfx1250 wave32 source).
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_illegal_kernel(
 ; CHECK: call void @llvm.trap()
