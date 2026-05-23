@@ -662,6 +662,24 @@ void decodeVopd(DecodedInst &Di, const MCInstrInfo &MCII,
 void collectBranchTargets(const DecodedInst &Di, uint64_t Off,
                           uint64_t InstSize,
                           std::set<uint64_t> &BlockStarts) {
+  // s_add_pc_i64: 12-byte SOP1 PC-relative long-branch trampoline.
+  // target = Off + InstSize + sign_extend(imm64). The standard SOPP
+  // 16-bit formula below must not run for this op.
+  if (Di.CanonOp == CanonicalOp::S_ADD_PC_I64) {
+    const MCInst &Inst = Di.Inst;
+    for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
+      if (!Inst.getOperand(I).isImm())
+        continue;
+      int64_t Imm64 = Inst.getOperand(I).getImm();
+      BlockStarts.insert(static_cast<uint64_t>(
+          static_cast<int64_t>(Off + InstSize) + Imm64));
+      break;
+    }
+    // s_add_pc_i64 is an unconditional branch (execnz fallthrough uses it);
+    // the instruction after it is not necessarily a new BB unless it was
+    // already marked as a leader by a preceding conditional branch.
+    return;
+  }
   const MCInst &Inst = Di.Inst;
   for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
     if (!Inst.getOperand(I).isImm())

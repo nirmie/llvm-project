@@ -778,6 +778,20 @@ HandlerResult handleSOP1(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  // s_add_pc_i64 imm64: gfx1250/gfx13 unconditional PC-relative long branch.
+  // Hardware: PC_next = (Off + Size) + sign_extend(imm64). The corpus emits
+  // this exclusively as a long-branch trampoline after a conditional branch
+  // that skips over it. collectBranchTargets in decode.cpp special-cases this
+  // CanonicalOp and inserts (Off + Size + imm64) as a block leader, so the
+  // target BB already exists. Emit `br label %BB_target`.
+  if (Sop == CanonicalOp::S_ADD_PC_I64) {
+    int64_t Imm64 = Op.srcImm(0);
+    uint64_t Target = static_cast<uint64_t>(
+        static_cast<int64_t>(Di.Offset + Di.Size) + Imm64);
+    Ctx.B.CreateBr(Ctx.lookupBB(Target));
+    Hr.Handled = true;
+    return Hr;
+  }
   return Hr;
 }
 
