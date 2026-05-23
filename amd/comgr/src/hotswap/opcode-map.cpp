@@ -422,11 +422,11 @@ static const Entry kCanonTable[] = {
     E(V_CVT_F32_UBYTE1_e64, V_CVT_F32_UBYTE1),
     E(V_CVT_F32_UBYTE2_e64, V_CVT_F32_UBYTE2),
     E(V_CVT_F32_UBYTE3_e64, V_CVT_F32_UBYTE3),
-    // F32<->F64 converts are registered on `_e64` only.  On gfx11+/gfx12 the
-    // production encodings are VOP1/DPP `_e64` forms; `_e32` slots exist on
-    // older ISAs (see VOP1Instructions.td) but are not emitted for the gfx1250
-    // corpus this table targets.  An unmapped `_e32` MC opcode would surface
-    // as UnsupportedOpcode rather than silently using the wrong profile.
+    // F32<->F64 converts are registered on `_e64` only.  The `_e32` forms
+    // (e.g. V_CVT_I32_F64_e32_gfx12, decoded by the gfx1250 disassembler via
+    // the shared gfx12 table) are canonicalized to `_e64` through the
+    // getVOPe64 step in `canonicalize`, so a single `_e64` entry here covers
+    // both encodings at runtime.
     E(V_CVT_F32_F64_e64, V_CVT_F32_F64),
     E(V_CVT_F64_F32_e64, V_CVT_F64_F32),
     E(V_CVT_F64_U32_e64, V_CVT_F64_U32),
