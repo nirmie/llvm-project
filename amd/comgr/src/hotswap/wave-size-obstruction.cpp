@@ -419,6 +419,56 @@ bool isSaveExecB32(CanonicalOp Sop) {
          Sop == CanonicalOp::S_ORN2_SAVEEXEC_B32;
 }
 
+// Return true iff `Sop` is a memory read (load) instruction whose destination
+// registers carry values fetched from memory, not values derived from the
+// load address.  Even when the address operand is lane-ID-tainted (e.g.
+// computed via v_mbcnt_*), the loaded data values are NOT lane-ID-derived:
+// they are whatever the kernel stored at those addresses earlier.  Propagating
+// address taint into the destination would cause the CmpxFromLaneId classifier
+// to flag downstream v_cmpx instructions that compare loaded data values as
+// "lane-predicated EXEC gates", producing a false-positive refusal.
+//
+// SMEM (S_LOAD_*): uniform scalar loads; address is SGPR-based (never
+//   v_mbcnt-derived in practice, but taint-safe to block regardless).
+// VMEM global/flat/scratch loads: per-lane loads; address may be v_mbcnt-
+//   derived (e.g. indexed by lane ID to fetch a per-lane value), but the
+//   loaded datum is the memory content, not the lane index.
+// MUBUF (BUFFER_LOAD_*): buffer loads with descriptor + offset; same argument.
+// DS reads (DS_READ_*): LDS loads; address often lane-derived for shuffle
+//   patterns, but again the loaded datum is the LDS content.
+// Note: DS_BPERMUTE_B32 already has its own special case above (only the
+//   DATA0 source, not the ADDR source, is taint-relevant for that op).
+static bool isMemoryReadOp(CanonicalOp Sop) {
+  // SMEM scalar loads
+  if (Sop >= CanonicalOp::S_LOAD_B32 && Sop <= CanonicalOp::S_LOAD_I16)
+    return true;
+  // FLAT / GLOBAL / SCRATCH loads
+  if (Sop >= CanonicalOp::FLAT_LOAD_UBYTE &&
+      Sop <= CanonicalOp::FLAT_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::GLOBAL_LOAD_UBYTE &&
+      Sop <= CanonicalOp::GLOBAL_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::SCRATCH_LOAD_DWORD &&
+      Sop <= CanonicalOp::SCRATCH_LOAD_DWORDX4)
+    return true;
+  // MUBUF buffer loads (includes D16 byte variants and LDS forms)
+  if (Sop >= CanonicalOp::BUFFER_LOAD_DWORD &&
+      Sop <= CanonicalOp::BUFFER_LOAD_DWORDX4_LDS)
+    return true;
+  // DS LDS reads (DS_READ_B32 .. DS_READ_I8 per the range comments in
+  // canonical-op.h; DS_BPERMUTE_B32 has its own case and is excluded)
+  if (Sop >= CanonicalOp::DS_READ_B32 && Sop <= CanonicalOp::DS_READ_I8)
+    return true;
+  // DS transposed reads (DS_LOAD_TR16_B128, DS_READ_B64_TR_B16, etc.)
+  if (Sop == CanonicalOp::DS_LOAD_TR16_B128 ||
+      Sop == CanonicalOp::DS_READ_B64_TR_B16 ||
+      Sop == CanonicalOp::DS_READ_B64_TR_B8 ||
+      Sop == CanonicalOp::DS_LOAD_TR8_B64)
+    return true;
+  return false;
+}
+
 SmallVector<LanePredicatedExecSite>
 findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
                             const MCRegisterInfo &MRI) {
@@ -458,6 +508,21 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       // by buildObstructionReport's main walk; here we only need to propagate
       // taint from DATA0 (SrcMap[1]), not from ADDR (SrcMap[0]).
       ExplicitDefsTainted = Tracker.sourceTainted(Di, 1);
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
+    } else if (isMemoryReadOp(Sop)) {
+      // Memory load instructions (global_load, flat_load, buffer_load,
+      // scratch_load, s_load, ds_read): the destination registers hold
+      // values fetched from memory.  Even when the address operand is
+      // lane-ID-tainted (e.g. indexed by v_mbcnt_* for per-lane
+      // array access), the loaded data is NOT itself a lane index.
+      // Propagating address taint into the destination would produce
+      // false-positive CmpxFromLaneId sites for v_cmpx instructions
+      // that compare the loaded memory values, not lane positions.
+      // Block taint propagation to the destination; the load address
+      // taint is irrelevant for what EXEC will be gated on.
+      ExplicitDefsTainted = false;
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
