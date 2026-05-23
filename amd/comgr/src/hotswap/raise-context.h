@@ -431,7 +431,7 @@ struct RaiseContext {
 
   // Pending failure raised during operand-read dispatch (e.g.
   // `readOp32` / `readOp64` encountering an unmodeled aperture
-  // register such as SRC_SHARED_BASE / SRC_FLAT_SCRATCH_BASE_LO).
+  // register such as SRC_POPS_EXITING_WAVE_ID).
   // Read paths cannot bail mid-handler -- they must return some
   // Value* -- so they record the failure here and the per-instruction
   // dispatch loop in `raiser.cpp` checks `pendingFailure` after each
