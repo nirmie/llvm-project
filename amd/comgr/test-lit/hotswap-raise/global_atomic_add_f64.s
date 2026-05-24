@@ -6,6 +6,11 @@
 ; `atomicrmw fadd ... double` operating on a global-address pointer (addrspace
 ; 1 in the original; flat after addrspacecast), with the data operand a
 ; bitcast of a 64-bit VGPR-pair read to `double`.
+;
+; Validates the fix for Bug-Id: 2026-05-23T19-19-07Z_qwen2.5-7b-instruct-003
+; (rocblas_symv double-buffered kernels used global_atomic_add_f64 [FLAT] which
+; was UnsupportedOpcode on gfx1250->gfx950 transpilation before this handler
+; was added).
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_atomic_add_f64_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
