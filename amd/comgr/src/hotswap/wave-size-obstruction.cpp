@@ -419,6 +419,31 @@ bool isSaveExecB32(CanonicalOp Sop) {
          Sop == CanonicalOp::S_ORN2_SAVEEXEC_B32;
 }
 
+// Return true iff Sop is a memory read (load) whose destination registers hold
+// values fetched from memory, not values derived from the load address.  Even
+// when the address is v_mbcnt-derived (lane-indexed array access), the loaded
+// data is not a lane index.  Propagating address taint into the destination
+// would cause the CmpxFromLaneId classifier to flag downstream v_cmpx
+// instructions that compare loaded values, producing a false-positive refusal.
+static bool isMemoryReadOp(CanonicalOp Sop) {
+  if (Sop >= CanonicalOp::S_LOAD_B32 && Sop <= CanonicalOp::S_LOAD_I16)
+    return true;
+  if (Sop >= CanonicalOp::FLAT_LOAD_UBYTE && Sop <= CanonicalOp::FLAT_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::GLOBAL_LOAD_UBYTE && Sop <= CanonicalOp::GLOBAL_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::SCRATCH_LOAD_DWORD && Sop <= CanonicalOp::SCRATCH_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::BUFFER_LOAD_DWORD && Sop <= CanonicalOp::BUFFER_LOAD_DWORDX4_LDS)
+    return true;
+  if (Sop >= CanonicalOp::DS_READ_B32 && Sop <= CanonicalOp::DS_READ_I8)
+    return true;
+  if (Sop == CanonicalOp::DS_LOAD_TR16_B128 || Sop == CanonicalOp::DS_READ_B64_TR_B16 ||
+      Sop == CanonicalOp::DS_READ_B64_TR_B8 || Sop == CanonicalOp::DS_LOAD_TR8_B64)
+    return true;
+  return false;
+}
+
 SmallVector<LanePredicatedExecSite>
 findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
                             const MCRegisterInfo &MRI) {
@@ -458,6 +483,13 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       // by buildObstructionReport's main walk; here we only need to propagate
       // taint from DATA0 (SrcMap[1]), not from ADDR (SrcMap[0]).
       ExplicitDefsTainted = Tracker.sourceTainted(Di, 1);
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
+    } else if (isMemoryReadOp(Sop)) {
+      // Memory load: destination holds loaded values, not the address.  Break
+      // taint propagation from a lane-ID-derived address into the destination.
+      ExplicitDefsTainted = false;
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
