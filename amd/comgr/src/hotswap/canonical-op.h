@@ -964,12 +964,6 @@ enum class CanonicalOp : uint16_t {
   // a separate set with their own tied-source dest_in handling.
   DS_WRITE_B16_D16_HI, DS_WRITE_B8_D16_HI,
   DS_BPERMUTE_B32,
-  // GFX11+ LDS compare-and-store atomic. DS_CMPSTORE_B32 is the
-  // no-return form; DS_CMPSTORE_RTN_B32 aliases to it via the _RTN
-  // alias rule in opcode-map.cpp. On GFX11+ the operand order is
-  // (addr, data0=new, data1=cmp, offset) — swapped vs pre-GFX11
-  // DS_CMPST_*. The handler differentiates RTN/no-RTN via NumDefs.
-  DS_CMPSTORE_B32,
   // Class 2 DsSwizzle (hotswap/docs/wave-size-translation.md §6).
   // Wave-width-specific cross-lane shuffle. The handler refuses with
   // `unsupportedShape` until the P6 rewrite (lift through
