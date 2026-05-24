@@ -237,7 +237,24 @@ HandlerResult handleSOP1(RaiseContext &Ctx, const DecodedInst &Di,
 
   if (Sop == CanonicalOp::S_AND_SAVEEXEC_B32) {
     Value *OldExec = Ctx.Regs.loadExec(Ctx.B);
-    Value *Src = Op.srcExecWidth(0);
+    // Elect-leader rewrite (ElectLeaderWaveNative). When the obstruction
+    // classifier tagged this as an elect-first-active-lane site
+    // (vcc = v_cmp_eq 0, mbcnt_lo(*,0); s_and_saveexec vcc_lo) AND
+    // the projection is WaveNative, the VCC mask contains 1s for both
+    // lane 0 and lane 32 (both have modular rank 0). AND-ing that into
+    // EXEC would elect both lanes, double-firing the downstream atomic.
+    // Correct rewrite: use ballot(lane_id == 0) as the mask instead.
+    Value *Src;
+    if (Ctx.Projection.providesFullWaveExecInvariant() &&
+        Ctx.ElectLeaderOffsets.contains(Di.Offset)) {
+      Value *LaneId = Ctx.emitLaneIdx();
+      Value *IsLeader = Ctx.B.CreateICmpEQ(
+          LaneId, Ctx.B.getInt32(0), "elect_leader");
+      Src = Ctx.Projection.ballotI1ToWidth(
+          Ctx.B, IsLeader, Ctx.Regs.ExecTy, "elect_leader_mask");
+    } else {
+      Src = Op.srcExecWidth(0);
+    }
     Ctx.Regs.writeRegExecWidth(Ctx.B, Op.dst(), OldExec);
     RecordOldExecShadowOnDst(OldExec);
     Value *NewExec = Ctx.B.CreateAnd(OldExec, Src, "new_exec");

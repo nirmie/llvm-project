@@ -21,6 +21,7 @@
 #include "wave-projection.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/IRBuilder.h"
@@ -448,6 +449,14 @@ struct RaiseContext {
     if (!PendingFailure.hasFailed())
       PendingFailure = std::move(F);
   }
+
+  // Set of instruction offsets tagged by the obstruction classifier as
+  // ElectLeaderWaveNative: these are `v_cmpx_eq 0, mbcnt_lo(*,0)` or
+  // `s_and_saveexec vcc` (where vcc = `v_cmp_eq 0, mbcnt_lo(*,0)`) sites
+  // that the V_CMPX and S_AND_SAVEEXEC_B32 handlers should rewrite to
+  // `ballot(lane_id == 0)` under WaveNativeProjection.
+  // Populated by raiser.cpp after buildObstructionReport; empty under MODREP.
+  llvm::DenseSet<uint64_t> ElectLeaderOffsets;
 };
 
 // Return value from every format handler.

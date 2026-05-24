@@ -490,13 +490,19 @@ static RaiseResult raiseToIRImpl(llvm::ArrayRef<uint8_t> TextBytes,
   // classifier and we refuse post-raise rather than emit silently
   // unchanged IR that scalarises the divergent wave_id lift.
   unsigned ClassifierWaveIdLiftScalarizedSites = 0;
+  // Elect-leader offsets: collected from the report and applied to Ctx after
+  // construction (Ctx doesn't exist until after Phase 1.4.5).
+  SmallVector<uint64_t> ElectLeaderOffsetsVec;
   {
     ObstructionReport Report =
         buildObstructionReport(Insts, Mc, Isa, TargetIsa,
                                EnableWritelaneRewrite, UseWaveNative);
-    for (const auto &S : Report.Sites)
+    for (const auto &S : Report.Sites) {
       if (S.Kind == ObstructionKind::WaveIdLiftScalarized)
         ++ClassifierWaveIdLiftScalarizedSites;
+      if (S.Rewrite == RewriteId::ElectLeaderWaveNative && S.Inst)
+        ElectLeaderOffsetsVec.push_back(S.Inst->Offset);
+    }
     std::string Trace = renderObstructionTrace(
         Report, KernelName, SourceIsa,
         CompilationTargetIsa.empty() ? SourceIsa : CompilationTargetIsa,
@@ -995,6 +1001,11 @@ static RaiseResult raiseToIRImpl(llvm::ArrayRef<uint8_t> TextBytes,
   Ctx.SourcePrivateSegmentFixedSize = Meta.PrivateSegmentFixedSize;
   Ctx.SourceComputePgmRsrc2 = Meta.ComputePgmRsrc2;
   Ctx.SourceKernelCodeProperties = Meta.KernelCodeProperties;
+  // Populate elect-leader offsets from the Phase 1.4.5 obstruction report.
+  // Under WaveNative these offsets mark v_cmpx_eq/s_and_saveexec sites that
+  // should use ballot(lane_id==0) instead of the balloted cmp result.
+  for (uint64_t Off : ElectLeaderOffsetsVec)
+    Ctx.ElectLeaderOffsets.insert(Off);
 
   // Dominance-safe SGPR wave-mask shadow storage.
   // One EXEC-width mask + one scalar-valid bit per SGPR base index.
