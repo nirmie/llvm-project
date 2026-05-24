@@ -12,6 +12,7 @@
 #include "isa-profile.h"
 #include "mc-state.h"
 #include "canonical-op.h"
+#include "opcode-map.h"
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h" // AMDGPU::OpName, AMDGPU::TTMP_32RegClassID, AMDGPU::mc2PseudoReg
 #include "Utils/AMDGPUBaseInfo.h"             // AMDGPU::getNamedOperandIdx
@@ -96,6 +97,8 @@ const char *rewriteIdName(RewriteId R) {
   case RewriteId::PostRaiseCrossLaneRewrite:
     return "post-raise cross-lane rewrite (writelane -> select, "
            "readlane -> ds.bpermute)";
+  case RewriteId::ElectLeaderWaveNative:
+    return "elect-leader wave-native rewrite (ballot(lane_id==0))";
   }
   return "UnknownRewriteId";
 }
@@ -267,11 +270,32 @@ struct LanePredicatedExecSite {
   const DecodedInst *Inst;
   ObstructionKind Kind; // CmpxFromLaneId or SaveExecFromLaneId.
   std::string Detail;
+  // True iff the pattern is the canonical "elect first active lane" idiom:
+  // v_mbcnt_lo(*, 0) == 0 feeding v_cmpx_eq or vcc_lo feeding s_and_saveexec.
+  // Under WaveNative, such sites can be rewritten to ballot(lane_id == 0).
+  bool IsElectLeader = false;
 };
 
 class LaneIdProvenanceTracker {
 public:
   explicit LaneIdProvenanceTracker(const MCRegisterInfo &MRI) : MRI(MRI) {}
+
+  // ── Snapshot/restore for branch-aware taint tracking ─────────────────────
+  struct Snapshot {
+    DenseSet<unsigned> TaintedRegs;
+    DenseSet<unsigned> ElectLeaderRegs;
+    bool ElectLeaderVcc = false;
+  };
+
+  Snapshot takeSnapshot() const {
+    return {TaintedRegs, ElectLeaderRegs, ElectLeaderVcc};
+  }
+
+  void restoreSnapshot(const Snapshot &S) {
+    TaintedRegs = S.TaintedRegs;
+    ElectLeaderRegs = S.ElectLeaderRegs;
+    ElectLeaderVcc = S.ElectLeaderVcc;
+  }
 
   bool anySourceTainted(const DecodedInst &Di) const {
     for (unsigned I = 0; I < Di.NumSrcs; ++I) {
@@ -341,6 +365,35 @@ public:
       setRegTaint(AMDGPU::SCC, SccTainted);
   }
 
+  // ── Elect-leader tracking ─────────────────────────────────────────────────
+  // Tracks VGPRs that hold `mbcnt_lo(*, 0)` (addend == 0): their value is
+  // the lane rank within the low 32 active lanes, equal to 0 for the first
+  // active lane. These are candidates for the "elect first active lane" idiom
+  // `v_cmpx_eq 0, vT` / `vcc = v_cmp_eq 0, vT; s_and_saveexec vcc`.
+
+  bool isRegElectLeader(MCRegister Reg) const {
+    SmallVector<unsigned> Lanes;
+    appendCanonicalRegLanes(Reg, Lanes);
+    for (unsigned Lane : Lanes)
+      if (ElectLeaderRegs.contains(Lane))
+        return true;
+    return false;
+  }
+
+  void setRegElectLeader(MCRegister Reg, bool Set) {
+    SmallVector<unsigned> Lanes;
+    appendCanonicalRegLanes(Reg, Lanes);
+    for (unsigned Lane : Lanes) {
+      if (Set)
+        ElectLeaderRegs.insert(Lane);
+      else
+        ElectLeaderRegs.erase(Lane);
+    }
+  }
+
+  // True iff VCC currently holds the result of `icmp eq 0, elect_leader_vgpr`.
+  bool ElectLeaderVcc = false;
+
 private:
   void appendCanonicalRegLanes(MCRegister Reg,
                                SmallVectorImpl<unsigned> &Out) const {
@@ -409,6 +462,8 @@ private:
 
   const MCRegisterInfo &MRI;
   DenseSet<unsigned> TaintedRegs;
+  // Physical-register lanes of VGPRs holding `mbcnt_lo(*, 0)` results.
+  DenseSet<unsigned> ElectLeaderRegs;
 };
 
 bool isSaveExecB32(CanonicalOp Sop) {
@@ -419,13 +474,98 @@ bool isSaveExecB32(CanonicalOp Sop) {
          Sop == CanonicalOp::S_ORN2_SAVEEXEC_B32;
 }
 
+// Return true iff `op` is a memory read (load) CanonicalOp — i.e. one whose
+// destination register holds memory content rather than a lane-index-derived
+// value, regardless of whether the address was derived from v_mbcnt_*.
+// When the taint tracker encounters such an op it should CLEAR destination
+// taint: the loaded value cannot be a lane index even if the address was.
+static bool isMemoryReadOp(CanonicalOp Op) {
+  auto V = static_cast<uint16_t>(Op);
+  auto InRange = [V](CanonicalOp First, CanonicalOp Last) {
+    return V >= static_cast<uint16_t>(First) &&
+           V <= static_cast<uint16_t>(Last);
+  };
+  // SMEM scalar loads: S_LOAD_B32 .. S_LOAD_I16
+  if (InRange(CanonicalOp::S_LOAD_B32, CanonicalOp::S_LOAD_I16))
+    return true;
+  // FLAT loads: FLAT_LOAD_UBYTE .. FLAT_LOAD_DWORDX4
+  if (InRange(CanonicalOp::FLAT_LOAD_UBYTE, CanonicalOp::FLAT_LOAD_DWORDX4))
+    return true;
+  // GLOBAL loads: GLOBAL_LOAD_UBYTE .. GLOBAL_LOAD_DWORDX4
+  if (InRange(CanonicalOp::GLOBAL_LOAD_UBYTE, CanonicalOp::GLOBAL_LOAD_DWORDX4))
+    return true;
+  // SCRATCH loads: SCRATCH_LOAD_DWORD .. SCRATCH_LOAD_DWORDX4
+  if (InRange(CanonicalOp::SCRATCH_LOAD_DWORD, CanonicalOp::SCRATCH_LOAD_DWORDX4))
+    return true;
+  // DS (LDS) reads: DS_READ_B32 .. DS_READ_I8
+  if (InRange(CanonicalOp::DS_READ_B32, CanonicalOp::DS_READ_I8))
+    return true;
+  // BUFFER (MUBUF) loads: BUFFER_LOAD_DWORD .. BUFFER_LOAD_DWORDX4_LDS
+  if (InRange(CanonicalOp::BUFFER_LOAD_DWORD, CanonicalOp::BUFFER_LOAD_DWORDX4_LDS))
+    return true;
+  return false;
+}
+
+// Return true iff `di` has an integer EQ comparison predicate.
+// Prefers Di.Vcmp (populated for e64 forms); falls back to mnemonic matching
+// for e32 forms whose MC opcode name ends in "_e32" and is absent from the
+// Vcmp side-table (parseVCmpPseudoName requires "_e64" suffix).
+static bool isEqPred(const DecodedInst &Di) {
+  if (Di.Vcmp)
+    return !Di.Vcmp->IsFloat && !Di.Vcmp->IsClass &&
+           Di.Vcmp->Pred == llvm::CmpInst::ICMP_EQ;
+  // e32 fallback: match "_EQ_" in the uppercase canonical mnemonic.
+  // Di.Mnemonic is the lowercase disassembler string (e.g. "v_cmpx_eq_u32_e32");
+  // use case-insensitive contains to avoid assuming case convention.
+  llvm::StringRef Mn(Di.Mnemonic);
+  return Mn.contains_insensitive("_eq_");
+}
+
+// Return true iff one of di's source operands is the immediate 0
+// and the other is a register whose canonical lane set overlaps
+// `ElectLeaderRegs` in `tracker`.  Used to detect `v_cmpx_eq 0, vT`
+// and `v_cmp_eq vcc, 0, vT` where vT is a zero-rank mbcnt_lo result.
+static bool isElectLeaderEqZero(const DecodedInst &Di,
+                                 const LaneIdProvenanceTracker &Tracker) {
+  if (!isEqPred(Di))
+    return false;
+  // We need exactly one immediate-0 source and at least one register source.
+  bool HasImm0 = false;
+  bool HasElectLeaderReg = false;
+  for (unsigned I = 0; I < Di.NumSrcs; ++I) {
+    unsigned OpIdx = Di.SrcMap[I];
+    if (OpIdx >= Di.Inst.getNumOperands())
+      continue;
+    const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+    if (Op.isImm() && Op.getImm() == 0)
+      HasImm0 = true;
+    else if (Op.isReg() && Tracker.isRegElectLeader(Op.getReg()))
+      HasElectLeaderReg = true;
+  }
+  return HasImm0 && HasElectLeaderReg;
+}
+
 SmallVector<LanePredicatedExecSite>
 findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
                             const MCRegisterInfo &MRI) {
   LaneIdProvenanceTracker Tracker(MRI);
   SmallVector<LanePredicatedExecSite> Sites;
 
+  // When an unconditional forward branch is encountered, snapshot the tracker
+  // state at the branch point and restore it at the branch target.  This
+  // prevents code in skipped loop back-edge blocks from incorrectly
+  // propagating taint into the fall-through path that the branch jumps to.
+  DenseMap<uint64_t, LaneIdProvenanceTracker::Snapshot> ForwardBranchSnapshots;
+
   for (const DecodedInst &Di : Insts) {
+    // Restore taint state if this instruction is a target of a saved
+    // forward-branch snapshot.  This discards any taint accumulated in the
+    // skipped block between the branch and this target.
+    if (auto It = ForwardBranchSnapshots.find(Di.Offset);
+        It != ForwardBranchSnapshots.end()) {
+      Tracker.restoreSnapshot(It->second);
+      ForwardBranchSnapshots.erase(It);
+    }
     const CanonicalOp Sop = Di.CanonOp;
     if (Di.HasVopd) {
       Tracker.updateAfterVopd(Di);
@@ -439,12 +579,33 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
     bool ExecTainted = SourceTainted || OldExecTainted;
     bool SccTainted = SourceTainted;
 
+    // Clear elect-leader tracking on any VGPR write that is NOT one of the
+    // tracked pattern opcodes.  The Tracker.updateAfterInstruction below
+    // handles per-VGPR taint; elect-leader is cleared on any intervening
+    // VGPR define by the block at the end of this if-else chain.
+    bool ClearsElectLeaderDefs = true; // cleared for any def not in our pattern
+
     if (Sop == CanonicalOp::V_MBCNT_LO_U32_B32 ||
         Sop == CanonicalOp::V_MBCNT_HI_U32_B32) {
       ExplicitDefsTainted = true;
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
+      // If this is V_MBCNT_LO with addend == 0, the destination VGPR holds
+      // the zero-rank candidate value (mbcnt_lo(*, 0)).  Mark it so that a
+      // downstream `v_cmpx_eq 0, vT` / `v_cmp_eq vcc, 0, vT` can be
+      // recognised as the elect-leader pattern.
+      if (Sop == CanonicalOp::V_MBCNT_LO_U32_B32 && Di.NumSrcs >= 2) {
+        unsigned Src1Idx = Di.SrcMap[1];
+        bool Addend0 = (Src1Idx < Di.Inst.getNumOperands() &&
+                        Di.Inst.getOperand(Src1Idx).isImm() &&
+                        Di.Inst.getOperand(Src1Idx).getImm() == 0);
+        // Mark destination VGPR as elect-leader candidate.
+        if (Di.NumDefs >= 1 && Di.Inst.getOperand(0).isReg())
+          Tracker.setRegElectLeader(Di.Inst.getOperand(0).getReg(), Addend0);
+        ClearsElectLeaderDefs = false; // we just set it explicitly
+      }
+      Tracker.ElectLeaderVcc = false; // mbcnt clears any prior elect-leader VCC
     } else if (Sop == CanonicalOp::DS_BPERMUTE_B32) {
       // ds_bpermute_b32 vDST, ADDR, DATA0: the destination carries the DATA0
       // value gathered from the source lane selected by ADDR.  ADDR is often
@@ -461,33 +622,103 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
+    } else if (Sop == CanonicalOp::V_CMP) {
+      // V_CMP (non-cmpx): may write VCC or an SGPR.  If this is an EQ-to-0
+      // comparison of an elect-leader VGPR, set ElectLeaderVcc so that a
+      // downstream s_and_saveexec_b32 can be recognised.
+      bool IsElectLeaderEq = isElectLeaderEqZero(Di, Tracker);
+      if (Di.DefsVcc)
+        Tracker.ElectLeaderVcc = IsElectLeaderEq;
+      // Taint propagation: unchanged (any source taint propagates to defs/VCC).
     } else if (Sop == CanonicalOp::V_CMPX) {
+      bool IsElectLeader = SourceTainted && isElectLeaderEqZero(Di, Tracker);
       if (SourceTainted) {
-        Sites.push_back(
-            {&Di, ObstructionKind::CmpxFromLaneId,
-             "v_cmpx operand dataflow is derived from v_mbcnt_*; EXEC would "
-             "be gated by absolute target lane position under cross-widening"});
+        LanePredicatedExecSite Site;
+        Site.Inst = &Di;
+        Site.Kind = ObstructionKind::CmpxFromLaneId;
+        Site.IsElectLeader = IsElectLeader;
+        Site.Detail =
+            IsElectLeader
+                ? "v_cmpx_eq 0 of v_mbcnt_lo(*,0): elect-first-active-lane "
+                  "pattern; EXEC would elect lanes 0 and 32 under cross-widening "
+                  "(both have source-local rank 0); wave-native rewrite uses "
+                  "ballot(lane_id==0)"
+                : "v_cmpx operand dataflow is derived from v_mbcnt_*; EXEC would "
+                  "be gated by absolute target lane position under cross-widening";
+        Sites.push_back(std::move(Site));
       }
       ExplicitDefsTainted = false;
       VccTainted = false;
       ExecTainted = OldExecTainted || SourceTainted;
       SccTainted = false;
+      Tracker.ElectLeaderVcc = false;
+    } else if (isMemoryReadOp(Sop)) {
+      // Memory load: destination holds the loaded value, not the address.
+      // Clear destination taint even if the address was lane-ID-derived;
+      // the loaded value is not a lane index.
+      ExplicitDefsTainted = false;
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
     } else if (isSaveExecB32(Sop)) {
+      bool IsElectLeader = SourceTainted && Tracker.ElectLeaderVcc;
       if (SourceTainted) {
-        Sites.push_back(
-            {&Di, ObstructionKind::SaveExecFromLaneId,
-             "s_*_saveexec_b32 source mask dataflow is derived from "
-             "v_mbcnt_*; EXEC would be gated by absolute target lane "
-             "position under cross-widening"});
+        LanePredicatedExecSite Site;
+        Site.Inst = &Di;
+        Site.Kind = ObstructionKind::SaveExecFromLaneId;
+        Site.IsElectLeader = IsElectLeader;
+        Site.Detail =
+            IsElectLeader
+                ? "s_and_saveexec_b32 of vcc_lo from v_cmp_eq 0, v_mbcnt_lo(*,0): "
+                  "elect-first-active-lane pattern; EXEC would elect lanes 0 and 32 "
+                  "under cross-widening; wave-native rewrite uses ballot(lane_id==0)"
+                : "s_*_saveexec_b32 source mask dataflow is derived from "
+                  "v_mbcnt_*; EXEC would be gated by absolute target lane "
+                  "position under cross-widening";
+        Sites.push_back(std::move(Site));
       }
       ExplicitDefsTainted = OldExecTainted;
       VccTainted = false;
       ExecTainted = OldExecTainted || SourceTainted;
       SccTainted = ExecTainted;
+      Tracker.ElectLeaderVcc = false;
+    }
+
+    // Clear elect-leader tracking on any VGPR destination that is not one of
+    // the tracked pattern steps (V_MBCNT_LO is handled above with explicit
+    // setRegElectLeader; all other instructions writing VGPRs clobber the
+    // elect-leader candidate by replacing the value).
+    if (ClearsElectLeaderDefs) {
+      for (unsigned I = 0; I < Di.NumDefs; ++I) {
+        if (I >= Di.Inst.getNumOperands())
+          break;
+        const MCOperand &Op = Di.Inst.getOperand(I);
+        if (Op.isReg())
+          Tracker.setRegElectLeader(Op.getReg(), false);
+      }
     }
 
     Tracker.updateAfterInstruction(Di, ExplicitDefsTainted, VccTainted,
                                    ExecTainted, SccTainted);
+
+    // After updating taint, record a snapshot for unconditional forward
+    // branches so that the skipped block cannot contaminate the branch target.
+    // SOPP branches (s_branch, etc.) carry a 16-bit signed PC-relative word
+    // offset in their sole immediate operand.
+    if (Di.IsBranch && !Di.IsConditionalBranch) {
+      for (unsigned I = 0; I < Di.Inst.getNumOperands(); ++I) {
+        const MCOperand &Op = Di.Inst.getOperand(I);
+        if (!Op.isImm())
+          continue;
+        int64_t WordOff =
+            static_cast<int64_t>(static_cast<int16_t>(
+                static_cast<uint16_t>(Op.getImm() & 0xFFFF)));
+        uint64_t Target = Di.Offset + Di.Size + static_cast<uint64_t>(WordOff * 4);
+        if (Target > Di.Offset)
+          ForwardBranchSnapshots.try_emplace(Target, Tracker.takeSnapshot());
+        break;
+      }
+    }
   }
 
   return Sites;
@@ -1156,13 +1387,24 @@ ObstructionReport buildObstructionReport(ArrayRef<DecodedInst> Insts,
   // register provenance pre-walk. This replaces the old kernel-wide
   // co-occurrence heuristic while preserving the same fail-loud
   // outcome for true mbcnt-fed EXEC predicates.
+  //
+  // Under WaveNative, the "elect first active lane" pattern
+  // (v_mbcnt_lo(*,0) == 0 feeding v_cmpx_eq or vcc feeding
+  // s_and_saveexec) has an implemented rewrite: ballot(lane_id == 0).
+  // Tag those sites as ElectLeaderWaveNative so the classifier passes
+  // the kernel through to the handler rewrite instead of refusing.
   for (const auto &Pw : LanePredicatedExecSites) {
     ObstructionSite Site;
     Site.Inst = Pw.Inst;
     Site.Kind = Pw.Kind;
-    Site.Rewrite = RewriteId::None;
-    Site.RewriteImplemented = false;
     Site.Detail = Pw.Detail;
+    if (EnableWaveNative && Pw.IsElectLeader) {
+      Site.Rewrite = RewriteId::ElectLeaderWaveNative;
+      Site.RewriteImplemented = true;
+    } else {
+      Site.Rewrite = RewriteId::None;
+      Site.RewriteImplemented = false;
+    }
     Report.Sites.push_back(std::move(Site));
   }
 

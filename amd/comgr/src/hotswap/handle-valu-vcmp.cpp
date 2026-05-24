@@ -197,7 +197,22 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
     // target-lane answer on lanes 32..63. See
     // `lit_tests/v_cmpx_ballot` for the pinned IR shape (MODREP)
     // and `lit_tests/v_cmpx_wave_native` for the wave-native shape.
-    Value *Mask = Ctx.Projection.ballotI1ToWidth(Ctx.B, Cmp,
+    //
+    // Elect-leader rewrite (ElectLeaderWaveNative). When the obstruction
+    // classifier tagged this instruction as an elect-first-active-lane site
+    // (v_cmpx_eq 0, mbcnt_lo(*,0)) AND the projection is WaveNative, the
+    // modular mbcnt_lo(*, 0) result is 0 for BOTH lane 0 and lane 32 (since
+    // both have lane_id % 32 == 0). Balloting `Cmp` would elect both, firing
+    // the downstream atomic on two lanes instead of one. The correct rewrite
+    // is ballot(lane_id == 0): only hardware lane 0 passes.
+    Value *EffectivePred = Cmp;
+    if (Ctx.Projection.providesFullWaveExecInvariant() &&
+        Ctx.ElectLeaderOffsets.contains(Di.Offset)) {
+      Value *LaneId = Ctx.emitLaneIdx();
+      EffectivePred = Ctx.B.CreateICmpEQ(
+          LaneId, Ctx.B.getInt32(0), "elect_leader");
+    }
+    Value *Mask = Ctx.Projection.ballotI1ToWidth(Ctx.B, EffectivePred,
                                                   Ctx.Regs.ExecTy,
                                                   "cmpx_ballot");
     Value *CurExec = Ctx.Regs.loadExec(Ctx.B);

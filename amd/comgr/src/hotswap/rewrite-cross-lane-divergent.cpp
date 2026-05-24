@@ -1087,14 +1087,24 @@ void rewriteUpdateDppI32Call(CallInst *CI, Value *LaneId) {
   // instcombine folds post-pass.
   Value *WithinRow = B.CreateAnd(LaneId, ConstantInt::get(I32Ty, 0xF),
                                   "cwd_dpp_within_row");
-  Value *RowIdx =
-      B.CreateAnd(B.CreateLShr(LaneId, ConstantInt::get(I32Ty, 4)),
-                   ConstantInt::get(I32Ty, 3), "cwd_dpp_row");
-  Value *BankIdx =
-      B.CreateAnd(B.CreateLShr(LaneId, ConstantInt::get(I32Ty, 2)),
-                   ConstantInt::get(I32Ty, 3), "cwd_dpp_bank");
   Value *RowBase = B.CreateAnd(LaneId, ConstantInt::get(I32Ty, ~0xFu),
                                 "cwd_dpp_row_base");
+
+  // row_mask / bank_mask are destination-write masks defined against
+  // the source wave's physical rows and banks (gfx1250 is wave32).
+  // Under wave32→wave64 widening, target lanes 32-63 mirror the
+  // source wave-local lanes 0-31, so mask evaluation must use the
+  // source-wave-local lane index (LaneId & 31).  Using the raw target
+  // LaneId (0..63) would compute wrong row/bank indices for the upper
+  // half of the widened wave.
+  Value *SourceLane = B.CreateAnd(LaneId, ConstantInt::get(I32Ty, 31),
+                                   "cwd_dpp_source_lane");
+  Value *RowIdx =
+      B.CreateAnd(B.CreateLShr(SourceLane, ConstantInt::get(I32Ty, 4)),
+                   ConstantInt::get(I32Ty, 3), "cwd_dpp_source_row");
+  Value *BankIdx =
+      B.CreateAnd(B.CreateLShr(SourceLane, ConstantInt::get(I32Ty, 2)),
+                   ConstantInt::get(I32Ty, 3), "cwd_dpp_source_bank");
 
   // Per-ctrl source mapping.  `isDppCtrlRewritable` gated the call
   // site -- `buildDppLaneMap` is guaranteed to return a valid map.
@@ -1295,7 +1305,7 @@ CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
          << "' has an update.dpp site with unsupported "
          << describeDppCtrl(Ctrl)
          << ". The cross-widen rewrite only covers quad_perm, "
-            "row_shl:N and row_shr:N today (all stay within a "
+            "row_shl:N, row_shr:N and row_xmask:N today (all stay within a "
             "single 16-lane row, hence wave-size-oblivious). "
             "Extending the supported set requires a per-ctrl "
             "correctness argument in buildDppLaneMap and a new "

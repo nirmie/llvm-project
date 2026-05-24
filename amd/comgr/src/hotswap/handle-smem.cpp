@@ -174,16 +174,39 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
             RaiseFailure::unsupportedShape(Di, "SMEM", HiddenBase.FailureDetail);
         return Hr;
       }
+      Function *FnImplicitArgPtrMixed = nullptr;
       for (int D = 0; D < LoadDwords; D++) {
         SourceHiddenArgValue Dw =
             D == 0 ? HiddenBase
                    : emitSourceHiddenDword(HiddenCtx, ByteOffset + D * 4);
-        if (!Dw.Matched || !Dw.Value) {
-          Hr.Failure = RaiseFailure::unsupportedShape(
-              Di, "SMEM",
-              Dw.FailureDetail.empty()
-                  ? "source hidden-arg SMEM load spans non-hidden bytes"
-                  : Dw.FailureDetail);
+        if (!Dw.Matched) {
+          // The dword falls in a gap between classified hidden args (e.g. the
+          // padding between hidden_remainder_z and hidden_global_offset_x).
+          // Load from amdgcn_implicitarg_ptr at the rebased offset instead of
+          // refusing the whole instruction.
+          if (!FnImplicitArgPtrMixed)
+            FnImplicitArgPtrMixed = Intrinsic::getOrInsertDeclaration(
+                &Ctx.M, Intrinsic::amdgcn_implicitarg_ptr);
+          Value *ImplPtr =
+              Ctx.B.CreateCall(FnImplicitArgPtrMixed, {}, "implicitarg_ptr");
+          int64_t ImplOff =
+              ByteOffset + D * 4 - Ctx.Kernargs.ImplicitArgsBase;
+          Value *Ep =
+              ImplOff == 0
+                  ? ImplPtr
+                  : Ctx.B.CreateInBoundsGEP(Ctx.I8Ty, ImplPtr,
+                                             Ctx.B.getInt64(ImplOff),
+                                             "impl_gap_gep");
+          Value *Loaded = Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_gap_load");
+          if (D == 0 && Dest.RegKind != ParsedReg::SGPR)
+            Ctx.Regs.writeReg32(Ctx.B, Dest, Loaded);
+          else
+            Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, Loaded);
+          continue;
+        }
+        if (!Dw.Value) {
+          Hr.Failure =
+              RaiseFailure::unsupportedShape(Di, "SMEM", Dw.FailureDetail);
           return Hr;
         }
         if (D == 0 && Dest.RegKind != ParsedReg::SGPR)

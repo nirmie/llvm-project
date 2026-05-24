@@ -237,7 +237,24 @@ HandlerResult handleSOP1(RaiseContext &Ctx, const DecodedInst &Di,
 
   if (Sop == CanonicalOp::S_AND_SAVEEXEC_B32) {
     Value *OldExec = Ctx.Regs.loadExec(Ctx.B);
-    Value *Src = Op.srcExecWidth(0);
+    // Elect-leader rewrite (ElectLeaderWaveNative). When the obstruction
+    // classifier tagged this as an elect-first-active-lane site
+    // (vcc = v_cmp_eq 0, mbcnt_lo(*,0); s_and_saveexec vcc_lo) AND
+    // the projection is WaveNative, the VCC mask contains 1s for both
+    // lane 0 and lane 32 (both have modular rank 0). AND-ing that into
+    // EXEC would elect both lanes, double-firing the downstream atomic.
+    // Correct rewrite: use ballot(lane_id == 0) as the mask instead.
+    Value *Src;
+    if (Ctx.Projection.providesFullWaveExecInvariant() &&
+        Ctx.ElectLeaderOffsets.contains(Di.Offset)) {
+      Value *LaneId = Ctx.emitLaneIdx();
+      Value *IsLeader = Ctx.B.CreateICmpEQ(
+          LaneId, Ctx.B.getInt32(0), "elect_leader");
+      Src = Ctx.Projection.ballotI1ToWidth(
+          Ctx.B, IsLeader, Ctx.Regs.ExecTy, "elect_leader_mask");
+    } else {
+      Src = Op.srcExecWidth(0);
+    }
     Ctx.Regs.writeRegExecWidth(Ctx.B, Op.dst(), OldExec);
     RecordOldExecShadowOnDst(OldExec);
     Value *NewExec = Ctx.B.CreateAnd(OldExec, Src, "new_exec");
@@ -463,6 +480,28 @@ HandlerResult handleSOP1(RaiseContext &Ctx, const DecodedInst &Di,
     CallTarget->setName("swap_call_target_marker");
     emitEnumeratedDispatch(Ctx, CallTarget, Info.IndirectTargets,
                            Di.Offset);
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::S_ADD_PC_I64) {
+    // PC-relative unconditional long-branch trampoline (gfx1250/gfx13).
+    // Hardware: PC_next = (PC_after_inst) + sign_extend(imm64).
+    // The corpus uses this as a trampoline immediately after a conditional
+    // branch that skips over it; the instruction itself is always an
+    // unconditional branch in the raised IR.
+    // decode.cpp::collectBranchTargets already computed and inserted the
+    // target offset as a block leader; we just need to emit the branch.
+    const MCInst &Inst = Di.Inst;
+    int64_t Imm64 = 0;
+    for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
+      if (Inst.getOperand(I).isImm()) {
+        Imm64 = Inst.getOperand(I).getImm();
+        break;
+      }
+    }
+    uint64_t Target = static_cast<uint64_t>(
+        static_cast<int64_t>(Di.Offset + Di.Size) + Imm64);
+    Ctx.B.CreateBr(Ctx.lookupBB(Target));
     Hr.Handled = true;
     return Hr;
   }
