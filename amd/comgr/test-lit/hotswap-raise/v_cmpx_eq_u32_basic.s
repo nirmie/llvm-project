@@ -12,6 +12,7 @@
 ; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-014
 ; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-014
 ; Also covers Bug-Id: 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-014
+; Also covers Bug-Id: 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-014
 ;
 ; rocprim lookback-scan kernels (fatbin_co_0298.co, 1 hit across 1 kernel)
 ; were reported as UnsupportedOpcode for v_cmpx_eq_u32.  The instruction
