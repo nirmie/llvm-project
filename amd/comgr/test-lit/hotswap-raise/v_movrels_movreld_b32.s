@@ -5,6 +5,15 @@
 ; v_movreld_b32: indirect VGPR write -- writes vsrc to VGPR[base(vdst) + M0].
 ; Both use M0 as runtime index; the raiser models each as extractelement /
 ; insertelement on a vector of consecutive VGPRs.
+;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-029:
+; 50 hits across 50 rocSOLVER kernels (sample:
+; _ZN9rocsolver6v33300L18trti2_kernel_smallILi8EfPfEEv13rocblas_fill_17rocblas_diagonal_T1_iil
+; in fatbin_co_0106.co) were reported as UnsupportedOpcode for
+; v_movrels_b32 at hotswap commit 8f2db5ec2edc.  The VOP1 handler under
+; CanonicalOp::V_MOVRELS_B32 in handle-valu.cpp (added in commit
+; fada2c42aa76) emits extractelement over a consecutive VGPR vector; all
+; 128 kernels in fatbin_co_0106.co raise successfully (128 ok, 0 fail).
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_movrels_movreld_b32_kernel(
 ; CHECK: extractelement <{{[0-9]+}} x i32>
