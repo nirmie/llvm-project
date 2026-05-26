@@ -18,6 +18,14 @@
 ; Regression target for UnsupportedOpcode failure observed in the
 ; rocSOLVER stebz_bisection_kernel (double-precision variant).
 ; Bug-Id: 2026-05-23T19-19-07Z_qwen2.5-7b-instruct-027
+;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-025:
+; 109 hits across 9 rocSOLVER kernels (sample: stedcj_solve_kernelIfE in
+; fatbin_co_0141.co) were reported as UnsupportedOpcode for
+; v_frexp_exp_i32_f64 at hotswap commit 8f2db5ec2edc.  The handler under
+; CanonicalOp::V_FREXP_EXP_I32_F64 in handle-valu.cpp emits
+; llvm.amdgcn.frexp.exp.i32.f64 and was already in place; all 33 kernels
+; in fatbin_co_0141.co raise successfully (33 ok, 0 fail).
 
 ; IR-LABEL: define amdgpu_kernel void @v_frexp_mant_f64_kernel(
 ; IR: call double @llvm.amdgcn.frexp.mant.f64(double
