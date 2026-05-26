@@ -223,6 +223,7 @@ SourceHiddenArgValue emitSourceHiddenInteger(SourceHiddenArgContext &Ctx,
       if (I == 0)
         return {};
       Result.Matched = true;
+      Result.IsGapSpan = true;
       Result.FailureDetail =
           (Twine("source hidden dword at byte offset ") + Twine(ByteOffset) +
            " spans non-hidden byte " + Twine(ByteOffset + static_cast<int>(I)))
