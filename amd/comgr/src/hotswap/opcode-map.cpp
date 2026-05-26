@@ -626,17 +626,20 @@ static const Entry kCanonTable[] = {
     E(V_MADMK_F16, V_MADMK_F16),
     E(V_MADAK_F16, V_MADAK_F16),
     E(V_FMAC_F16_e64, V_FMAC_F16),
-    // VOP3 F16 explicit-source fused multiply-add. LLVM emits two parallel
-    // pseudos because gfx9 introduced op_sel on the original gfx8 V_FMA_F16:
-    //   V_FMA_F16_e64        -- gfx8 ("vi") form (no op_sel)
-    //   V_FMA_F16_gfx9_e64   -- gfx9+ op_sel form (also the base for t16/
-    //                            fake16 collapse below)
-    // Both map to the same llvm.fma.f16 lowering; the gfx9 op_sel handling
-    // lives in the handler. The `_t16_` / `_fake16_` 16-bit encoding
-    // variants on top of the gfx9 form are folded onto V_FMA_F16_gfx9_e64
-    // by the sameSemanticShape stripping pass in `buildPseudoAliasMap`.
+    // VOP3 F16 explicit-source fused multiply-add. LLVM emits four parallel
+    // pseudos because gfx9 introduced op_sel on the original gfx8 V_FMA_F16,
+    // and gfx11+ added True16/Fake16 encoding variants:
+    //   V_FMA_F16_e64             -- gfx8 ("vi") form (no op_sel)
+    //   V_FMA_F16_gfx9_e64        -- gfx9+ op_sel form
+    //   V_FMA_F16_gfx9_t16_e64   -- gfx11+ True16 encoding (VGPR_16 regs)
+    //   V_FMA_F16_gfx9_fake16_e64 -- gfx11+ Fake16 encoding (VGPR_32 regs)
+    // All four map to the same llvm.fma.f16 lowering. Explicit entries here
+    // cover gfx1250 real encodings that land on the t16 pseudo path when the
+    // buildPseudoAliasMap collapse does not reach them.
     E(V_FMA_F16_e64, V_FMA_F16),
     E(V_FMA_F16_gfx9_e64, V_FMA_F16),
+    E(V_FMA_F16_gfx9_t16_e64, V_FMA_F16),
+    E(V_FMA_F16_gfx9_fake16_e64, V_FMA_F16),
     E(V_MAX_F16_e64, V_MAX_F16),
     E(V_MIN_F16_e64, V_MIN_F16),
     E(V_MIN3_F16_e64, V_MIN3_NUM_F16),
