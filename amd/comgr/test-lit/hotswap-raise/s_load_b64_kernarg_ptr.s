@@ -2,6 +2,7 @@
 ; RUN:   && %raise_cli %t.hsaco --target-isa=gfx950 --emit-ir=s_load_b64_kernarg_ptr_kernel 2>/dev/null | %FileCheck %s
 ;
 ; Regression test for Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-010.
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-010.
 ;
 ; s_load_b64 loading a 64-bit pointer from kernarg space (user arg, not a
 ; hidden-arg field) previously triggered UnsupportedOpcode in handle-smem.cpp
