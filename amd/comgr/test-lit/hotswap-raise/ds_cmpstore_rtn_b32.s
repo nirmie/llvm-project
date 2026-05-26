@@ -8,6 +8,10 @@
 ; the GFX11+ operand order: (vdst, addr, data0=cmpval, data1=newval).
 ; Note: pre-GFX11 `ds_cmpst_rtn_b32` had the src/cmp operands swapped.
 ;
+; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-000
+; (510 UnsupportedOpcode hits for ds_cmpstore_rtn_b32 across 454 kernels
+; in a rocSOLVER getri run on 2026-05-26).
+;
 ; Cross-target lift (gfx1250 → gfx950): lower to `cmpxchg` on an
 ; LDS addrspace(3) pointer. The RTN variant returns the original
 ; value, extracted from the `{oldval, success}` struct returned by
