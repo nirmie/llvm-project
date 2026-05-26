@@ -23,6 +23,10 @@
 ; (142 UnsupportedOpcode hits for s_add_pc_i64 across 142 kernels in
 ; rocSOLVER getf2_small_kernel on 2026-05-26, fatbin_co_0097.co,
 ; hotswap commit 8f2db5ec2edc).
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-005
+; (142 UnsupportedOpcode hits for s_add_pc_i64 across 142 kernels in
+; rocSOLVER getf2_small_kernel on 2026-05-26, fatbin_co_0097.co,
+; hotswap commit 8f2db5ec2edc).
 
 ; CHECK-LABEL: define amdgpu_kernel void @s_add_pc_i64_kernel(
 ; CHECK:       bb_0x4:
