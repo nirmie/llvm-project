@@ -717,6 +717,94 @@ HandlerResult handleDS(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
 
+  // ds_cmpstore_rtn_b32 -- GFX11+ LDS atomic compare-and-swap, 32-bit.
+  //
+  // MCInst operand layout (DS_1A2D_RET, DSInstructions.td:263):
+  //   (outs vdst), (ins addr, data0=new_val, data1=cmp_val, offset, gds)
+  //
+  // Note: GFX11+ swapped operands vs pre-GFX11 DS_CMPST_RTN_B32 where
+  // data0=cmp, data1=new. DSAtomicCmpXChg_mc at DSInstructions.td:1245
+  // documents this explicitly:
+  //   (inst $ptr, getVregSrc($swap), getVregSrc($cmp), ...)
+  // so data0=swap(new) and data1=cmp(old expected value).
+  //
+  // Semantics: if mem[addr+offset] == data1, store data0; return old mem value.
+  // Lowered to LLVM IR `cmpxchg ptr, cmp, new seq_cst seq_cst` which
+  // extractvalue's the old value into vdst.
+  // LDS address space is 3; the addr VGPR holds a 32-bit LDS byte offset.
+  if (Sop == CanonicalOp::DS_CMPSTORE_RTN_B32) {
+    Value *Addr = Ctx.B.CreateZExt(Op.src(0), Ctx.I64Ty, "ds_addr");
+    // The `offset` field is an immediate operand; scan sources for it.
+    for (unsigned K = 1; K < Op.nSrcs(); K++) {
+      if (Di.isImm(Op.srcIdx(K))) {
+        int64_t Imm = Di.getImm(Op.srcIdx(K));
+        if (Imm != 0)
+          Addr = Ctx.B.CreateAdd(Addr, ConstantInt::get(Ctx.I64Ty, Imm),
+                                  "ds_cmpstore_off");
+        break;
+      }
+    }
+    Value *Ptr = Ctx.B.CreateIntToPtr(Addr, PointerType::get(Ctx.C, 3),
+                                       "ds_cmpstore_ptr");
+    // data0 = new value to store (swap), data1 = comparison value (cmp).
+    ParsedReg NewReg = Op.srcReg(1);
+    ParsedReg CmpReg = Op.srcReg(2);
+    Value *NewVal = Ctx.Regs.readReg32(Ctx.B, NewReg);
+    Value *CmpVal = Ctx.Regs.readReg32(Ctx.B, CmpReg);
+    Ctx.emitUnderExec([&] {
+      auto *Cas = Ctx.B.CreateAtomicCmpXchg(
+          Ptr, CmpVal, NewVal, MaybeAlign(),
+          AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
+      if (Di.NumDefs > 0)
+        Ctx.Regs.writeReg32(Ctx.B, Op.dst(),
+                            Ctx.B.CreateExtractValue(Cas, 0, "ds_cmpstore_old"));
+    });
+    Hr.Handled = true;
+    return Hr;
+  }
+  // ds_cmpstore_rtn_b64 / ds_cmpstore_b32 / ds_cmpstore_b64:
+  // Same semantics as DS_CMPSTORE_RTN_B32 but 64-bit element or without return.
+  if (Sop == CanonicalOp::DS_CMPSTORE_RTN_B64 ||
+      Sop == CanonicalOp::DS_CMPSTORE_B32 ||
+      Sop == CanonicalOp::DS_CMPSTORE_B64) {
+    const bool IsB64 = (Sop == CanonicalOp::DS_CMPSTORE_RTN_B64 ||
+                        Sop == CanonicalOp::DS_CMPSTORE_B64);
+    const bool IsRtn = (Sop == CanonicalOp::DS_CMPSTORE_RTN_B64);
+    Value *Addr = Ctx.B.CreateZExt(Op.src(0), Ctx.I64Ty, "ds_addr");
+    for (unsigned K = 1; K < Op.nSrcs(); K++) {
+      if (Di.isImm(Op.srcIdx(K))) {
+        int64_t Imm = Di.getImm(Op.srcIdx(K));
+        if (Imm != 0)
+          Addr = Ctx.B.CreateAdd(Addr, ConstantInt::get(Ctx.I64Ty, Imm),
+                                  "ds_cmpstore_off");
+        break;
+      }
+    }
+    Type *ElTy = IsB64 ? Ctx.I64Ty : Ctx.I32Ty;
+    Value *Ptr = Ctx.B.CreateIntToPtr(Addr, PointerType::get(Ctx.C, 3),
+                                       "ds_cmpstore_ptr");
+    Value *NewVal = IsB64 ? Ctx.Regs.readReg64(Ctx.B, Op.srcReg(1))
+                          : Ctx.Regs.readReg32(Ctx.B, Op.srcReg(1));
+    Value *CmpVal = IsB64 ? Ctx.Regs.readReg64(Ctx.B, Op.srcReg(2))
+                          : Ctx.Regs.readReg32(Ctx.B, Op.srcReg(2));
+    Ctx.emitUnderExec([&] {
+      auto *Cas = Ctx.B.CreateAtomicCmpXchg(
+          Ptr, CmpVal, NewVal, MaybeAlign(),
+          AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
+      if (IsRtn && Di.NumDefs > 0) {
+        Value *Old = Ctx.B.CreateExtractValue(Cas, 0, "ds_cmpstore_old");
+        if (IsB64)
+          Ctx.Regs.writeReg64(Ctx.B, Op.dst(), Old);
+        else
+          Ctx.Regs.writeReg32(Ctx.B, Op.dst(), Old);
+      }
+    });
+    Hr.Handled = true;
+    return Hr;
+  }
+
   if (Sop == CanonicalOp::DS_BPERMUTE_B32) {
     // Backwards permute: per-lane GATHER. Each lane reads the `src1`
     // value from a *source* lane whose index is `src0 >> 2` (the
