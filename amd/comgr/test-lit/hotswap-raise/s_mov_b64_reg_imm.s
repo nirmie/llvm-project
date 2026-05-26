@@ -6,6 +6,7 @@
 ; Also pinned for:    Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-011.
 ; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-011.
 ; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-011.
+; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-011.
 ;
 ; s_mov_b64 with both immediate-zero and register-pair operands was failing
 ; with UnsupportedOpcode in 618 instances across 174 rocSOLVER kernels
