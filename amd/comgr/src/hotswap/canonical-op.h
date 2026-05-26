@@ -244,6 +244,12 @@ enum class CanonicalOp : uint16_t {
   // enumerates the swap's return offset as one of its cascade
   // targets.
   S_SWAP_PC_I64,
+  // GFX1250/GFX13 PC-relative unconditional long-branch trampoline.
+  // Hardware: PC_next = (PC_after_inst) + sign_extend(imm64).
+  // Emitted by LLVM BranchRelaxation when a conditional branch's target is out
+  // of range: `s_cbranch_<cond> 1; s_add_pc_i64 imm64`. The raiser treats
+  // this as an unconditional branch to the resolved absolute target BB.
+  S_ADD_PC_I64,
   S_ABS_I32,
   S_SET_VGPR_MSB,
   // Read-modify-write bit set/clear on an SGPR. Tied src keeps the
@@ -346,6 +352,10 @@ enum class CanonicalOp : uint16_t {
 
   // -- VOP1 --
   V_MOV_B32, V_MOV_B64, V_MOV_B16, V_NOP, V_NOT_B32, V_BFREV_B32,
+  // GFX6+ indexed vector move. `v_movrels_b32 vdst, vsrc_base` reads
+  // VGPR[vsrc_base + M0], where M0 holds the dynamic lane index.
+  // `v_movreld_b32 vdst_base, vsrc` writes VGPR[vdst_base + M0].
+  V_MOVRELS_B32, V_MOVRELD_B32,
   V_SWAP_B32,
   V_CVT_F32_I32, V_CVT_F32_U32, V_CVT_I32_F32, V_CVT_U32_F32,
   V_CVT_U32_U16,
@@ -796,6 +806,12 @@ enum class CanonicalOp : uint16_t {
   GLOBAL_ATOMIC_ADD_F64,
   GLOBAL_ATOMIC_PK_ADD_BF16, GLOBAL_ATOMIC_PK_ADD_F16,
 
+  // GFX12+ standalone cache maintenance instructions (FLAT format, no address).
+  // `global_inv scope` invalidates a cache level; `global_wb scope` writes back.
+  // Lowered to the appropriate GFX9/GFX940 cache intrinsic on the target.
+  GLOBAL_INV,
+  GLOBAL_WB,
+
   // -- SMEM atomics --
   // gfx8+ scalar-cache atomics.  Lifted to `atomicrmw` IR via handle-smem.cpp;
   // the SCOPE/GLC bits fold into AtomicOrdering (monotonic) and whether the
@@ -897,6 +913,14 @@ enum class CanonicalOp : uint16_t {
   // (wave-size-obstruction.cpp) flags it before the handler is even
   // dispatched in the cross-wave case.
   DS_SWIZZLE_B32,
+  // GFX11+ LDS atomic compare-and-swap, 32-bit (DSInstructions.td:636).
+  // MCInst operand order: addr, data0=new_value, data1=cmp_value, offset, gds.
+  // Note the operand swap versus pre-GFX11 DS_CMPST_RTN_B32 where
+  // data0=cmp and data1=new; DSAtomicCmpXChg_mc at line 1245 of
+  // DSInstructions.td documents the swap explicitly.
+  // Returns the old value at addr if IsAtomicRet (vdst defined).
+  DS_CMPSTORE_RTN_B32, DS_CMPSTORE_RTN_B64,
+  DS_CMPSTORE_B32, DS_CMPSTORE_B64,
 
   // -- MUBUF --
   BUFFER_LOAD_DWORD, BUFFER_LOAD_DWORDX2, BUFFER_LOAD_DWORDX3, BUFFER_LOAD_DWORDX4,

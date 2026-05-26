@@ -14,6 +14,7 @@
 #include "opcode-map.h"
 #include "canonical-op.h"
 
+#include "MCTargetDesc/AMDGPUMCExpr.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h" // AMDGPU::EXEC, VCC, SCC, ...
 #include "Utils/AMDGPUBaseInfo.h"
 
@@ -650,6 +651,30 @@ void decodeVopd(DecodedInst &Di, const MCInstrInfo &MCII,
 void collectBranchTargets(const DecodedInst &Di, uint64_t Off,
                           uint64_t InstSize,
                           std::set<uint64_t> &BlockStarts) {
+  // s_add_pc_i64: 12-byte gfx1250/gfx13 PC-relative unconditional long-branch.
+  // The 64-bit literal offset is sign-extended and added to PC_after_inst.
+  // The disassembler may return the operand as isExpr (AMDGPUMCExpr::Lit64)
+  // rather than isImm when Hi_32(offset)==0; handle both.
+  if (Di.CanonOp == CanonicalOp::S_ADD_PC_I64) {
+    const MCInst &Inst = Di.Inst;
+    for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
+      const MCOperand &MO = Inst.getOperand(I);
+      int64_t Imm64 = 0;
+      if (MO.isImm()) {
+        Imm64 = MO.getImm();
+      } else if (MO.isExpr() && AMDGPU::isLitExpr(MO.getExpr())) {
+        Imm64 = AMDGPU::getLitValue(MO.getExpr());
+      } else {
+        continue;
+      }
+      BlockStarts.insert(
+          static_cast<uint64_t>(static_cast<int64_t>(Off + InstSize) + Imm64));
+      break;
+    }
+    // s_add_pc_i64 is unconditional — the instruction after it is not a new BB
+    // unless already marked as a leader by a preceding conditional branch.
+    return;
+  }
   const MCInst &Inst = Di.Inst;
   for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
     if (!Inst.getOperand(I).isImm())
