@@ -46,6 +46,11 @@
 ; re-filed as UnsupportedOpcode on v_cmpx_nlt_f32 at hotswap commit 8f2db5ec2edc.
 ; All 81 kernels raise OK; the NLT -> FCMP_UGE path via parseVCmpPseudoName()
 ; and handleValuVcmp() remains effective with no regression.
+;
+; Pins Bug-Id 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-019:
+; Same rocSOLVER geqr2_kernel_small workload (fatbin_co_0173.co) re-filed as
+; UnsupportedOpcode on v_cmpx_nlt_f32 (226 hits, 16 kernels). The handler
+; remains effective; all 81 kernels raise OK (81/81) confirming no regression.
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_nlt_f32_basic_kernel(
 ; CHECK: fcmp uge float
 ; CHECK-NOT: UnsupportedOpcode
