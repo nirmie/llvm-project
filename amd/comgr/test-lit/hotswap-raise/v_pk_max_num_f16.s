@@ -8,6 +8,15 @@
 ; arithmetic lowers to `llvm.maxnum.v2f16`.  Clamp is post-applied via
 ; maxnum/minnum.  The opcode-map collapses _num_ back onto V_PK_MAX_F16 on
 ; gfx950 so the cross-target lift still produces the same intrinsic.
+;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-031:
+; 48 hits across 48 rocBLAS geam_min_plus kernels (sample:
+; _ZN12_GLOBAL__N_120geam_min_plus_kernelIDF16_Dv2_DF16_S1_Li8ELi32ELi64ELi128E...
+; in fatbin_co_0034.co) were reported as UnsupportedOpcode for v_pk_max_num_f16
+; at hotswap commit 8f2db5ec2edc.  The VOP3P handler under
+; CanonicalOp::V_PK_MAX_NUM_F16 in handle-valu-vop3p.cpp emits llvm.maxnum.v2f16
+; with op_sel / neg_lo / neg_hi modifier support (added in 66f1a93b62de); all
+; 306 kernels in fatbin_co_0034.co raise successfully (306 ok, 0 fail).
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_max_num_f16_basic_kernel(
 ; BASIC: call <2 x half> @llvm.maxnum.v2f16(
