@@ -4,6 +4,8 @@
 ;
 ; Regression guard for Bug-Id: 2026-05-26T04-13-44Z_qwen2.5-7b-instruct-003
 ; (mnemonic: global_atomic_cmpswap_b32, 32 hits across 8 kernels, rocsolver bdsqr_init).
+; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-003
+; (duplicate: same 32-site rocsolver bdsqr_init pattern in a later run, fatbin_co_0134.co).
 ;
 ; Pins that a kernel containing MULTIPLE global_atomic_cmpswap_b32 sites is
 ; raised cleanly under WaveNativeProjection (the default). The prior failure
