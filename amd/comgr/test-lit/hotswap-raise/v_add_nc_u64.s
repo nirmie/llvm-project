@@ -12,6 +12,7 @@
 ; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-013
 ; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-013
 ; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-013
+; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-013
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_add_nc_u64_kernel(
 ; CHECK: add i64
