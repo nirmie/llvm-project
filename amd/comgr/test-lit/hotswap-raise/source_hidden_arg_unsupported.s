@@ -1,13 +1,21 @@
 ; RUN: %llvm_mc -mcpu=gfx1200 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
-; RUN:   && %not raise_cli %t.hsaco --target-isa=gfx942 \
-; RUN:     --emit-ir=unsupported_hidden_global_offset 2>&1 \
+; RUN:   && raise_cli %t.hsaco --target-isa=gfx942 \
+; RUN:     --emit-ir=unsupported_hidden_global_offset 2>/dev/null \
 ; RUN:   | %FileCheck %s
 ;
-; Known source hidden args must not silently fall back to the target runtime's
-; implicit-arg layout.  If we cannot synthesize a source hidden arg from the
-; dispatch packet, refuse the translation.
+; hidden_global_offset_x/y/z are now supported: the transpiler synthesises the
+; value by reading from amdgcn_implicitarg_ptr at byte offset Dim*8 from the
+; target-runtime implicit-arg block, matching the standard HSA ABI layout.
+;
+; Previously this test used `%not raise_cli` with a negative check to
+; document that the kind was refused.  Since Bug-Id
+; 2026-05-26T18-08-17Z_qwen2.5-7b-instruct-006 it is fully handled.
 
-; CHECK: unsupported source hidden argument kind 'hidden_global_offset_x'
+; CHECK-LABEL: define amdgpu_kernel void @unsupported_hidden_global_offset(
+
+; The global offset is read via amdgcn_implicitarg_ptr at offset 0 (dim X).
+; CHECK: call ptr addrspace(4) @llvm.amdgcn.implicitarg.ptr()
+; CHECK: load i64, ptr addrspace(4)
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1200"
 	.amdhsa_code_object_version 6
