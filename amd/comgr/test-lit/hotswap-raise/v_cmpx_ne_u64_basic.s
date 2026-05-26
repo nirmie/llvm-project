@@ -23,6 +23,12 @@
 ; UnsupportedOpcode on v_cmpx_ne_u64 at hotswap commit 8f2db5ec2edc.
 ; The fix routes all V_CMPX_* variants through parseVCmpPseudoName()
 ; -> CanonicalOp::V_CMPX in opcode-map.cpp, handled by handleValuVcmp().
+;
+; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-016:
+; Same 20 rocBLAS iamax/iamin kernels (fatbin_co_0059.co) re-filed as
+; UnsupportedOpcode on v_cmpx_ne_u64 (20 hits, 20 kernels). The handler
+; was already in place via parseVCmpPseudoName() -> CanonicalOp::V_CMPX;
+; all 20 kernels raise OK (20/20) confirming the fix remains effective.
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_ne_u64_basic_kernel(
 ; The handler emits the 64-bit pair reconstruction for v[0:1], then the
