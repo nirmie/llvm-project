@@ -13,6 +13,9 @@
 ; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-002
 ; (duplicate: same 5 RTN-form global_atomic_add_f64 hits in a later rocBLAS run,
 ; sample kernel=_ZL54rocblas_symv_kernel_upper_double_buffered_non_diagonalILi32...).
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-002
+; (5 RTN-form global_atomic_add_f64 UnsupportedOpcode hits across 5 rocBLAS
+; symv kernels; sample: rocblas_symv_kernel_upper_double_buffered_non_diagonal).
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_atomic_add_f64_rtn_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
