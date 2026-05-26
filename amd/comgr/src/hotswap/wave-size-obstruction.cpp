@@ -288,10 +288,14 @@ public:
     DenseSet<unsigned> ElectLeaderRegs;
     DenseSet<unsigned> ElectLeaderSgprs;
     bool ElectLeaderVcc = false;
+    // Canonical reg lanes of the tainted VGPR compared with V_CMP_EQ against
+    // a scalar, pending a s_and_saveexec that can uniformize it.
+    DenseSet<unsigned> VccEqUniformizesVGPRs;
   };
 
   Snapshot takeSnapshot() const {
-    return {TaintedRegs, ElectLeaderRegs, ElectLeaderSgprs, ElectLeaderVcc};
+    return {TaintedRegs, ElectLeaderRegs, ElectLeaderSgprs, ElectLeaderVcc,
+            VccEqUniformizesVGPRs};
   }
 
   void restoreSnapshot(const Snapshot &S) {
@@ -299,6 +303,7 @@ public:
     ElectLeaderRegs = S.ElectLeaderRegs;
     ElectLeaderSgprs = S.ElectLeaderSgprs;
     ElectLeaderVcc = S.ElectLeaderVcc;
+    VccEqUniformizesVGPRs = S.VccEqUniformizesVGPRs;
   }
 
   bool anySourceTainted(const DecodedInst &Di) const {
@@ -452,6 +457,15 @@ public:
     }
   }
 
+  bool isRegTainted(MCRegister Reg) const {
+    SmallVector<unsigned> Lanes;
+    appendCanonicalRegLanes(Reg, Lanes);
+    for (unsigned Lane : Lanes)
+      if (TaintedRegs.contains(Lane))
+        return true;
+    return false;
+  }
+
 private:
   void appendCanonicalRegLanes(MCRegister Reg,
                                SmallVectorImpl<unsigned> &Out) const {
@@ -477,15 +491,6 @@ private:
         break;
       Out.push_back(static_cast<unsigned>(AMDGPU::mc2PseudoReg(Sub)));
     }
-  }
-
-  bool isRegTainted(MCRegister Reg) const {
-    SmallVector<unsigned> Lanes;
-    appendCanonicalRegLanes(Reg, Lanes);
-    for (unsigned Lane : Lanes)
-      if (TaintedRegs.contains(Lane))
-        return true;
-    return false;
   }
 
   bool vopdSourceTainted(const DecodedInst::VopdSource &Src) const {
@@ -525,6 +530,29 @@ private:
   // Physical-register lanes of SGPRs holding the borrow from
   // `v_sub_co_u32 vDST, sDST, elect_leader_vgpr, 1`.
   DenseSet<unsigned> ElectLeaderSgprs;
+
+public:
+  // Canonical reg lanes of the tainted VGPR most recently compared against a
+  // scalar with V_CMP_EQ writing VCC.  When a subsequent s_and_saveexec has
+  // an untainted VCC source, all active lanes inside the gate satisfy the
+  // equality, making the VGPR uniform -- clear its taint to avoid a false
+  // SaveExecFromLaneId report.
+  DenseSet<unsigned> VccEqUniformizesVGPRs;
+
+  // Record canonical lanes of `Reg` as uniformized-by-VCC-EQ.
+  void setVccEqUniformizes(MCRegister Reg) {
+    SmallVector<unsigned> Lanes;
+    appendCanonicalRegLanes(Reg, Lanes);
+    for (unsigned Lane : Lanes)
+      VccEqUniformizesVGPRs.insert(Lane);
+  }
+
+  // Clear taint on all VGPRs recorded in VccEqUniformizesVGPRs and reset.
+  void applyVccEqUniformization() {
+    for (unsigned Lane : VccEqUniformizesVGPRs)
+      TaintedRegs.erase(Lane);
+    VccEqUniformizesVGPRs.clear();
+  }
 };
 
 bool isSaveExecB32(CanonicalOp Sop) {
@@ -733,8 +761,45 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
+      // Equality gate: if this V_CMP_EQ writes VCC and compares a tainted VGPR
+      // against a scalar (SGPR or immediate), record the tainted VGPR.  Inside
+      // the gate established by a subsequent s_and_saveexec with this VCC, all
+      // active lanes satisfy the equality, so the VGPR is uniform -- the taint
+      // is a false positive.  Clear VccEqUniformizesVGPRs on any other VCC write
+      // so stale information from a prior comparison is never misapplied.
+      if (Di.DefsVcc) {
+        Tracker.VccEqUniformizesVGPRs.clear();
+        const VCmpMeta *M = Di.Vcmp;
+        bool IsIntEq = M && !M->IsFloat && !M->IsClass &&
+                       M->Pred == CmpInst::ICMP_EQ;
+        if (!IsIntEq)
+          IsIntEq = isEqPred(Di); // fallback for _e32 forms
+        if (IsIntEq) {
+          // Find a tainted source register paired with a non-tainted source.
+          // Inside the gate of a subsequent s_and_saveexec with this VCC, all
+          // active lanes satisfy the equality so the tainted register is uniform.
+          MCRegister TaintedSrc;
+          bool HasUntaintedSrc = false;
+          for (unsigned K = 0; K < Di.NumSrcs; ++K) {
+            unsigned OpIdx = Di.SrcMap[K];
+            if (OpIdx >= Di.Inst.getNumOperands())
+              continue;
+            const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+            if (Op.isReg()) {
+              MCRegister Reg = Op.getReg();
+              if (Tracker.isRegTainted(Reg))
+                TaintedSrc = Reg;
+              else
+                HasUntaintedSrc = true;
+            } else if (Op.isImm()) {
+              HasUntaintedSrc = true;
+            }
+          }
+          if (TaintedSrc && HasUntaintedSrc)
+            Tracker.setVccEqUniformizes(TaintedSrc);
+        }
+      }
     } else if (Sop == CanonicalOp::V_CMPX) {
-      bool IsElectLeader = SourceTainted && isElectLeaderEqZero(Di, Tracker);
       if (SourceTainted) {
         // Detect the elect-first-active-lane pattern: `v_cmpx_eq 0` of a
         // mbcnt-derived value. Under WaveNative this is safe (data-dependent
@@ -826,6 +891,17 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       SccTainted = false;
       ClearsElectLeaderDefs = false; // ElectLeaderSgprs managed explicitly above
     } else if (isSaveExecB32(Sop)) {
+      // If the saveexec source is untainted and we recorded a tainted VGPR that
+      // was equality-compared against a scalar (VccEqUniformizesVGPRs), clear
+      // its taint now.  Inside the gate all active lanes satisfy the equality,
+      // making that VGPR uniform -- the prior taint was a false positive for any
+      // code inside the gate.  This prevents a downstream v_cmpx or saveexec
+      // from being misclassified as SaveExecFromLaneId / CmpxFromLaneId.
+      if (!SourceTainted && !Tracker.VccEqUniformizesVGPRs.empty())
+        Tracker.applyVccEqUniformization();
+      else
+        Tracker.VccEqUniformizesVGPRs.clear(); // gate is tainted; discard
+
       // Check if the saveexec source is an elect-leader SGPR (subtraction-borrow
       // idiom) in addition to the VCC-based elect-leader pattern.
       bool IsElectLeaderSgprSrc = false;
@@ -858,7 +934,15 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       }
       ExplicitDefsTainted = OldExecTainted;
       VccTainted = false;
-      ExecTainted = OldExecTainted || SourceTainted;
+      // For elect-leader saveexec sites, the rewrite (ElectLeaderWaveNative)
+      // replaces the entire saveexec with a wave-safe ballot.  Inside the
+      // gate, EXEC is set by the ballot result which is wave-size-independent.
+      // Propagating SourceTainted into ExecTainted here causes every
+      // downstream s_mov/s_xor of exec_lo to appear mbcnt-derived, triggering
+      // false SaveExecFromLaneId reports on the lane-iteration idiom that
+      // follows the elect-leader gate.  Suppress exec taint propagation when
+      // the rewrite covers this site.
+      ExecTainted = OldExecTainted || (SourceTainted && !IsElectLeader);
       SccTainted = ExecTainted;
       Tracker.ElectLeaderVcc = false;
     }
