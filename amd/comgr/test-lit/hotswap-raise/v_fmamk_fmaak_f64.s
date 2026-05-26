@@ -9,7 +9,9 @@
 ; it to the third, mirroring the F32 forms' convention.
 ;
 ; Pins Bug-Id 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-024 and
-;       Bug-Id 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-024:
+;       Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-024 and
+;       Bug-Id 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-024 and
+;       Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-024:
 ; v_fmamk_f64 reported UnsupportedOpcode (3 hits across 3 kernels of a
 ; rocBLAS lasyf workload, fatbin_co_0145.co) when transpiling gfx1250→gfx950
 ; at commit 8f2db5ec2edc. The opcode-map + handle-valu.cpp handler (fma
@@ -30,31 +32,6 @@
 ; The intrinsic declaration must be present (proves the call wasn't
 ; created against the wrong overload).
 ; CHECK: declare {{.*}}double @llvm.fma.f64(double, double, double)
-
-; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-024:
-; 3 hits across 3 kernels (sample: lasyf_kernel_lower<rocblas_complex_num<float>>
-; in fatbin_co_0145.co) were refused with UnsupportedOpcode on v_fmamk_f64
-; at hotswap commit 8f2db5ec2edc.  The handler in handle-valu.cpp under
-; CanonicalOp::V_FMAMK_F64 correctly routes the 64-bit KImmFP64 literal to
-; the second fma argument, and lowers to llvm.fma.f64.
-;
-; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-024:
-; Same 3-hit / 3-kernel rocsolver lasyf workload (fatbin_co_0145.co)
-; re-filed as UnsupportedOpcode on v_fmamk_f64 at hotswap commit
-; 8f2db5ec2edc. The V_FMAMK_F64 handler in handle-valu.cpp remains in
-; place; all 9 kernels in the .co raise OK.
-;
-; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-024:
-; Same 3-hit / 3-kernel rocsolver lasyf workload (fatbin_co_0145.co)
-; re-filed again as UnsupportedOpcode on v_fmamk_f64 at hotswap commit
-; 8f2db5ec2edc. The V_FMAMK_F64 handler in handle-valu.cpp remains in
-; place; all 9 kernels in the .co raise OK.
-;
-; Pins Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-024:
-; Same 3-hit / 3-kernel rocsolver lasyf workload (fatbin_co_0145.co)
-; re-filed again as UnsupportedOpcode on v_fmamk_f64 at hotswap commit
-; 8f2db5ec2edc. The V_FMAMK_F64 handler in handle-valu.cpp remains in
-; place; all 9 kernels in the .co raise OK.
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
