@@ -11,6 +11,9 @@
 ; (rocblas_symv double-buffered kernels used global_atomic_add_f64 [FLAT] which
 ; was UnsupportedOpcode on gfx1250->gfx950 transpilation before this handler
 ; was added).
+; Also covers Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-002
+; (5 non-RTN global_atomic_add_f64 hits across 5 rocblas_symv double-buffered
+; kernels; same root cause, re-triggered on a later run).
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_atomic_add_f64_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
