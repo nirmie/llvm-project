@@ -7,6 +7,8 @@
 ; shapes are decoded correctly.  The handler lives in
 ; src/hotswap/handle-valu.cpp under
 ; `if (Sop == CanonicalOp::V_DIV_SCALE_F64) { ... }`.
+;
+; Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-022
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_div_scale_f64_kernel(
 
