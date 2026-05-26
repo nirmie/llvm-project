@@ -474,54 +474,43 @@ bool isSaveExecB32(CanonicalOp Sop) {
          Sop == CanonicalOp::S_ORN2_SAVEEXEC_B32;
 }
 
-// Return true iff `Sop` is a memory read (load) instruction whose destination
-// registers carry values fetched from memory, not values derived from the
-// load address.  Even when the address operand is lane-ID-tainted (e.g.
-// computed via v_mbcnt_*), the loaded data values are NOT lane-ID-derived:
-// they are whatever the kernel stored at those addresses earlier.  Propagating
-// address taint into the destination would cause the CmpxFromLaneId classifier
-// to flag downstream v_cmpx instructions that compare loaded data values as
-// "lane-predicated EXEC gates", producing a false-positive refusal.
-//
-// SMEM (S_LOAD_*): uniform scalar loads; address is SGPR-based (never
-//   v_mbcnt-derived in practice, but taint-safe to block regardless).
-// VMEM global/flat/scratch loads: per-lane loads; address may be v_mbcnt-
-//   derived (e.g. indexed by lane ID to fetch a per-lane value), but the
-//   loaded datum is the memory content, not the lane index.
-// MUBUF (BUFFER_LOAD_*): buffer loads with descriptor + offset; same argument.
-// DS reads (DS_READ_*): LDS loads; address often lane-derived for shuffle
-//   patterns, but again the loaded datum is the LDS content.
-// Note: DS_BPERMUTE_B32 already has its own special case above (only the
-//   DATA0 source, not the ADDR source, is taint-relevant for that op).
-static bool isMemoryReadOp(CanonicalOp Sop) {
-  // SMEM scalar loads
-  if (Sop >= CanonicalOp::S_LOAD_B32 && Sop <= CanonicalOp::S_LOAD_I16)
-    return true;
-  // FLAT / GLOBAL / SCRATCH loads
-  if (Sop >= CanonicalOp::FLAT_LOAD_UBYTE &&
-      Sop <= CanonicalOp::FLAT_LOAD_DWORDX4)
-    return true;
-  if (Sop >= CanonicalOp::GLOBAL_LOAD_UBYTE &&
-      Sop <= CanonicalOp::GLOBAL_LOAD_DWORDX4)
-    return true;
-  if (Sop >= CanonicalOp::SCRATCH_LOAD_DWORD &&
-      Sop <= CanonicalOp::SCRATCH_LOAD_DWORDX4)
-    return true;
-  // MUBUF buffer loads (includes D16 byte variants and LDS forms)
-  if (Sop >= CanonicalOp::BUFFER_LOAD_DWORD &&
-      Sop <= CanonicalOp::BUFFER_LOAD_DWORDX4_LDS)
-    return true;
-  // DS LDS reads (DS_READ_B32 .. DS_READ_I8 per the range comments in
-  // canonical-op.h; DS_BPERMUTE_B32 has its own case and is excluded)
-  if (Sop >= CanonicalOp::DS_READ_B32 && Sop <= CanonicalOp::DS_READ_I8)
-    return true;
-  // DS transposed reads (DS_LOAD_TR16_B128, DS_READ_B64_TR_B16, etc.)
-  if (Sop == CanonicalOp::DS_LOAD_TR16_B128 ||
-      Sop == CanonicalOp::DS_READ_B64_TR_B16 ||
-      Sop == CanonicalOp::DS_READ_B64_TR_B8 ||
-      Sop == CanonicalOp::DS_LOAD_TR8_B64)
-    return true;
-  return false;
+// Return true iff `di` has an integer EQ comparison predicate.
+// Prefers Di.Vcmp (populated for e64 forms); falls back to mnemonic matching
+// for e32 forms whose MC opcode name ends in "_e32" and is absent from the
+// Vcmp side-table (parseVCmpPseudoName requires "_e64" suffix).
+static bool isEqPred(const DecodedInst &Di) {
+  if (Di.Vcmp)
+    return !Di.Vcmp->IsFloat && !Di.Vcmp->IsClass &&
+           Di.Vcmp->Pred == llvm::CmpInst::ICMP_EQ;
+  // e32 fallback: match "_EQ_" in the uppercase canonical mnemonic.
+  // Di.Mnemonic is the lowercase disassembler string (e.g. "v_cmpx_eq_u32_e32");
+  // use case-insensitive contains to avoid assuming case convention.
+  llvm::StringRef Mn(Di.Mnemonic);
+  return Mn.contains_insensitive("_eq_");
+}
+
+// Return true iff one of di's source operands is the immediate 0
+// and the other is a register whose canonical lane set overlaps
+// `ElectLeaderRegs` in `tracker`.  Used to detect `v_cmpx_eq 0, vT`
+// and `v_cmp_eq vcc, 0, vT` where vT is a zero-rank mbcnt_lo result.
+static bool isElectLeaderEqZero(const DecodedInst &Di,
+                                 const LaneIdProvenanceTracker &Tracker) {
+  if (!isEqPred(Di))
+    return false;
+  // We need exactly one immediate-0 source and at least one register source.
+  bool HasImm0 = false;
+  bool HasElectLeaderReg = false;
+  for (unsigned I = 0; I < Di.NumSrcs; ++I) {
+    unsigned OpIdx = Di.SrcMap[I];
+    if (OpIdx >= Di.Inst.getNumOperands())
+      continue;
+    const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+    if (Op.isImm() && Op.getImm() == 0)
+      HasImm0 = true;
+    else if (Op.isReg() && Tracker.isRegElectLeader(Op.getReg()))
+      HasElectLeaderReg = true;
+  }
+  return HasImm0 && HasElectLeaderReg;
 }
 
 SmallVector<LanePredicatedExecSite>
@@ -601,21 +590,14 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
-    } else if (isMemoryReadOp(Sop)) {
-      // Memory load instructions (global_load, flat_load, buffer_load,
-      // scratch_load, s_load, ds_read): the destination registers hold
-      // values fetched from memory.  Even when the address operand is
-      // lane-ID-tainted (e.g. indexed by v_mbcnt_* for per-lane
-      // array access), the loaded data is NOT itself a lane index.
-      // Propagating address taint into the destination would produce
-      // false-positive CmpxFromLaneId sites for v_cmpx instructions
-      // that compare the loaded memory values, not lane positions.
-      // Block taint propagation to the destination; the load address
-      // taint is irrelevant for what EXEC will be gated on.
-      ExplicitDefsTainted = false;
-      VccTainted = false;
-      ExecTainted = OldExecTainted;
-      SccTainted = false;
+    } else if (Sop == CanonicalOp::V_CMP) {
+      // V_CMP (non-cmpx): may write VCC or an SGPR.  If this is an EQ-to-0
+      // comparison of an elect-leader VGPR, set ElectLeaderVcc so that a
+      // downstream s_and_saveexec_b32 can be recognised.
+      bool IsElectLeaderEq = isElectLeaderEqZero(Di, Tracker);
+      if (Di.DefsVcc)
+        Tracker.ElectLeaderVcc = IsElectLeaderEq;
+      // Taint propagation: unchanged (any source taint propagates to defs/VCC).
     } else if (Sop == CanonicalOp::V_CMPX) {
       bool IsElectLeader = SourceTainted && isElectLeaderEqZero(Di, Tracker);
       if (SourceTainted) {
@@ -638,14 +620,6 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       ExecTainted = OldExecTainted || SourceTainted;
       SccTainted = false;
       Tracker.ElectLeaderVcc = false;
-    } else if (isMemoryReadOp(Sop)) {
-      // Memory load: destination holds the loaded value, not the address.
-      // Clear destination taint even if the address was lane-ID-derived;
-      // the loaded value is not a lane index.
-      ExplicitDefsTainted = false;
-      VccTainted = false;
-      ExecTainted = OldExecTainted;
-      SccTainted = false;
     } else if (isSaveExecB32(Sop)) {
       bool IsElectLeader = SourceTainted && Tracker.ElectLeaderVcc;
       if (SourceTainted) {
