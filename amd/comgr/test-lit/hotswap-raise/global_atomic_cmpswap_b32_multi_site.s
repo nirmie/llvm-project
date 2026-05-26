@@ -15,6 +15,9 @@
 ; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-003
 ; (duplicate: 32 global_atomic_cmpswap_b32 hits across 8 rocsolver bdsqr kernels,
 ; fatbin_co_0134.co, same .co, same root cause; all 45 kernels raise cleanly).
+; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-003
+; (duplicate: 32 global_atomic_cmpswap_b32 hits across 8 rocsolver bdsqr kernels,
+; fatbin_co_0134.co, same .co, same root cause; all 45 kernels raise cleanly).
 ;
 ; Pins that a kernel containing MULTIPLE global_atomic_cmpswap_b32 sites is
 ; raised cleanly under WaveNativeProjection (the default). The prior failure
