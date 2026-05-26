@@ -35,6 +35,12 @@
 ; Same 4 rocBLAS lange_one_columns kernels (fatbin_co_0116.co) re-filed as
 ; UnsupportedOpcode on v_cmpx_ngt_f64 (4 hits, 4 kernels) at hotswap commit
 ; 8f2db5ec2edc. All 64 kernels raise OK confirming the fix remains effective.
+;
+; Pins Bug-Id 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-018:
+; Same 4 rocBLAS lange_one_columns kernels (fatbin_co_0116.co) re-filed as
+; UnsupportedOpcode on v_cmpx_ngt_f64 (4 hits, 4 kernels) at hotswap commit
+; 8f2db5ec2edc. All 64 kernels raise OK confirming the fix remains effective.
+;
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_ngt_f64_basic_kernel(
 ; CHECK: fcmp ule double
 ; CHECK-NOT: UnsupportedOpcode
