@@ -16,6 +16,9 @@
 ; kernels; same root cause, re-triggered on a later run).
 ; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-002
 ; (5 hits across 5 rocblas_symv kernels; same root cause, re-triggered).
+; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-002
+; (5 hits across 5 rocblas_symv_kernel_upper_double_buffered_non_diagonal double
+; kernels; same root cause, re-triggered on a later run).
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_atomic_add_f64_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
