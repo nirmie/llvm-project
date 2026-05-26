@@ -14,6 +14,7 @@
 #include "opcode-map.h"
 #include "canonical-op.h"
 
+#include "MCTargetDesc/AMDGPUMCExpr.h"
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h" // AMDGPU::EXEC, VCC, SCC, ...
 #include "Utils/AMDGPUBaseInfo.h"
 
@@ -665,14 +666,24 @@ void collectBranchTargets(const DecodedInst &Di, uint64_t Off,
   // s_add_pc_i64: 12-byte SOP1 PC-relative long-branch trampoline.
   // target = Off + InstSize + sign_extend(imm64). The standard SOPP
   // 16-bit formula below must not run for this op.
+  // s_add_pc_i64: 12-byte PC-relative long-branch. The 64-bit literal offset
+  // may be encoded as an AMDGPUMCExpr lit64 (isExpr) rather than isImm() when
+  // Hi_32(offset)==0, so handle both operand kinds with the correct formula:
+  //   target = (Off + InstSize) + sign_extend(imm64)
   if (Di.CanonOp == CanonicalOp::S_ADD_PC_I64) {
     const MCInst &Inst = Di.Inst;
     for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
-      if (!Inst.getOperand(I).isImm())
+      const MCOperand &MO = Inst.getOperand(I);
+      int64_t Imm64 = 0;
+      if (MO.isImm()) {
+        Imm64 = MO.getImm();
+      } else if (MO.isExpr() && AMDGPU::isLitExpr(MO.getExpr())) {
+        Imm64 = AMDGPU::getLitValue(MO.getExpr());
+      } else {
         continue;
-      int64_t Imm64 = Inst.getOperand(I).getImm();
-      BlockStarts.insert(static_cast<uint64_t>(
-          static_cast<int64_t>(Off + InstSize) + Imm64));
+      }
+      BlockStarts.insert(
+          static_cast<uint64_t>(static_cast<int64_t>(Off + InstSize) + Imm64));
       break;
     }
     // s_add_pc_i64 is an unconditional branch (execnz fallthrough uses it);
