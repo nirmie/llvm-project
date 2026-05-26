@@ -26,6 +26,15 @@
 ; CanonicalOp::V_PK_MUL_F16 in handle-valu-vop3p.cpp emits lane-wise fmul
 ; with op_sel / neg_lo / neg_hi modifier support; all kernels in
 ; fatbin_co_0050.co raise successfully (100 ok, 0 fail).
+;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-032:
+; 36 hits across 20 rocBLAS sscal/scal kernels (sample:
+; _ZL22rocblas_sscal_2_kernelILi256EDF16_DF16_PKDF16_PDF16_EviT2_lT3_lli
+; in fatbin_co_0050.co) were reported as UnsupportedOpcode for v_pk_mul_f16
+; at hotswap commit 8f2db5ec2edc.  The VOP3P handler under
+; CanonicalOp::V_PK_MUL_F16 in handle-valu-vop3p.cpp emits lane-wise fmul
+; with op_sel / neg_lo / neg_hi modifier support; all kernels in
+; fatbin_co_0050.co raise successfully (100 ok, 0 fail).
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_mul_f16_basic_kernel(
 ; BASIC: fmul <2 x half>
