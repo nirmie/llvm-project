@@ -286,16 +286,18 @@ public:
   struct Snapshot {
     DenseSet<unsigned> TaintedRegs;
     DenseSet<unsigned> ElectLeaderRegs;
+    DenseSet<unsigned> ElectLeaderSgprs;
     bool ElectLeaderVcc = false;
   };
 
   Snapshot takeSnapshot() const {
-    return {TaintedRegs, ElectLeaderRegs, ElectLeaderVcc};
+    return {TaintedRegs, ElectLeaderRegs, ElectLeaderSgprs, ElectLeaderVcc};
   }
 
   void restoreSnapshot(const Snapshot &S) {
     TaintedRegs = S.TaintedRegs;
     ElectLeaderRegs = S.ElectLeaderRegs;
+    ElectLeaderSgprs = S.ElectLeaderSgprs;
     ElectLeaderVcc = S.ElectLeaderVcc;
   }
 
@@ -428,6 +430,28 @@ public:
   // True iff VCC currently holds the result of `icmp eq 0, elect_leader_vgpr`.
   bool ElectLeaderVcc = false;
 
+  // SGPRs holding the borrow from `v_sub_co_u32 vDST, sDST, elect_leader_vgpr, 1`.
+  // The borrow equals ballot(elect_leader_vgpr == 0) -- the elect-leader mask.
+  bool isRegElectLeaderSgpr(MCRegister Reg) const {
+    SmallVector<unsigned> Lanes;
+    appendCanonicalRegLanes(Reg, Lanes);
+    for (unsigned Lane : Lanes)
+      if (ElectLeaderSgprs.contains(Lane))
+        return true;
+    return false;
+  }
+
+  void setRegElectLeaderSgpr(MCRegister Reg, bool Set) {
+    SmallVector<unsigned> Lanes;
+    appendCanonicalRegLanes(Reg, Lanes);
+    for (unsigned Lane : Lanes) {
+      if (Set)
+        ElectLeaderSgprs.insert(Lane);
+      else
+        ElectLeaderSgprs.erase(Lane);
+    }
+  }
+
 private:
   void appendCanonicalRegLanes(MCRegister Reg,
                                SmallVectorImpl<unsigned> &Out) const {
@@ -498,6 +522,9 @@ private:
   DenseSet<unsigned> TaintedRegs;
   // Physical-register lanes of VGPRs holding `mbcnt_lo(*, 0)` results.
   DenseSet<unsigned> ElectLeaderRegs;
+  // Physical-register lanes of SGPRs holding the borrow from
+  // `v_sub_co_u32 vDST, sDST, elect_leader_vgpr, 1`.
+  DenseSet<unsigned> ElectLeaderSgprs;
 };
 
 bool isSaveExecB32(CanonicalOp Sop) {
@@ -749,7 +776,13 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted || SourceTainted;
       SccTainted = false;
-      Tracker.ElectLeaderVcc = false;
+      // On GFX11+ (gfx1250), v_cmpx uses the nosdst or e64 form and does NOT
+      // write VCC.  Unconditionally clearing ElectLeaderVcc here would
+      // invalidate a preceding v_cmp_eq elect-leader pattern when an unrelated
+      // v_cmpx appears between the v_cmp_eq and the downstream s_and_saveexec.
+      // Only clear ElectLeaderVcc when VCC is actually overwritten.
+      if (Di.DefsVcc)
+        Tracker.ElectLeaderVcc = false;
     } else if (isMemoryReadOp(Sop)) {
       // Memory load: destination holds the loaded value, not the address.
       // Clear destination taint even if the address was lane-ID-derived;
@@ -758,8 +791,56 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
+    } else if (Sop == CanonicalOp::V_SUB_CO_U32) {
+      // Detect the elect-leader subtraction-borrow idiom:
+      //   v_sub_co_u32 vDST, sDST, vElect, 1
+      // The borrow out (sDST) equals ballot(vElect < 1) == ballot(vElect == 0),
+      // which is the elect-leader mask. Mark sDST as an elect-leader SGPR so
+      // that a downstream s_and_saveexec_b32 sDST can be recognised as an
+      // elect-leader site (safe under WaveNative, obstruction under MODREP).
+      bool IsElectLeaderBorrow = false;
+      if (Di.NumDefs >= 2 && Di.NumSrcs >= 2) {
+        bool HasElectLeaderSrc = false;
+        bool HasImm1 = false;
+        for (unsigned K = 0; K < Di.NumSrcs; ++K) {
+          unsigned OpIdx = Di.SrcMap[K];
+          if (OpIdx >= Di.Inst.getNumOperands())
+            continue;
+          const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+          if (Op.isReg() && Tracker.isRegElectLeader(Op.getReg()))
+            HasElectLeaderSrc = true;
+          else if (Op.isImm() && Op.getImm() == 1)
+            HasImm1 = true;
+        }
+        IsElectLeaderBorrow = HasElectLeaderSrc && HasImm1;
+      }
+      if (IsElectLeaderBorrow && Di.NumDefs >= 2) {
+        // Def 0 is VDST (subtraction result), def 1 is SDST (borrow out).
+        const MCOperand &SdstOp = Di.Inst.getOperand(1);
+        if (SdstOp.isReg())
+          Tracker.setRegElectLeaderSgpr(SdstOp.getReg(), true);
+      }
+      ExplicitDefsTainted = SourceTainted;
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
+      ClearsElectLeaderDefs = false; // ElectLeaderSgprs managed explicitly above
     } else if (isSaveExecB32(Sop)) {
-      bool IsElectLeader = SourceTainted && Tracker.ElectLeaderVcc;
+      // Check if the saveexec source is an elect-leader SGPR (subtraction-borrow
+      // idiom) in addition to the VCC-based elect-leader pattern.
+      bool IsElectLeaderSgprSrc = false;
+      for (unsigned K = 0; K < Di.NumSrcs; ++K) {
+        unsigned OpIdx = Di.SrcMap[K];
+        if (OpIdx >= Di.Inst.getNumOperands())
+          continue;
+        const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+        if (Op.isReg() && Tracker.isRegElectLeaderSgpr(Op.getReg())) {
+          IsElectLeaderSgprSrc = true;
+          break;
+        }
+      }
+      bool IsElectLeader =
+          SourceTainted && (Tracker.ElectLeaderVcc || IsElectLeaderSgprSrc);
       if (SourceTainted) {
         LanePredicatedExecSite Site;
         Site.Inst = &Di;
@@ -782,17 +863,19 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       Tracker.ElectLeaderVcc = false;
     }
 
-    // Clear elect-leader tracking on any VGPR destination that is not one of
-    // the tracked pattern steps (V_MBCNT_LO is handled above with explicit
-    // setRegElectLeader; all other instructions writing VGPRs clobber the
-    // elect-leader candidate by replacing the value).
+    // Clear elect-leader tracking on any destination register that is not one
+    // of the tracked pattern steps.  V_MBCNT_LO sets ElectLeaderRegs explicitly;
+    // V_SUB_CO_U32 sets ElectLeaderSgprs explicitly.  All other instructions
+    // that write a def register clobber any prior elect-leader value in it.
     if (ClearsElectLeaderDefs) {
       for (unsigned I = 0; I < Di.NumDefs; ++I) {
         if (I >= Di.Inst.getNumOperands())
           break;
         const MCOperand &Op = Di.Inst.getOperand(I);
-        if (Op.isReg())
+        if (Op.isReg()) {
           Tracker.setRegElectLeader(Op.getReg(), false);
+          Tracker.setRegElectLeaderSgpr(Op.getReg(), false);
+        }
       }
     }
 
