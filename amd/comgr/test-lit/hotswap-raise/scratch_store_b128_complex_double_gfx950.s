@@ -7,6 +7,7 @@
 ; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-012
 ; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-012
 ; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-012
+; Also covers Bug-Id: 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-012
 ;
 ; The copy_mat<rocblas_complex_num<double>, double, true> kernel issues 10
 ; scratch_store_b128 instructions with private_segment_fixed_size=0.  Each
