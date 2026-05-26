@@ -23,6 +23,12 @@
 ;   2. The EXEC register update (AND into EXEC) is emitted
 ;   3. Subsequent instructions in the same kernel still raise correctly
 ;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-020:
+; 226 hits across 16 rocSOLVER geqr2_kernel_small kernels (fatbin_co_0173.co)
+; were refused with UnsupportedOpcode on v_cmpx_nlt_f64 at hotswap commit
+; 8f2db5ec2edc. The opcode is handled by the generic V_CMPX path in
+; parseVCmpPseudoName() (opcode-map.cpp), routing NLT -> FCMP_UGE via
+; CanonicalOp::V_CMPX and handleValuVcmp().
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_nlt_f64_basic_kernel(
 ; CHECK: fcmp uge double
 ; CHECK-NOT: UnsupportedOpcode
