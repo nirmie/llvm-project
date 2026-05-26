@@ -32,6 +32,12 @@
 ; 20 rocBLAS sscal kernels (fatbin_co_0050.co) at hotswap commit 8f2db5ec2edc.
 ; The V_PK_MUL_F16 handler in handle-valu-vop3p.cpp was already in place;
 ; all 100 kernels in the .co raise OK with the current binary on gfx950.
+;
+; Pins Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-032:
+; Duplicate report: v_pk_mul_f16 [VOP3P] UnsupportedOpcode with 36 hits across
+; 20 rocBLAS sscal kernels (fatbin_co_0050.co) at hotswap commit 8f2db5ec2edc.
+; The V_PK_MUL_F16 handler was already present; all 100 kernels raise OK on
+; gfx950 with the current binary.
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_mul_f16_basic_kernel(
 ; BASIC: fmul <2 x half>
