@@ -18,6 +18,7 @@
 ; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-015:
 ; Pins Bug-Id 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-015:
 ; Pins Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-015:
+; Pins Bug-Id 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-015:
 ; 20 rocBLAS iamax/iamin kernels were refused with UnsupportedOpcode on
 ; v_cmpx_ne_u32 at hotswap commit 8f2db5ec2edc. The fix added the generic
 ; V_CMPX handler in handle-valu-vcmp.cpp that routes all V_CMPX_* variants
