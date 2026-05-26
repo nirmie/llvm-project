@@ -7,6 +7,7 @@
 ;
 ; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-009
 ; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-009
+; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-009
 ; Identical recurrence: 18 s_load_b128 UnsupportedOpcode hits across 2
 ; rocsolver kernels (sample: _ZN9rocsolver6v33300L25stedcx_mergeUpdate_kernelIfEEviiPT_lS3_iilS3_S3_Pi
 ; on gfx1250). The fatbin reproduces cleanly at current HEAD (37/37
