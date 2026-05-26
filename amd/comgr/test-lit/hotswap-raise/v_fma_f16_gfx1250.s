@@ -18,6 +18,12 @@
 ; register class). The raise path must decode the real MC opcode
 ; (V_FMA_F16V_FMA_F16_gfx9_t16_e64_gfx12) -> pseudo V_FMA_F16_gfx9_t16_e64
 ; -> CanonicalOp::V_FMA_F16 and dispatch to the existing fma.f16 handler.
+;
+; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-023:
+; Same UnsupportedOpcode on v_fma_f16 [VOP3], 4 hits across 4 rocblas_rot
+; kernels in fatbin_co_0046.co at hotswap commit 8f2db5ec2edc. The True16
+; opcode entries added in commit 27bd5ab890e7 are already in origin/hotswap;
+; all 40 kernels in fatbin_co_0046.co raise OK with the current binary.
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_fma_f16_t16_basic_kernel(
 ; BASIC-DAG: trunc i32 {{.*}} to i16
