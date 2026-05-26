@@ -34,6 +34,12 @@
 ; variants) in fatbin_co_0034.co reported as UnsupportedOpcode for
 ; v_pk_add_f16 at hotswap commit 8f2db5ec2edc.  Handler already present in
 ; handle-valu-vop3p.cpp; all 306 kernels raise OK against --target-isa=gfx950.
+;
+; Pins Bug-Id 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-030:
+; Same UnsupportedOpcode failure for v_pk_add_f16: 48 hit(s) across 48
+; rocBLAS geam_min_plus kernels using _Float16 / <2 x _Float16> types in
+; fatbin_co_0034.co at hotswap commit 8f2db5ec2edc.  Handler already present;
+; all 306 kernels raise OK against --target-isa=gfx950.
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_add_f16_basic_kernel(
 ; BASIC: fadd <2 x half>
