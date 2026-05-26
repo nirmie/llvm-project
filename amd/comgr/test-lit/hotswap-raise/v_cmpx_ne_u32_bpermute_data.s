@@ -12,6 +12,9 @@
 ; ADDR operand.  The DATA operand (the actual value being permuted) is
 ; independent of lane position, so the def is not lane-ID-tainted.
 ;
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-015
+;   20 hit(s) across 20 rocBLAS iamax/iamin kernels (fatbin_co_0041.co).
+;
 ; Pattern from rocBLAS iamax/iamin kernels:
 ;   1. v_mbcnt_lo -> lane_id -> v_lshl_or_b32 -> addr_reg  (addr is tainted)
 ;   2. ds_bpermute_b32 dst, addr_reg, data_reg              (data is NOT tainted)
