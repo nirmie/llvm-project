@@ -24,6 +24,12 @@
 ;   cross-wave-lane-predicated-exec on 'v_cmpx_ngt_f32'
 ; With the fix, the kernel raises successfully.
 ;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-017:
+; 2 rocBLAS trsv kernels with complex<float> operands (fatbin_co_0011.co)
+; re-filed as UnsupportedOpcode on v_cmpx_ngt_f32 (2 hits, 2 kernels). The
+; isMemoryReadOp() fix in wave-size-obstruction.cpp remains effective; both
+; kernels raise OK (386/386 total in the .co), confirming the fix holds.
+;
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_ngt_f32_global_memload_kernel(
 ; CHECK-NOT: cross-wave-lane-predicated-exec
 
