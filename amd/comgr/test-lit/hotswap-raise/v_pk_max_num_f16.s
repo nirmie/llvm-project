@@ -47,6 +47,12 @@
 ; geam_min_plus_kernel kernels (fatbin_co_0034.co) at hotswap commit
 ; 8f2db5ec2edc.  The V_PK_MAX_NUM_F16 handler was already in place;
 ; all 306 kernels in fatbin_co_0034.co raise OK (306 ok, 0 fail).
+;
+; Pins Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-031:
+; Same UnsupportedOpcode on v_pk_max_num_f16 [VOP3P], 48 hits across 48 rocBLAS
+; geam_min_plus_kernel kernels (fatbin_co_0034.co) at hotswap commit
+; 8f2db5ec2edc.  The V_PK_MAX_NUM_F16 handler was already in place;
+; all 306 kernels in fatbin_co_0034.co raise OK (306 ok, 0 fail).
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_max_num_f16_basic_kernel(
 ; BASIC: call <2 x half> @llvm.maxnum.v2f16(
