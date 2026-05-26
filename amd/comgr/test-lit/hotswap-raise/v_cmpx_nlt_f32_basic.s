@@ -17,40 +17,16 @@
 ;   2. The EXEC register update (ballot + AND into EXEC) is emitted
 ;   3. Subsequent instructions in the same kernel still raise correctly
 ;
-; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-019:
-; 226 hits across 16 rocSOLVER geqr2_kernel_small kernels (fatbin_co_0173.co)
-; were refused with UnsupportedOpcode on v_cmpx_nlt_f32 at hotswap commit
-; 8f2db5ec2edc. The opcode is handled by the generic V_CMPX path in
-; parseVCmpPseudoName() (opcode-map.cpp), routing NLT -> FCMP_UGE via
-; CanonicalOp::V_CMPX and handleValuVcmp().
-;
-; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-019:
-; Same 226 hits across 16 rocSOLVER geqr2_kernel_small kernels (fatbin_co_0173.co)
-; re-filed as UnsupportedOpcode on v_cmpx_nlt_f32 at hotswap commit 8f2db5ec2edc.
-; The handler was already in place; all 81 kernels in fatbin_co_0173.co raise OK,
-; confirming the fix from the original bug remains effective.
-;
-; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-019
-; 226 hits across 16 rocSOLVER geqr2_kernel_small kernels (fatbin_co_0173.co)
-; reported as UnsupportedOpcode for v_cmpx_nlt_f32. All 81 kernels raise OK;
-; the existing NLT handler (fcmp uge) covers this case.
-;
-; Pins Bug-Id 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-019:
-; Same 226 hits across 16 rocSOLVER geqr2_kernel_small kernels (fatbin_co_0173.co)
-; re-filed as UnsupportedOpcode on v_cmpx_nlt_f32 at hotswap commit 8f2db5ec2edc.
-; All 81 kernels in fatbin_co_0173.co raise OK; the NLT -> FCMP_UGE handler
-; via parseVCmpPseudoName() remains effective.
-;
-; Pins Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-019:
-; Same 226 hits across 16 rocSOLVER geqr2_kernel_small kernels (fatbin_co_0173.co)
-; re-filed as UnsupportedOpcode on v_cmpx_nlt_f32 at hotswap commit 8f2db5ec2edc.
-; All 81 kernels raise OK; the NLT -> FCMP_UGE path via parseVCmpPseudoName()
-; and handleValuVcmp() remains effective with no regression.
-;
 ; Pins Bug-Id 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-019:
 ; Same rocSOLVER geqr2_kernel_small workload (fatbin_co_0173.co) re-filed as
 ; UnsupportedOpcode on v_cmpx_nlt_f32 (226 hits, 16 kernels). The handler
 ; remains effective; all 81 kernels raise OK (81/81) confirming no regression.
+;
+; Pins Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-019:
+; Same rocSOLVER geqr2_kernel_small workload (fatbin_co_0173.co) re-filed again
+; as UnsupportedOpcode on v_cmpx_nlt_f32 (226 hits, 16 kernels). The handler
+; remains effective; all 81 kernels raise OK (81/81) confirming no regression.
+;
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_nlt_f32_basic_kernel(
 ; CHECK: fcmp uge float
 ; CHECK-NOT: UnsupportedOpcode
