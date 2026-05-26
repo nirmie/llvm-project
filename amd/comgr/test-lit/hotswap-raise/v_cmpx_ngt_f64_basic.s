@@ -17,6 +17,12 @@
 ;   2. The EXEC register update (AND into EXEC) is emitted
 ;   3. Subsequent instructions in the same kernel still raise correctly
 ;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-018:
+; 4 rocBLAS lange_one_columns kernels (fatbin_co_0116.co) with
+; rocblas_complex_num<double> were refused with UnsupportedOpcode on
+; v_cmpx_ngt_f64 at hotswap commit 8f2db5ec2edc. The opcode is handled
+; by the generic V_CMPX path in parseVCmpPseudoName() (opcode-map.cpp),
+; routing NGT -> FCMP_ULE via CanonicalOp::V_CMPX and handleValuVcmp().
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_ngt_f64_basic_kernel(
 ; CHECK: fcmp ule double
 ; CHECK-NOT: UnsupportedOpcode
