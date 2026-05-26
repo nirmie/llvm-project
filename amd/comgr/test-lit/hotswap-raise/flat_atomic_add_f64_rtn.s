@@ -7,6 +7,12 @@
 ; double-precision flat atomics with pointer-to-pointer arguments use this
 ; form.  The lifted IR must be an `atomicrmw fadd ... double` on a flat
 ; (addrspace 0) pointer with the result written back to a VGPR pair.
+;
+; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-001
+; 5 RTN-form flat_atomic_add_f64 UnsupportedOpcode hits across 5 rocBLAS
+; symv double-buffered kernels (e.g. rocblas_symv_kernel_upper_double_buffered_non_diagonal
+; with rocblas_internal_val_ptr<double> pointer-to-pointer args).  The fix was
+; already in 66f1a93b62de; this annotation pins coverage to the bug record.
 
 ; CHECK-LABEL: define amdgpu_kernel void @flat_atomic_add_f64_rtn_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
