@@ -54,6 +54,13 @@
 ; 8f2db5ec2edc.  The V_LDEXP_F64 handler in handle-valu.cpp emits
 ; llvm.ldexp.f64.i32 and was already in place; all 32 kernels in
 ; fatbin_co_0008.co raise successfully (32 ok, 0 fail).
+;
+; Pins Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-028:
+; 508 hits across 170 rocBLAS trtri kernels (fatbin_co_0008.co) were
+; reported as UnsupportedOpcode for v_ldexp_f64 at hotswap commit
+; 8f2db5ec2edc.  The V_LDEXP_F64 handler in handle-valu.cpp emits
+; llvm.ldexp.f64.i32 and was already in place; all 32 kernels in
+; fatbin_co_0008.co raise successfully (32 ok, 0 fail).
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_ldexp_f64_kernel(
 
