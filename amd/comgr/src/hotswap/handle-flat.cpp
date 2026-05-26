@@ -1503,6 +1503,42 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+
+  // ---- GFX12+ standalone cache maintenance (global_inv / global_wb) ----
+  //
+  // `global_inv scope` invalidates L1/L2 caches; `global_wb scope` writes
+  // back dirty L2 lines. On gfx1250 these are distinct hardware ops
+  // (VFLAT 0x02b / 0x02c). gfx950 has no direct equivalent, but the GFX9
+  // cache-maintenance intrinsics cover the semantics:
+  //
+  //   global_inv  ->  @llvm.amdgcn.buffer.wbinvl1   (invalidate L1 + L2)
+  //   global_wb   ->  @llvm.amdgcn.s.dcache.wb      (write back scalar L2)
+  //
+  // Neither instruction has address operands -- only a CPol (scope) immediate
+  // which selects CU/DEV/SYS cache scope on gfx12. The scope bit has no
+  // direct gfx950 encoding; the chosen intrinsics operate at the broadest
+  // scope available on gfx9/CDNA, matching the hardware guarantee that
+  // `global_inv scope:SCOPE_DEV` makes all prior stores visible.
+  //
+  // Both instructions are emitted outside `emitUnderExec` because they are
+  // wave-level cache-control ops that apply regardless of EXEC state
+  // (identical to `s_waitcnt` -- each active wave must issue them).
+  if (Sop == CanonicalOp::GLOBAL_INV) {
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_buffer_wbinvl1);
+    Ctx.B.CreateCall(Fn, {});
+    Hr.Handled = true;
+    return Hr;
+  }
+
+  if (Sop == CanonicalOp::GLOBAL_WB) {
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_s_dcache_wb);
+    Ctx.B.CreateCall(Fn, {});
+    Hr.Handled = true;
+    return Hr;
+  }
+
   return Hr;
 }
 
