@@ -14,6 +14,8 @@
 ;
 ; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-015
 ;   20 hit(s) across 20 rocBLAS iamax/iamin kernels (fatbin_co_0041.co).
+; Also covers Bug-Id: 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-015
+;   20 hit(s) across 20 rocBLAS iamax/iamin kernels (fatbin_co_0041.co).
 ;
 ; Pattern from rocBLAS iamax/iamin kernels:
 ;   1. v_mbcnt_lo -> lane_id -> v_lshl_or_b32 -> addr_reg  (addr is tainted)
