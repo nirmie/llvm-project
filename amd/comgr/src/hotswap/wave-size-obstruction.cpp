@@ -12,6 +12,7 @@
 #include "isa-profile.h"
 #include "mc-state.h"
 #include "canonical-op.h"
+#include "opcode-map.h"
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h" // AMDGPU::OpName, AMDGPU::TTMP_32RegClassID, AMDGPU::mc2PseudoReg
 #include "Utils/AMDGPUBaseInfo.h"             // AMDGPU::getNamedOperandIdx
@@ -96,6 +97,9 @@ const char *rewriteIdName(RewriteId R) {
   case RewriteId::PostRaiseCrossLaneRewrite:
     return "post-raise cross-lane rewrite (writelane -> select, "
            "readlane -> ds.bpermute)";
+  case RewriteId::ElectLeaderWaveNative:
+    return "ElectLeaderWaveNative (v_cmpx_eq 0 of v_mbcnt_lo: safe under "
+           "WaveNative via ballotI1ToWidth + storeExec)";
   }
   return "UnknownRewriteId";
 }
@@ -267,6 +271,11 @@ struct LanePredicatedExecSite {
   const DecodedInst *Inst;
   ObstructionKind Kind; // CmpxFromLaneId or SaveExecFromLaneId.
   std::string Detail;
+  // True iff this V_CMPX site matches the elect-first-active-lane pattern:
+  // `v_cmpx_eq 0` where the compared source is derived from v_mbcnt_lo(*,0).
+  // Under WaveNativeProjection this is a safe data-dependent EXEC write;
+  // under MODREP it remains an obstruction (absolute lane position varies).
+  bool IsElectLeader = false;
 };
 
 class LaneIdProvenanceTracker {
@@ -463,10 +472,41 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       SccTainted = false;
     } else if (Sop == CanonicalOp::V_CMPX) {
       if (SourceTainted) {
-        Sites.push_back(
-            {&Di, ObstructionKind::CmpxFromLaneId,
-             "v_cmpx operand dataflow is derived from v_mbcnt_*; EXEC would "
-             "be gated by absolute target lane position under cross-widening"});
+        // Detect the elect-first-active-lane pattern: `v_cmpx_eq 0` of a
+        // mbcnt-derived value. Under WaveNative this is safe (data-dependent
+        // EXEC write routed through ballotI1ToWidth); under MODREP it is a
+        // genuine obstruction because the absolute lane position picks a
+        // different leader in each replica.
+        bool IsElectLeader = false;
+        const VCmpMeta *M = Di.Vcmp;
+        if (M && !M->IsFloat && !M->IsClass &&
+            M->Pred == CmpInst::ICMP_EQ) {
+          // Check whether any non-tainted source operand is the immediate 0.
+          // `v_cmpx_eq 0, vMbcnt` has one tainted (mbcnt-derived) register
+          // source and one inline immediate 0; scan all SrcMap slots.
+          for (unsigned K = 0; K < Di.NumSrcs; ++K) {
+            if (Tracker.sourceTainted(Di, K))
+              continue; // skip the mbcnt-derived source
+            unsigned OpIdx = Di.SrcMap[K];
+            if (OpIdx >= Di.Inst.getNumOperands())
+              continue;
+            const MCOperand &Operand = Di.Inst.getOperand(OpIdx);
+            if (Operand.isImm() && Operand.getImm() == 0) {
+              IsElectLeader = true;
+              break;
+            }
+          }
+        }
+        LanePredicatedExecSite S;
+        S.Inst = &Di;
+        S.Kind = ObstructionKind::CmpxFromLaneId;
+        S.IsElectLeader = IsElectLeader;
+        S.Detail = IsElectLeader
+            ? "v_cmpx_eq 0 of v_mbcnt_lo(*,0): elect-first-active-lane; "
+              "safe under WaveNative (data-dependent EXEC), obstruction under MODREP"
+            : "v_cmpx operand dataflow is derived from v_mbcnt_*; EXEC would "
+              "be gated by absolute target lane position under cross-widening";
+        Sites.push_back(std::move(S));
       }
       ExplicitDefsTainted = false;
       VccTainted = false;
@@ -1160,9 +1200,19 @@ ObstructionReport buildObstructionReport(ArrayRef<DecodedInst> Insts,
     ObstructionSite Site;
     Site.Inst = Pw.Inst;
     Site.Kind = Pw.Kind;
-    Site.Rewrite = RewriteId::None;
-    Site.RewriteImplemented = false;
     Site.Detail = Pw.Detail;
+    // Elect-leader v_cmpx_eq 0 is safe under WaveNative: the V_CMPX handler
+    // routes EXEC writes through ballotI1ToWidth + storeExec, so the
+    // data-dependent cmpx raises correctly. Under MODREP it remains an
+    // obstruction (absolute lane position selects different leaders in each
+    // replica), so we only clear the obstruction when EnableWaveNative.
+    if (Pw.IsElectLeader && EnableWaveNative) {
+      Site.Rewrite = RewriteId::ElectLeaderWaveNative;
+      Site.RewriteImplemented = true;
+    } else {
+      Site.Rewrite = RewriteId::None;
+      Site.RewriteImplemented = false;
+    }
     Report.Sites.push_back(std::move(Site));
   }
 
