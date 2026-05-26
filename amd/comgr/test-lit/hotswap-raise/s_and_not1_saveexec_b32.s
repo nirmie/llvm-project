@@ -4,6 +4,12 @@
 ;
 ; Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-006
 ;
+; Also covers Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-006
+; 96 s_and_not1_saveexec_b32 UnsupportedOpcode hits across 96 rocBLAS
+; GEMVT kernels (e.g. rocblas_gemvt_sn_kernel on gfx1250). Fix was
+; already present; this annotation pins regression coverage to this
+; bug record.
+;
 ; Regression test for s_and_not1_saveexec_b32 (gfx12 renamed assembly
 ; form of S_ANDN2_SAVEEXEC_B32).  The LLVM MC disassembles the gfx12
 ; encoding to S_ANDN2_SAVEEXEC_B32 internally; the hotswap opcode-map
