@@ -35,6 +35,12 @@
 ; as UnsupportedOpcode on v_cvt_i32_f64 (48 hits, 36 kernels) at commit
 ; 8f2db5ec2edc. The handler remains in place; all 728 kernels raise OK.
 ;
+; Pins Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-021:
+; Same rocBLAS double-buffered GEMV workload (fatbin_co_0012.co) re-filed
+; as UnsupportedOpcode on v_cvt_i32_f64 (48 hits, 36 kernels) at commit
+; 8f2db5ec2edc. The opcode-map + handle-valu.cpp fix continues to handle
+; the e32 encoding correctly; all 728 kernels raise OK (0 fail).
+;
 ; CHECK-LABEL: define amdgpu_kernel void @v_cvt_i32_f64_gfx950_kernel(
 ; CHECK: [[SRC:%[^ ]+]] = bitcast i64 {{%[^ ]+}} to double
 ; CHECK-NEXT: [[I32:%[^ ]+]] = fptosi double [[SRC]] to i32
