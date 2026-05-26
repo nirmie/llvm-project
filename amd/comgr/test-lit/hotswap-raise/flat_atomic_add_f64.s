@@ -5,6 +5,12 @@
 ; floating-point add as a flat atomic.  The lifted IR must be an
 ; `atomicrmw fadd ... double` operating on a flat-address pointer, where the
 ; data operand is a bitcast of a 64-bit VGPR-pair read to `double`.
+;
+; Also covers Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-001
+; 5 non-RTN flat_atomic_add_f64 UnsupportedOpcode hits across 5 rocBLAS
+; symv double-buffered kernels (e.g. rocblas_symv_kernel_upper_double_buffered_non_diagonal
+; with rocblas_internal_val_ptr<double> pointer-to-pointer args).  The fix was
+; already in 66f1a93b62de; this annotation pins coverage to the bug record.
 
 ; CHECK-LABEL: define amdgpu_kernel void @flat_atomic_add_f64_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
