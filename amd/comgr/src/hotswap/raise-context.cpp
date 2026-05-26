@@ -202,17 +202,21 @@ ParsedReg RaiseContext::parseReg(MCRegister Reg, int MciOpIdx) const {
     return Pr;
   // Aperture registers whose value on gfx950 is always 0: gfx1250 uses
   // flat-LDS / flat-scratch addressing with non-zero base addresses held in
-  // SRC_SHARED_BASE / _LIMIT, SRC_PRIVATE_BASE / _LIMIT, and
-  // SRC_FLAT_SCRATCH_BASE_LO / _HI; on gfx950 these address spaces do not
-  // exist and the base is effectively 0.  Classify as APERTURE so readOp32 /
-  // readOp64 can materialise a zero constant, allowing instructions like
-  // `s_mov_b64 dst, src_shared_base` and
-  // `v_add_nc_u64 dst, src_flat_scratch_base_lo, vN` to lower cleanly.
-  // The 64-bit parent register (e.g. SRC_SHARED_BASE) resolves here via
-  // `sub0(SRC_SHARED_BASE) = SRC_SHARED_BASE_LO` (see parseReg preamble).
+  // SRC_SHARED_BASE / _LIMIT and SRC_PRIVATE_BASE / _LIMIT; on gfx950
+  // these address spaces do not exist and the base is effectively 0.
+  // Classify as APERTURE so readOp32 / readOp64 can materialise a zero
+  // constant, allowing `s_mov_b64 dst, src_shared_base` to lower cleanly.
+  // The parent 64-bit registers (SRC_SHARED_BASE etc.) must be listed
+  // explicitly: mc2PseudoReg does not map them back to the _LO variant, so
+  // getSubReg-then-mc2PseudoReg in parseReg preamble leaves Lane==SRC_SHARED_BASE
+  // which would fall through to the default branch without these cases.
+  case AMDGPU::SRC_SHARED_BASE:
   case AMDGPU::SRC_SHARED_BASE_LO:
+  case AMDGPU::SRC_SHARED_LIMIT:
   case AMDGPU::SRC_SHARED_LIMIT_LO:
+  case AMDGPU::SRC_PRIVATE_BASE:
   case AMDGPU::SRC_PRIVATE_BASE_LO:
+  case AMDGPU::SRC_PRIVATE_LIMIT:
   case AMDGPU::SRC_PRIVATE_LIMIT_LO:
   // SRC_FLAT_SCRATCH_BASE holds the globally-addressable scratch base address
   // on gfx1250.  gfx950 has no globally-addressable scratch; private memory is
