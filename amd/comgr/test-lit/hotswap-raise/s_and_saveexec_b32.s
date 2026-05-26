@@ -5,6 +5,13 @@
 ;
 ; Pin Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-007
 ;
+; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-007
+; Identical recurrence: 156 s_and_saveexec_b32 UnsupportedOpcode hits across
+; 93 rocBLAS GEMVT kernels (sample: rocblas_gemvt_sn_reduce on gfx1250).
+; The gfx1250 fatbin reproduces cleanly at current HEAD (0 failures); fix
+; was already merged in the handle-sop1 + opcode-map work tracked by the
+; earlier bug record.
+;
 ; Regression for UnsupportedOpcode: s_and_saveexec_b32 on gfx1250 (wave32).
 ; This is the standard exec-narrowing pattern used in 156 instances across
 ; 93 rocblas gemvt kernels.  The transpiler must:
