@@ -16,6 +16,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
@@ -203,20 +204,45 @@ ParsedReg RaiseContext::parseReg(MCRegister Reg, int MciOpIdx) const {
   // Aperture / runtime-defined source registers: SRC_SHARED_BASE /
   // _LIMIT, SRC_PRIVATE_BASE / _LIMIT, SRC_FLAT_SCRATCH_BASE_LO /
   // _HI, SRC_POPS_EXITING_WAVE_ID. Their values are set per-queue by
-  // the firmware and have no compile-time-knowable IR encoding, so
-  // we cannot lower them principledly. Classify as OTHER so parseReg
-  // does not crash; readOp32 / readOp64 will route OTHER through
-  // `recordReadFailure(unsupportedShape)` and the per-instruction
-  // dispatch loop in raiser.cpp will surface it as a clean
-  // unsupported-shape failure rather than a SIGABRT.
+  // the firmware. The 64-bit aperture registers (src_shared_base,
+  // src_private_base, etc.) are available on gfx9+ including gfx950,
+  // so s_mov_b64 with these sources can be lowered via inline asm.
+  // Classify as APERTURE_SRC so readOp64 can emit the inline asm read;
+  // readOp32 still fails (the 32-bit read is architecturally broken on
+  // hardware -- only the hi dword carries the real aperture address).
   case AMDGPU::SRC_SHARED_BASE_LO:
+    Pr.RegKind = ParsedReg::APERTURE_SRC;
+    Pr.BaseIdx = 0;
+    Pr.Width = Width;
+    return Pr;
   case AMDGPU::SRC_SHARED_LIMIT_LO:
+    Pr.RegKind = ParsedReg::APERTURE_SRC;
+    Pr.BaseIdx = 1;
+    Pr.Width = Width;
+    return Pr;
   case AMDGPU::SRC_PRIVATE_BASE_LO:
+    Pr.RegKind = ParsedReg::APERTURE_SRC;
+    Pr.BaseIdx = 2;
+    Pr.Width = Width;
+    return Pr;
   case AMDGPU::SRC_PRIVATE_LIMIT_LO:
-  case AMDGPU::SRC_POPS_EXITING_WAVE_ID:
+    Pr.RegKind = ParsedReg::APERTURE_SRC;
+    Pr.BaseIdx = 3;
+    Pr.Width = Width;
+    return Pr;
   case AMDGPU::SRC_FLAT_SCRATCH_BASE_LO:
+    Pr.RegKind = ParsedReg::APERTURE_SRC;
+    Pr.BaseIdx = 4;
+    Pr.Width = Width;
+    return Pr;
   case AMDGPU::SRC_FLAT_SCRATCH_BASE_HI:
-    Pr.RegKind = ParsedReg::OTHER;
+    Pr.RegKind = ParsedReg::APERTURE_SRC;
+    Pr.BaseIdx = 5;
+    Pr.Width = Width;
+    return Pr;
+  case AMDGPU::SRC_POPS_EXITING_WAVE_ID:
+    Pr.RegKind = ParsedReg::APERTURE_SRC;
+    Pr.BaseIdx = 6;
     Pr.Width = Width;
     return Pr;
   default:
@@ -326,13 +352,14 @@ Value *RaiseContext::readOp32(const DecodedInst &Di, unsigned OpIdx) {
       return ConstantInt::get(I32Ty, 0);
     if (Pr.RegKind == ParsedReg::MODE)
       return ConstantInt::get(I32Ty, 0);
+    // 32-bit read of an aperture register is architecturally broken on
+    // hardware (always returns zero). Return 0 to match hardware behavior.
+    // The correct usage is always via s_mov_b64 (see readOp64 APERTURE_SRC).
+    if (Pr.RegKind == ParsedReg::APERTURE_SRC)
+      return ConstantInt::get(I32Ty, 0);
     // OTHER is the parser's "I recognised the register but cannot
-    // model it" channel, used today for runtime-defined aperture
-    // registers (SRC_SHARED_BASE / SRC_FLAT_SCRATCH_BASE_LO etc.,
-    // see parseReg's switch). Surface a clean unsupported-shape
-    // failure on the dispatch loop and return undef so we don't
-    // crash mid-handler -- the next instruction-boundary check in
-    // raiser.cpp will abort the kernel raise.
+    // model it" channel. Surface a clean unsupported-shape failure on
+    // the dispatch loop and return undef so we don't crash mid-handler.
     if (Pr.RegKind == ParsedReg::OTHER) {
       recordReadFailure(RaiseFailure::unsupportedShape(
           Di, "operand-read",
@@ -396,6 +423,34 @@ Value *RaiseContext::readOp64(const DecodedInst &Di, unsigned OpIdx) {
       Value *Exec = Regs.loadExec(B);
       Value *Zero = ConstantInt::get(Exec->getType(), 0);
       return B.CreateZExt(B.CreateICmpEQ(Exec, Zero, "execz"), I64Ty);
+    }
+    // Aperture registers (src_shared_base / src_shared_limit /
+    // src_private_base / src_private_limit / src_flat_scratch_base_lo
+    // / src_flat_scratch_base_hi / src_pops_exiting_wave_id).
+    // These are available on gfx9+ including gfx950 via s_mov_b64.
+    // Emit inline asm to read the full 64-bit aperture value; the
+    // hardware-specified lo half is architecturally zeroed (broken),
+    // but the caller (typically s_mov_b64 feeding an aperture-address
+    // comparison) uses only the hi dword, so the full 64-bit result
+    // is the correct representation.
+    if (Pr.RegKind == ParsedReg::APERTURE_SRC) {
+      static const char *ApertureNames[] = {
+          "src_shared_base",         // 0
+          "src_shared_limit",        // 1
+          "src_private_base",        // 2
+          "src_private_limit",       // 3
+          "src_flat_scratch_base_lo", // 4
+          "src_flat_scratch_base_hi", // 5
+          "src_pops_exiting_wave_id", // 6
+      };
+      const char *AsmRegName =
+          (Pr.BaseIdx >= 0 && Pr.BaseIdx < 7) ? ApertureNames[Pr.BaseIdx]
+                                              : "src_shared_base";
+      std::string AsmStr =
+          std::string("s_mov_b64 $0, ") + AsmRegName;
+      FunctionType *FTy = FunctionType::get(I64Ty, /*isVarArg=*/false);
+      InlineAsm *IA = InlineAsm::get(FTy, AsmStr, "=s", /*hasSideEffects=*/true);
+      return B.CreateCall(FTy, IA, {}, "aperture_b64");
     }
     if (Pr.RegKind == ParsedReg::OTHER) {
       recordReadFailure(RaiseFailure::unsupportedShape(
