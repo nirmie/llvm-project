@@ -12,6 +12,7 @@
 ;
 ; Bug-Id: 2026-05-23T19-19-07Z_qwen2.5-7b-instruct-013
 ; Also covers Bug-Id: 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-012
+; Also covers Bug-Id: 2026-05-26T15-20-57Z_qwen2.5-7b-instruct-012
 ; Kernel: copy_mat<rocblas_complex_num<double>, double, true>
 ; The -012 recurrence has 10 scratch_store_b128 hits across the same kernel
 ; template; the zero-fixed-size conservative-frame path handles all of them.
