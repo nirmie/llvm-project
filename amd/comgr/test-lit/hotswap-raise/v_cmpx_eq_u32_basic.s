@@ -7,6 +7,7 @@
 ; EQ compare-and-write-EXEC lowers to icmp eq + ballot + and.
 ;
 ; Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-014
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-014
 ;
 ; rocprim lookback-scan kernels (fatbin_co_0298.co, 1 hit across 1 kernel)
 ; were reported as UnsupportedOpcode for v_cmpx_eq_u32.  The instruction
