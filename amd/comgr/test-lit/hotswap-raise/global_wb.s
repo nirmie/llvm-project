@@ -6,6 +6,11 @@
 ; necessarily invalidating the cache. On gfx950 (HasMfma/GFX940+) the nearest
 ; equivalent is llvm.amdgcn.s.dcache.wb (gfx9+ scalar D$ writeback).
 ; Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-004
+;
+; Also covers Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-004
+; 315 global_wb UnsupportedOpcode hits across 315 rocBLAS TRSV kernels
+; (e.g. rocblas_trsv_big_batch_device). Fix was already present; this
+; annotation pins regression coverage to this bug record.
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_wb_kernel(
 ; CHECK: call void @llvm.amdgcn.s.dcache.wb()
