@@ -1,5 +1,5 @@
 ; RUN: %llvm_mc -mcpu=gfx1250 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
-; RUN:   && raise_cli %t.hsaco --target-isa=gfx950 \
+; RUN:   && %raise_cli %t.hsaco --target-isa=gfx950 \
 ; RUN:     --emit-ir=s_and_saveexec_b32_kernel 2>&1 \
 ; RUN:   | %FileCheck %s
 ;
@@ -7,6 +7,7 @@
 ;
 ; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-007
 ; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-007
+; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-007
 ; Identical recurrence: 156 s_and_saveexec_b32 UnsupportedOpcode hits across
 ; 93 rocBLAS GEMVT kernels (sample: rocblas_gemvt_sn_reduce on gfx1250).
 ; The gfx1250 fatbin reproduces cleanly at current HEAD (0 failures); fix
