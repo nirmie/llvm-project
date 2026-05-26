@@ -19,6 +19,14 @@
 ; Intrinsic declaration must be present (proves the calls use the right overload).
 ; CHECK-DAG: declare {{.*}}{ double, i1 } @llvm.amdgcn.div.scale.f64(double, double, i1 immarg)
 
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-022:
+; 1612 hits across 1037 kernels (sample: rocblas_trtri_small_kernel<16,double>
+; in fatbin_co_0008.co) were refused with UnsupportedOpcode on v_div_scale_f64
+; at hotswap commit 8f2db5ec2edc.  The VOP3b handler in handle-valu.cpp under
+; CanonicalOp::V_DIV_SCALE_F64 decodes the (src0==src2) numerator-scale and
+; (src0==src1) denominator-scale operand shapes and lowers both to
+; llvm.amdgcn.div.scale.f64 with the correct immarg flag.
+
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
 	.text
