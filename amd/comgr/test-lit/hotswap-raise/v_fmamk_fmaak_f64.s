@@ -23,6 +23,13 @@
 ; created against the wrong overload).
 ; CHECK: declare {{.*}}double @llvm.fma.f64(double, double, double)
 
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-024:
+; 3 hits across 3 kernels (sample: lasyf_kernel_lower<rocblas_complex_num<float>>
+; in fatbin_co_0145.co) were refused with UnsupportedOpcode on v_fmamk_f64
+; at hotswap commit 8f2db5ec2edc.  The handler in handle-valu.cpp under
+; CanonicalOp::V_FMAMK_F64 correctly routes the 64-bit KImmFP64 literal to
+; the second fma argument, and lowers to llvm.fma.f64.
+
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
 	.text
