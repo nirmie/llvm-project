@@ -7,6 +7,7 @@
 ; handler's SccResult (raiser.cpp:1202).
 ;
 ; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-008
+; Also covers Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-008
 ; (136 UnsupportedOpcode hits for s_bcnt1_i32_b32 across 12 kernels in
 ; the rocsolver syevj fatbin; handler was added in a prior fix but the
 ; bug-id was not yet pinned in this test).
