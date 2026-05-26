@@ -474,43 +474,29 @@ bool isSaveExecB32(CanonicalOp Sop) {
          Sop == CanonicalOp::S_ORN2_SAVEEXEC_B32;
 }
 
-// Return true iff `di` has an integer EQ comparison predicate.
-// Prefers Di.Vcmp (populated for e64 forms); falls back to mnemonic matching
-// for e32 forms whose MC opcode name ends in "_e32" and is absent from the
-// Vcmp side-table (parseVCmpPseudoName requires "_e64" suffix).
-static bool isEqPred(const DecodedInst &Di) {
-  if (Di.Vcmp)
-    return !Di.Vcmp->IsFloat && !Di.Vcmp->IsClass &&
-           Di.Vcmp->Pred == llvm::CmpInst::ICMP_EQ;
-  // e32 fallback: match "_EQ_" in the uppercase canonical mnemonic.
-  // Di.Mnemonic is the lowercase disassembler string (e.g. "v_cmpx_eq_u32_e32");
-  // use case-insensitive contains to avoid assuming case convention.
-  llvm::StringRef Mn(Di.Mnemonic);
-  return Mn.contains_insensitive("_eq_");
-}
-
-// Return true iff one of di's source operands is the immediate 0
-// and the other is a register whose canonical lane set overlaps
-// `ElectLeaderRegs` in `tracker`.  Used to detect `v_cmpx_eq 0, vT`
-// and `v_cmp_eq vcc, 0, vT` where vT is a zero-rank mbcnt_lo result.
-static bool isElectLeaderEqZero(const DecodedInst &Di,
-                                 const LaneIdProvenanceTracker &Tracker) {
-  if (!isEqPred(Di))
-    return false;
-  // We need exactly one immediate-0 source and at least one register source.
-  bool HasImm0 = false;
-  bool HasElectLeaderReg = false;
-  for (unsigned I = 0; I < Di.NumSrcs; ++I) {
-    unsigned OpIdx = Di.SrcMap[I];
-    if (OpIdx >= Di.Inst.getNumOperands())
-      continue;
-    const MCOperand &Op = Di.Inst.getOperand(OpIdx);
-    if (Op.isImm() && Op.getImm() == 0)
-      HasImm0 = true;
-    else if (Op.isReg() && Tracker.isRegElectLeader(Op.getReg()))
-      HasElectLeaderReg = true;
-  }
-  return HasImm0 && HasElectLeaderReg;
+// Return true iff Sop is a memory read (load) whose destination registers hold
+// values fetched from memory, not values derived from the load address.  Even
+// when the address is v_mbcnt-derived (lane-indexed array access), the loaded
+// data is not a lane index.  Propagating address taint into the destination
+// would cause the CmpxFromLaneId classifier to flag downstream v_cmpx
+// instructions that compare loaded values, producing a false-positive refusal.
+static bool isMemoryReadOp(CanonicalOp Sop) {
+  if (Sop >= CanonicalOp::S_LOAD_B32 && Sop <= CanonicalOp::S_LOAD_I16)
+    return true;
+  if (Sop >= CanonicalOp::FLAT_LOAD_UBYTE && Sop <= CanonicalOp::FLAT_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::GLOBAL_LOAD_UBYTE && Sop <= CanonicalOp::GLOBAL_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::SCRATCH_LOAD_DWORD && Sop <= CanonicalOp::SCRATCH_LOAD_DWORDX4)
+    return true;
+  if (Sop >= CanonicalOp::BUFFER_LOAD_DWORD && Sop <= CanonicalOp::BUFFER_LOAD_DWORDX4_LDS)
+    return true;
+  if (Sop >= CanonicalOp::DS_READ_B32 && Sop <= CanonicalOp::DS_READ_I8)
+    return true;
+  if (Sop == CanonicalOp::DS_LOAD_TR16_B128 || Sop == CanonicalOp::DS_READ_B64_TR_B16 ||
+      Sop == CanonicalOp::DS_READ_B64_TR_B8 || Sop == CanonicalOp::DS_LOAD_TR8_B64)
+    return true;
+  return false;
 }
 
 SmallVector<LanePredicatedExecSite>
@@ -590,14 +576,13 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
-    } else if (Sop == CanonicalOp::V_CMP) {
-      // V_CMP (non-cmpx): may write VCC or an SGPR.  If this is an EQ-to-0
-      // comparison of an elect-leader VGPR, set ElectLeaderVcc so that a
-      // downstream s_and_saveexec_b32 can be recognised.
-      bool IsElectLeaderEq = isElectLeaderEqZero(Di, Tracker);
-      if (Di.DefsVcc)
-        Tracker.ElectLeaderVcc = IsElectLeaderEq;
-      // Taint propagation: unchanged (any source taint propagates to defs/VCC).
+    } else if (isMemoryReadOp(Sop)) {
+      // Memory load: destination holds loaded values, not the address.  Break
+      // taint propagation from a lane-ID-derived address into the destination.
+      ExplicitDefsTainted = false;
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
     } else if (Sop == CanonicalOp::V_CMPX) {
       bool IsElectLeader = SourceTainted && isElectLeaderEqZero(Di, Tracker);
       if (SourceTainted) {
