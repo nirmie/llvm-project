@@ -326,10 +326,42 @@ public:
            isRegTainted(AMDGPU::EXEC);
   }
 
+  // Like anySourceTainted() but skips VCC sources.  Used for v_cndmask_b32
+  // where VCC is the selection predicate, not a data source: the output carries
+  // src0 or src1 -- a data value, not a lane-ID -- even if VCC was derived from
+  // a v_mbcnt comparison (e.g. a bounds check).
+  bool anyDataSourceTainted(const DecodedInst &Di) const {
+    for (unsigned I = 0; I < Di.NumSrcs; ++I) {
+      unsigned OpIdx = Di.SrcMap[I];
+      if (OpIdx >= Di.Inst.getNumOperands())
+        continue;
+      const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+      if (!Op.isReg())
+        continue;
+      MCRegister Reg = Op.getReg();
+      if (Reg == AMDGPU::VCC || Reg == AMDGPU::VCC_LO || Reg == AMDGPU::VCC_HI)
+        continue;
+      if (isRegTainted(Reg))
+        return true;
+    }
+    return false;
+  }
+
   bool anyVopdHalfSourceTainted(const DecodedInst::VopdHalf &Half) const {
-    for (unsigned I = 0; I < Half.NumSrcs; ++I)
+    using Kind = DecodedInst::VopdSource::Kind;
+    // For V_CNDMASK_B32 VOPD halves, VCC is the selection predicate, not a
+    // data source.  The output carries one of src0 / src1 -- a data value, not
+    // a lane-ID -- even if the predicate in VCC was derived from a v_mbcnt
+    // comparison.  Propagating VCC taint here causes false CmpxFromLaneId
+    // reports when a downstream v_cmpx compares the selected data value (e.g. a
+    // bounds check) rather than a raw lane index.
+    bool SkipVcc = (Half.CanonOp == CanonicalOp::V_CNDMASK_B32);
+    for (unsigned I = 0; I < Half.NumSrcs; ++I) {
+      if (SkipVcc && Half.Src[I].SrcKind == Kind::VCC)
+        continue;
       if (vopdSourceTainted(Half.Src[I]))
         return true;
+    }
     return false;
   }
 
@@ -474,29 +506,75 @@ bool isSaveExecB32(CanonicalOp Sop) {
          Sop == CanonicalOp::S_ORN2_SAVEEXEC_B32;
 }
 
-// Return true iff Sop is a memory read (load) whose destination registers hold
-// values fetched from memory, not values derived from the load address.  Even
-// when the address is v_mbcnt-derived (lane-indexed array access), the loaded
-// data is not a lane index.  Propagating address taint into the destination
-// would cause the CmpxFromLaneId classifier to flag downstream v_cmpx
-// instructions that compare loaded values, producing a false-positive refusal.
-static bool isMemoryReadOp(CanonicalOp Sop) {
-  if (Sop >= CanonicalOp::S_LOAD_B32 && Sop <= CanonicalOp::S_LOAD_I16)
+// Return true iff `op` is a memory read (load) CanonicalOp — i.e. one whose
+// destination register holds memory content rather than a lane-index-derived
+// value, regardless of whether the address was derived from v_mbcnt_*.
+// When the taint tracker encounters such an op it should CLEAR destination
+// taint: the loaded value cannot be a lane index even if the address was.
+static bool isMemoryReadOp(CanonicalOp Op) {
+  auto V = static_cast<uint16_t>(Op);
+  auto InRange = [V](CanonicalOp First, CanonicalOp Last) {
+    return V >= static_cast<uint16_t>(First) &&
+           V <= static_cast<uint16_t>(Last);
+  };
+  // SMEM scalar loads: S_LOAD_B32 .. S_LOAD_I16
+  if (InRange(CanonicalOp::S_LOAD_B32, CanonicalOp::S_LOAD_I16))
     return true;
-  if (Sop >= CanonicalOp::FLAT_LOAD_UBYTE && Sop <= CanonicalOp::FLAT_LOAD_DWORDX4)
+  // FLAT loads: FLAT_LOAD_UBYTE .. FLAT_LOAD_DWORDX4
+  if (InRange(CanonicalOp::FLAT_LOAD_UBYTE, CanonicalOp::FLAT_LOAD_DWORDX4))
     return true;
-  if (Sop >= CanonicalOp::GLOBAL_LOAD_UBYTE && Sop <= CanonicalOp::GLOBAL_LOAD_DWORDX4)
+  // GLOBAL loads: GLOBAL_LOAD_UBYTE .. GLOBAL_LOAD_DWORDX4
+  if (InRange(CanonicalOp::GLOBAL_LOAD_UBYTE, CanonicalOp::GLOBAL_LOAD_DWORDX4))
     return true;
-  if (Sop >= CanonicalOp::SCRATCH_LOAD_DWORD && Sop <= CanonicalOp::SCRATCH_LOAD_DWORDX4)
+  // SCRATCH loads: SCRATCH_LOAD_DWORD .. SCRATCH_LOAD_DWORDX4
+  if (InRange(CanonicalOp::SCRATCH_LOAD_DWORD, CanonicalOp::SCRATCH_LOAD_DWORDX4))
     return true;
-  if (Sop >= CanonicalOp::BUFFER_LOAD_DWORD && Sop <= CanonicalOp::BUFFER_LOAD_DWORDX4_LDS)
+  // DS (LDS) reads: DS_READ_B32 .. DS_READ_I8
+  if (InRange(CanonicalOp::DS_READ_B32, CanonicalOp::DS_READ_I8))
     return true;
-  if (Sop >= CanonicalOp::DS_READ_B32 && Sop <= CanonicalOp::DS_READ_I8)
-    return true;
-  if (Sop == CanonicalOp::DS_LOAD_TR16_B128 || Sop == CanonicalOp::DS_READ_B64_TR_B16 ||
-      Sop == CanonicalOp::DS_READ_B64_TR_B8 || Sop == CanonicalOp::DS_LOAD_TR8_B64)
+  // BUFFER (MUBUF) loads: BUFFER_LOAD_DWORD .. BUFFER_LOAD_DWORDX4_LDS
+  if (InRange(CanonicalOp::BUFFER_LOAD_DWORD, CanonicalOp::BUFFER_LOAD_DWORDX4_LDS))
     return true;
   return false;
+}
+
+// Return true iff `di` has an integer EQ comparison predicate.
+// Prefers Di.Vcmp (populated for e64 forms); falls back to mnemonic matching
+// for e32 forms whose MC opcode name ends in "_e32" and is absent from the
+// Vcmp side-table (parseVCmpPseudoName requires "_e64" suffix).
+static bool isEqPred(const DecodedInst &Di) {
+  if (Di.Vcmp)
+    return !Di.Vcmp->IsFloat && !Di.Vcmp->IsClass &&
+           Di.Vcmp->Pred == llvm::CmpInst::ICMP_EQ;
+  // e32 fallback: match "_EQ_" in the uppercase canonical mnemonic.
+  // Di.Mnemonic is the lowercase disassembler string (e.g. "v_cmpx_eq_u32_e32");
+  // use case-insensitive contains to avoid assuming case convention.
+  llvm::StringRef Mn(Di.Mnemonic);
+  return Mn.contains_insensitive("_eq_");
+}
+
+// Return true iff one of di's source operands is the immediate 0
+// and the other is a register whose canonical lane set overlaps
+// `ElectLeaderRegs` in `tracker`.  Used to detect `v_cmpx_eq 0, vT`
+// and `v_cmp_eq vcc, 0, vT` where vT is a zero-rank mbcnt_lo result.
+static bool isElectLeaderEqZero(const DecodedInst &Di,
+                                 const LaneIdProvenanceTracker &Tracker) {
+  if (!isEqPred(Di))
+    return false;
+  // We need exactly one immediate-0 source and at least one register source.
+  bool HasImm0 = false;
+  bool HasElectLeaderReg = false;
+  for (unsigned I = 0; I < Di.NumSrcs; ++I) {
+    unsigned OpIdx = Di.SrcMap[I];
+    if (OpIdx >= Di.Inst.getNumOperands())
+      continue;
+    const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+    if (Op.isImm() && Op.getImm() == 0)
+      HasImm0 = true;
+    else if (Op.isReg() && Tracker.isRegElectLeader(Op.getReg()))
+      HasElectLeaderReg = true;
+  }
+  return HasImm0 && HasElectLeaderReg;
 }
 
 SmallVector<LanePredicatedExecSite>
@@ -541,7 +619,25 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
 
     if (Sop == CanonicalOp::V_MBCNT_LO_U32_B32 ||
         Sop == CanonicalOp::V_MBCNT_HI_U32_B32) {
-      ExplicitDefsTainted = true;
+      // Taint only when src0 is the all-ones inline constant (-1), which
+      // makes mbcnt compute an absolute lane position (lane_id mod 32 for lo,
+      // lane_id / 32 for hi).  When src0 is a register (e.g. a saved copy of
+      // exec_lo), mbcnt computes "rank within active bits of src0" -- a value
+      // that is wave-size-agnostic under modulo-replication.  Keeping
+      // SourceTainted as the fallback ensures chains like mbcnt(-1,...) →
+      // shift → mbcnt(shifted, 0) are still caught.
+      bool Src0IsAllOnes = false;
+      if (Di.NumSrcs >= 1) {
+        unsigned Src0Idx = Di.SrcMap[0];
+        if (Src0Idx < Di.Inst.getNumOperands()) {
+          const MCOperand &Src0Op = Di.Inst.getOperand(Src0Idx);
+          if (Src0Op.isImm() &&
+              (Src0Op.getImm() == -1 ||
+               Src0Op.getImm() == static_cast<int64_t>(0xFFFFFFFFu)))
+            Src0IsAllOnes = true;
+        }
+      }
+      ExplicitDefsTainted = Src0IsAllOnes || SourceTainted;
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
@@ -576,9 +672,34 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted;
       SccTainted = false;
-    } else if (isMemoryReadOp(Sop)) {
-      // Memory load: destination holds loaded values, not the address.  Break
-      // taint propagation from a lane-ID-derived address into the destination.
+    } else if (Sop == CanonicalOp::V_CNDMASK_B32) {
+      // v_cndmask_b32 vDST, src0, src1, VCC: VCC is the selection predicate,
+      // not a data source.  The output carries src0 or src1 -- a data value,
+      // not a lane-ID -- even if VCC was tainted by a v_mbcnt comparison (e.g.
+      // a bounds check).  Propagating VCC taint into vDST would cause false
+      // CmpxFromLaneId reports when a downstream v_cmpx compares the selected
+      // data value rather than a raw lane index.
+      ExplicitDefsTainted = Tracker.anyDataSourceTainted(Di);
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
+    } else if (Sop == CanonicalOp::V_CMP) {
+      // V_CMP (non-cmpx): may write VCC or an SGPR.  If this is an EQ-to-0
+      // comparison of an elect-leader VGPR, set ElectLeaderVcc so that a
+      // downstream s_and_saveexec_b32 can be recognised.
+      bool IsElectLeaderEq = isElectLeaderEqZero(Di, Tracker);
+      if (Di.DefsVcc)
+        Tracker.ElectLeaderVcc = IsElectLeaderEq;
+      // Taint propagation: V_CMP outputs a boolean per-lane predicate, not a
+      // raw lane-ID value.  Propagating taint from the input operands into the
+      // comparison result (VCC or SGPR pair) would cause every downstream
+      // consumer (s_and_b32, s_and_saveexec_b32, v_cndmask_b32, ...) to appear
+      // lane-ID-tainted even though the comparison output is wave-size-
+      // independent: the same lanes satisfy the same scalar condition regardless
+      // of wave width.  The elect-leader idiom (`v_cmpx_eq_u32 vcc, 0, mbcnt`)
+      // is handled by the V_CMPX branch below via SourceTainted directly on the
+      // CMPX; ordinary V_CMP comparisons should not propagate mbcnt taint
+      // through their result.
       ExplicitDefsTainted = false;
       VccTainted = false;
       ExecTainted = OldExecTainted;
@@ -605,6 +726,14 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       ExecTainted = OldExecTainted || SourceTainted;
       SccTainted = false;
       Tracker.ElectLeaderVcc = false;
+    } else if (isMemoryReadOp(Sop)) {
+      // Memory load: destination holds the loaded value, not the address.
+      // Clear destination taint even if the address was lane-ID-derived;
+      // the loaded value is not a lane index.
+      ExplicitDefsTainted = false;
+      VccTainted = false;
+      ExecTainted = OldExecTainted;
+      SccTainted = false;
     } else if (isSaveExecB32(Sop)) {
       bool IsElectLeader = SourceTainted && Tracker.ElectLeaderVcc;
       if (SourceTainted) {
