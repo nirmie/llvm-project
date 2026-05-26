@@ -39,6 +39,13 @@
 ; Sample kernel: rocblas_symv_kernel_upper_double_buffered_non_diagonal with
 ; rocblas_internal_val_ptr<double> pointer-to-pointer args.  All 196 kernels in
 ; fatbin_co_0019.co raise OK with the current binary (fix in 66f1a93b62de).
+;
+; Pins Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-001:
+; Same UnsupportedOpcode on flat_atomic_add_f64 [FLAT], 5 hits across 5 rocBLAS
+; symv double-buffered kernels in fatbin_co_0019.co at hotswap commit 8f2db5ec2edc.
+; Sample kernel: rocblas_symv_kernel_upper_double_buffered_non_diagonal with
+; rocblas_internal_val_ptr<double> pointer-to-pointer args.  All 196 kernels in
+; fatbin_co_0019.co raise OK with the current binary (fix in 66f1a93b62de).
 
 ; CHECK-LABEL: define amdgpu_kernel void @flat_atomic_add_f64_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
