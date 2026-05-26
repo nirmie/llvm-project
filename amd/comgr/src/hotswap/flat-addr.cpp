@@ -59,6 +59,15 @@ Value *toGlobalPtr(RaiseContext &Ctx, Value *Addr, int64_t MemOffset) {
   return Addr;
 }
 
+// Any SReg_64-class register is valid as the saddr operand in SADDR-form
+// GLOBAL/FLAT instructions (gfx12+): SGPR pair, VCC, TTMP pair, EXEC.
+// readReg64 handles all of these; we just need to recognise them here so
+// we don't fall through to the "unrecognised shape" fatal error.
+bool isSaddr64Kind(ParsedReg::Kind K) {
+  return K == ParsedReg::SGPR || K == ParsedReg::VCC ||
+         K == ParsedReg::TTMP || K == ParsedReg::EXEC;
+}
+
 } // namespace
 
 FlatAddr decodeGlobalLoadAddr(RaiseContext &Ctx, const DecodedInst &Di,
@@ -67,10 +76,11 @@ FlatAddr decodeGlobalLoadAddr(RaiseContext &Ctx, const DecodedInst &Di,
   FlatAddr Out;
   Value *Addr = nullptr;
 
-  // SADDR form: saddr(SGPR64), vaddr(VGPR32), ... -- LLVM MC places the
-  // SGPR first in the decoded operand order.
+  // SADDR form: saddr(SReg_64), vaddr(VGPR32), ... -- LLVM MC places the
+  // SGPR first in the decoded operand order.  The ISA allows any SReg_64
+  // (SGPR pair, VCC, TTMP pair) as the saddr; readReg64 handles all of them.
   if (Op.nSrcs() >= 2 && Op.isSrcReg(0) && Op.isSrcReg(1) &&
-      Op.srcReg(0).RegKind == ParsedReg::SGPR &&
+      isSaddr64Kind(Op.srcReg(0).RegKind) &&
       Op.srcReg(1).RegKind == ParsedReg::VGPR) {
     Out.HasSaddr = true;
     Value *Saddr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(0));
@@ -108,11 +118,11 @@ FlatAddr decodeGlobalStoreAddr(RaiseContext &Ctx, const DecodedInst &Di,
   FlatAddr Out;
   Value *Addr = nullptr;
 
-  // SADDR form: vaddr(VGPR32), vdata(VGPR*), saddr(SGPR64), ...
+  // SADDR form: vaddr(VGPR32), vdata(VGPR*), saddr(SReg_64), ...
   if (Op.nSrcs() >= 3 && Op.isSrcReg(0) && Op.isSrcReg(1) && Op.isSrcReg(2) &&
       Op.srcReg(0).RegKind == ParsedReg::VGPR &&
       Op.srcReg(1).RegKind == ParsedReg::VGPR &&
-      Op.srcReg(2).RegKind == ParsedReg::SGPR) {
+      isSaddr64Kind(Op.srcReg(2).RegKind)) {
     Out.HasSaddr = true;
     Value *Saddr = Ctx.Regs.readReg64(Ctx.B, Op.srcReg(2));
     Value *Vaddr = Ctx.B.CreateSExt(Ctx.Regs.readReg32(Ctx.B, Op.srcReg(0)),
