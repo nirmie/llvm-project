@@ -29,6 +29,11 @@
 ; re-filed as UnsupportedOpcode on v_cmpx_nlt_f32 at hotswap commit 8f2db5ec2edc.
 ; The handler was already in place; all 81 kernels in fatbin_co_0173.co raise OK,
 ; confirming the fix from the original bug remains effective.
+;
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-019
+; 226 hits across 16 rocSOLVER geqr2_kernel_small kernels (fatbin_co_0173.co)
+; reported as UnsupportedOpcode for v_cmpx_nlt_f32. All 81 kernels raise OK;
+; the existing NLT handler (fcmp uge) covers this case.
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_nlt_f32_basic_kernel(
 ; CHECK: fcmp uge float
 ; CHECK-NOT: UnsupportedOpcode
