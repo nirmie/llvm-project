@@ -15,6 +15,7 @@
 ; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-000
 ; Also covers Bug-Id: 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-000
 ; Also covers Bug-Id: 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-000
+; Also covers Bug-Id: 2026-05-26T15-20-57Z_qwen2.5-7b-instruct-000
 ; 510 hits across 454 rocSOLVER getri kernels (sample:
 ; _ZN9rocsolver6v33300L18getri_kernel_smallILi1E19rocblas_complex_numIfEPS3_EEvT1_iilPiilS6_bb
 ; in fatbin_co_0104.co) were reported as UnsupportedOpcode for ds_cmpstore_rtn_b32
