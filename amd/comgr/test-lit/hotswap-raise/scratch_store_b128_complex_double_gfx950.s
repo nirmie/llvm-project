@@ -3,6 +3,7 @@
 ; RUN:     --emit-ir=copy_mat_complex_double_kernel 2>/dev/null | %FileCheck %s
 ;
 ; Regression test for Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-012
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-012
 ;
 ; The copy_mat<rocblas_complex_num<double>, double, true> kernel issues 10
 ; scratch_store_b128 instructions with private_segment_fixed_size=0.  Each
