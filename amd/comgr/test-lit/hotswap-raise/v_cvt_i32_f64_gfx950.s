@@ -17,6 +17,13 @@
 ;   2. The result is stored correctly
 ;   3. No "unsupported instruction" is emitted
 ;
+; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-021:
+; Same 48-hit / 36-kernel rocBLAS double-buffered GEMV workload
+; (fatbin_co_0012.co) re-filed as UnsupportedOpcode on v_cvt_i32_f64
+; at hotswap commit 8f2db5ec2edc. The handler remains in place via
+; opcode-map.cpp (V_CVT_I32_F64_e64 -> CanonicalOp::V_CVT_I32_F64) and
+; handle-valu.cpp (fptosi double -> i32); all 728 kernels raise OK.
+;
 ; CHECK-LABEL: define amdgpu_kernel void @v_cvt_i32_f64_gfx950_kernel(
 ; CHECK: [[SRC:%[^ ]+]] = bitcast i64 {{%[^ ]+}} to double
 ; CHECK-NEXT: [[I32:%[^ ]+]] = fptosi double [[SRC]] to i32
