@@ -10,6 +10,7 @@
 ; Also covers Bug-Id: 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-007
 ; Also covers Bug-Id: 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-007
 ; Also covers Bug-Id: 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-007
+; Also covers Bug-Id: 2026-05-26T15-20-57Z_qwen2.5-7b-instruct-007
 ; Identical recurrence: 156 s_and_saveexec_b32 UnsupportedOpcode hits across
 ; 93 rocBLAS GEMVT kernels (sample: rocblas_gemvt_sn_reduce on gfx1250).
 ; The gfx1250 fatbin reproduces cleanly at current HEAD (0 failures); fix
