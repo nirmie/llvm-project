@@ -41,6 +41,11 @@
 ; 71-hit / 71-kernel rocprim scan workload (fatbin_co_0298.co) re-filed as
 ; UnsupportedOpcode on v_illegal at hotswap commit 8f2db5ec2edc. Same root
 ; cause and same fix; all 93 kernels raise OK against --target-isa=gfx950.
+;
+; Pins Bug-Id 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-027:
+; 71-hit / 71-kernel rocprim scan workload (fatbin_co_0298.co) re-filed as
+; UnsupportedOpcode on v_illegal at hotswap commit 8f2db5ec2edc. Same root
+; cause and same fix; all 93 kernels raise OK against --target-isa=gfx950.
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_illegal_kernel(
 ; CHECK: call void @llvm.trap()
