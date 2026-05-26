@@ -44,6 +44,11 @@
 ; Same UnsupportedOpcode on v_movrels_b32 [VOP1], 50 hits across 50 rocSOLVER
 ; trti2_kernel_small kernels (fatbin_co_0106.co) at hotswap commit 8f2db5ec2edc.
 ; The V_MOVRELS_B32 handler was already in place; all 128 kernels raise OK.
+;
+; Pins Bug-Id 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-029:
+; Same UnsupportedOpcode on v_movrels_b32 [VOP1], 50 hits across 50 rocSOLVER
+; trti2_kernel_small kernels (fatbin_co_0106.co) at hotswap commit 8f2db5ec2edc.
+; The V_MOVRELS_B32 handler was already in place; all 128 kernels raise OK.
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_movrels_movreld_b32_kernel(
 ; CHECK: extractelement <{{[0-9]+}} x i32>
