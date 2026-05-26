@@ -17,6 +17,12 @@
 ; CanonicalOp::V_PK_ADD_F16 in handle-valu-vop3p.cpp emits lane-wise fadd
 ; with op_sel / neg_lo / neg_hi modifier support; all 306 kernels in
 ; fatbin_co_0034.co raise successfully (306 ok, 0 fail).
+;
+; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-030:
+; Same UnsupportedOpcode failure for v_pk_add_f16: 48 hits across 48
+; rocBLAS geam_min_plus kernels using _Float16 x2 types in
+; fatbin_co_0034.co at hotswap commit 8f2db5ec2edc.  Fix already in place;
+; all 306 kernels raise successfully (306 ok, 0 fail).
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_add_f16_basic_kernel(
 ; BASIC: fadd <2 x half>
