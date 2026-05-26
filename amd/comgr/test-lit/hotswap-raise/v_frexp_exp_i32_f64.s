@@ -22,6 +22,11 @@
 ; CanonicalOp::V_FREXP_EXP_I32_F64) and handle-valu.cpp (amdgcn.frexp.exp)
 ; fix is already in place; all 33 kernels raise OK (0 fail).
 ; Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-025
+;
+; Pins Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-025:
+; Same rocSOLVER stedcj_solve workload (fatbin_co_0141.co), 109 hits across 9
+; kernels at hotswap commit 8f2db5ec2edc.  Already fixed by the
+; V_FREXP_EXP_I32_F64 handler in handle-valu.cpp; all 33 kernels raise OK.
 
 ; IR-LABEL: define amdgpu_kernel void @v_frexp_exp_i32_f64_kernel(
 ; IR: call i32 @llvm.amdgcn.frexp.exp.i32.f64(double
