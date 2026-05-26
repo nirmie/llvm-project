@@ -35,6 +35,12 @@
 ; re-filed as UnsupportedOpcode on v_fmamk_f64 at hotswap commit
 ; 8f2db5ec2edc. The V_FMAMK_F64 handler in handle-valu.cpp remains in
 ; place; all 9 kernels in the .co raise OK.
+;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-024:
+; Same 3-hit / 3-kernel rocsolver lasyf workload (fatbin_co_0145.co)
+; re-filed again as UnsupportedOpcode on v_fmamk_f64 at hotswap commit
+; 8f2db5ec2edc. The V_FMAMK_F64 handler in handle-valu.cpp remains in
+; place; all 9 kernels in the .co raise OK.
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
