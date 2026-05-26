@@ -6,6 +6,7 @@
 ; Regression pin for Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-010.
 ; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-010
 ; Also covers Bug-Id: 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-010
+; Also covers Bug-Id: 2026-05-26T15-20-57Z_qwen2.5-7b-instruct-010
 ;
 ; `s_load_b64` (2-dword SMEM load from the kernarg segment) was reported
 ; as UnsupportedOpcode in the SMEM handler for kernels that fetch a 64-bit
