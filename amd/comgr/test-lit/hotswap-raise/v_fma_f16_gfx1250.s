@@ -24,6 +24,12 @@
 ; kernels in fatbin_co_0046.co at hotswap commit 8f2db5ec2edc. The True16
 ; opcode entries added in commit 27bd5ab890e7 are already in origin/hotswap;
 ; all 40 kernels in fatbin_co_0046.co raise OK with the current binary.
+;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-023:
+; Same UnsupportedOpcode on v_fma_f16 [VOP3], 4 hits across 4 rocblas_rot
+; kernels in fatbin_co_0046.co at hotswap commit 8f2db5ec2edc. Already fixed
+; by the True16/Fake16 kCanonTable entries in commit 27bd5ab890e7; all 40
+; kernels in fatbin_co_0046.co raise OK with the current binary.
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_fma_f16_t16_basic_kernel(
 ; BASIC-DAG: trunc i32 {{.*}} to i16
