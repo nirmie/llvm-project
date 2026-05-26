@@ -136,6 +136,10 @@ void AllocaRegFile::init(IRBuilder<> &B, Type *I32Ty, Type *I1Ty,
 }
 
 void AllocaRegFile::storeSGPR32(IRBuilder<> &B, int Idx, Value *V) {
+  if (Idx < 0 || static_cast<unsigned>(Idx) >= Sgpr.size() || !Sgpr[Idx])
+    report_fatal_error(Twine("transpiler: storeSGPR32 idx=") + Twine(Idx) +
+                       " out of range [0.." + Twine(Sgpr.size()) +
+                       ") or null; raiser bug, not a kernel bug.");
   Type *I32Ty = B.getInt32Ty();
   if (V->getType() != I32Ty)
     V = B.CreateBitCast(V, I32Ty);
