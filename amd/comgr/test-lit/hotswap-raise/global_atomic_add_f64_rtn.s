@@ -6,6 +6,10 @@
 ; consumed (numDefs > 0).  rocBLAS symv double-buffered kernels use this form.
 ; The lifted IR must be an `atomicrmw fadd ... double` with the result written
 ; back to a VGPR pair.
+;
+; Also covers Bug-Id: 2026-05-26T04-13-44Z_qwen2.5-7b-instruct-002
+; (5 RTN-form global_atomic_add_f64 UnsupportedOpcode hits across 5 kernels in
+; the rocBLAS run on 2026-05-26).
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_atomic_add_f64_rtn_kernel(
 ; CHECK: bitcast i64 %{{.*}} to double
