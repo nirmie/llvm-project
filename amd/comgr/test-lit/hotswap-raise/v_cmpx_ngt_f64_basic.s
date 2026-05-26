@@ -23,6 +23,13 @@
 ; v_cmpx_ngt_f64 at hotswap commit 8f2db5ec2edc. The opcode is handled
 ; by the generic V_CMPX path in parseVCmpPseudoName() (opcode-map.cpp),
 ; routing NGT -> FCMP_ULE via CanonicalOp::V_CMPX and handleValuVcmp().
+;
+; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-018:
+; Same 4 rocBLAS lange_one_columns kernels (fatbin_co_0116.co) re-filed as
+; UnsupportedOpcode on v_cmpx_ngt_f64 (4 hits, 4 kernels) at hotswap commit
+; 8f2db5ec2edc. The handler was already in place via parseVCmpPseudoName()
+; -> CanonicalOp::V_CMPX with FCMP_ULE predicate; all 4 kernels raise OK
+; (matching counts) confirming the fix remains effective.
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_ngt_f64_basic_kernel(
 ; CHECK: fcmp ule double
 ; CHECK-NOT: UnsupportedOpcode
