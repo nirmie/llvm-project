@@ -23,6 +23,12 @@
 ; rocBLAS geam_min_plus kernels using _Float16 x2 types in
 ; fatbin_co_0034.co at hotswap commit 8f2db5ec2edc.  Fix already in place;
 ; all 306 kernels raise successfully (306 ok, 0 fail).
+;
+; Pins Bug-Id 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-030:
+; 48 hits across 48 rocBLAS geam_min_plus kernels (_Float16 / <2 x _Float16>
+; variants) in fatbin_co_0034.co reported as UnsupportedOpcode for
+; v_pk_add_f16 at hotswap commit 8f2db5ec2edc.  Handler already present in
+; handle-valu-vop3p.cpp; all 306 kernels raise OK against --target-isa=gfx950.
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_add_f16_basic_kernel(
 ; BASIC: fadd <2 x half>
