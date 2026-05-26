@@ -5,18 +5,19 @@
 ; Lift test for v_frexp_mant_f64 (VOP1 e32 encoding on gfx1250).
 ;
 ; v_frexp_mant_f64 extracts the mantissa fraction of a F64 value,
-; returning a F64 in [0.5, 1.0) (or 0 / ±inf / NaN for special inputs).
+; returning a F64 in [0.5, 1.0) (or 0 / +/-inf / NaN for special inputs).
 ; v_frexp_exp_i32_f64 extracts the biased exponent as an I32.
 ;
 ; Both are defined in VOP1Instructions.td under
 ;   VOP1_Real_gfx6_gfx7_gfx10_NO_DPP_gfx11_gfx13_with_DPP16_gfx12
 ; so on gfx1250 the disassembler decodes them via the shared GFX12
 ; table, producing the _gfx12 real MC opcodes (e.g.
-; V_FREXP_MANT_F64_e32_gfx12).  The opcode-map must canonicalise
+; V_FREXP_MANT_F64_e32_gfx12).  The opcode-map canonicalises
 ; these through the e32->e64->CanonicalOp chain.
 ;
 ; Regression target for UnsupportedOpcode failure observed in the
 ; rocSOLVER stebz_bisection_kernel (double-precision variant).
+; Bug-Id: 2026-05-23T19-19-07Z_qwen2.5-7b-instruct-027
 
 ; IR-LABEL: define amdgpu_kernel void @v_frexp_mant_f64_kernel(
 ; IR: call double @llvm.amdgcn.frexp.mant.f64(double
