@@ -8,6 +8,15 @@
 ; src/hotswap/handle-valu.cpp under
 ; `if (Sop == CanonicalOp::V_LDEXP_F64) { ... }`; the CanonicalOp lives
 ; in src/hotswap/canonical-op.h under the FP64 group.
+;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-028:
+; 508 hits across 170 rocBLAS kernels (sample:
+; _ZL18rocblas_trtri_fillILi128EfPfEvP15_rocblas_handle13rocblas_fill_ililT1_llii
+; in fatbin_co_0008.co) were reported as UnsupportedOpcode for
+; v_ldexp_f64 at hotswap commit 8f2db5ec2edc.  The handler under
+; CanonicalOp::V_LDEXP_F64 in handle-valu.cpp emits llvm.ldexp.f64.i32
+; and was already in place; all 32 kernels in fatbin_co_0008.co raise
+; successfully (32 ok, 0 fail).
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_ldexp_f64_kernel(
 
