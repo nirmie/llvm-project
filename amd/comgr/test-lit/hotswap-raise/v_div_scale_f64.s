@@ -51,6 +51,12 @@
 ; (fatbin_co_0008.co) at hotswap commit 8f2db5ec2edc. The VOP3b handler in
 ; handle-valu.cpp under CanonicalOp::V_DIV_SCALE_F64 remains in place; all
 ; 32 kernels raise OK, confirming the fix is effective.
+;
+; Pins Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-022:
+; Same workload re-reported again: 1612 hits across 1037 rocBLAS trtri kernels
+; (fatbin_co_0008.co) at hotswap commit 8f2db5ec2edc. The VOP3b handler in
+; handle-valu.cpp under CanonicalOp::V_DIV_SCALE_F64 remains in place; all
+; 32 kernels raise OK, confirming the fix is effective.
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
