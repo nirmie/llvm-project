@@ -8,9 +8,14 @@
 ; the GFX11+ operand order: (vdst, addr, data0=cmpval, data1=newval).
 ; Note: pre-GFX11 `ds_cmpst_rtn_b32` had the src/cmp operands swapped.
 ;
-; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-000
-; (510 UnsupportedOpcode hits for ds_cmpstore_rtn_b32 across 454 kernels
-; in a rocSOLVER getri run on 2026-05-26).
+; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-000:
+; 510 hits across 454 rocSOLVER getri kernels (sample:
+; _ZN9rocsolver6v33300L18getri_kernel_smallILi1E19rocblas_complex_numIfEPS3_EEvT1_iilPiilS6_bb
+; in fatbin_co_0104.co) were reported as UnsupportedOpcode for ds_cmpstore_rtn_b32
+; at hotswap commit 8f2db5ec2edc.  The DS handler under
+; CanonicalOp::DS_CMPSTORE_RTN_B32 in handle-ds.cpp emits a seq_cst cmpxchg on
+; an LDS addrspace(3) pointer wrapped in an emitUnderExec diamond; all 128 kernels
+; in fatbin_co_0104.co raise successfully.
 ;
 ; Cross-target lift (gfx1250 → gfx950): lower to `cmpxchg` on an
 ; LDS addrspace(3) pointer. The RTN variant returns the original
