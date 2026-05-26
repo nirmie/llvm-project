@@ -9,6 +9,7 @@
 ; Note: pre-GFX11 `ds_cmpst_rtn_b32` had the src/cmp operands swapped.
 ;
 ; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-000:
+; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-000
 ; 510 hits across 454 rocSOLVER getri kernels (sample:
 ; _ZN9rocsolver6v33300L18getri_kernel_smallILi1E19rocblas_complex_numIfEPS3_EEvT1_iilPiilS6_bb
 ; in fatbin_co_0104.co) were reported as UnsupportedOpcode for ds_cmpstore_rtn_b32
