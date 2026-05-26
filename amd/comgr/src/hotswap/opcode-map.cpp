@@ -130,18 +130,17 @@ static const Entry kCanonTable[] = {
     E(S_BARRIER_SIGNAL_IMM, S_BARRIER_SIGNAL),
     E(S_BARRIER_SIGNAL_M0, S_BARRIER_SIGNAL),
 
-    // GFX12+ standalone cache ops. Pseudo entries handle the normal path where
-    // canonicalize() maps real opcodes back to pseudos via buildMcToPseudoMap.
-    // Real gfx12/gfx13 encodings are also listed explicitly: on gfx1250 the
-    // disassembler decodes global_wb to GLOBAL_WB_gfx12 (via DecoderTableGFX1296)
-    // and canonicalize() fails to map it back to the pseudo, so OpcMap.lookup()
-    // returns Unknown without the explicit entries below.
-    E(GLOBAL_INV,       GLOBAL_INV),
-    E(GLOBAL_INV_gfx12, GLOBAL_INV),
+    // GFX12+ standalone cache ops. The pseudo entries are what `kCanonTable`
+    // looks up after canonicalization; gfx12 real encodings map to the pseudos
+    // via `buildMcToPseudoMap` (Gen=13 in the getMCOpcodeGen table).
+    // gfx13 real encodings (_gfx13 suffix, used by gfx1250) live at table
+    // column 15, which is beyond the KNumEncodingFamilies loop bound (max
+    // Gen=14), so they are not captured by buildMcToPseudoMap and must be
+    // listed explicitly here.
+    E(GLOBAL_INV, GLOBAL_INV),
     E(GLOBAL_INV_gfx13, GLOBAL_INV),
-    E(GLOBAL_WB,        GLOBAL_WB),
-    E(GLOBAL_WB_gfx12,  GLOBAL_WB),
-    E(GLOBAL_WB_gfx13,  GLOBAL_WB),
+    E(GLOBAL_WB, GLOBAL_WB),
+    E(GLOBAL_WB_gfx13, GLOBAL_WB),
 
     // ---------------------------------------------------------------------
     // SMEM scalar loads
