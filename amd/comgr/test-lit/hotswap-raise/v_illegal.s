@@ -16,6 +16,11 @@
 ; CanonicalOp::V_ILLEGAL handler in handle-valu.cpp and the pre-dispatch
 ; guard in raiser.cpp remain in place; all 93 kernels in the .co raise OK
 ; against --target-isa=gfx950.
+;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-027:
+; 71-hit / 71-kernel rocprim scan workload (fatbin_co_0298.co) re-filed as
+; UnsupportedOpcode on v_illegal at hotswap commit 8f2db5ec2edc. Same root
+; cause and same fix; all kernels raise OK against --target-isa=gfx950.
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_illegal_kernel(
 ; CHECK: call void @llvm.trap()
