@@ -9,6 +9,7 @@
 #include "handlers.h"
 #include "canonical-op-attrs.h"
 
+#include "MCTargetDesc/AMDGPUMCExpr.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Constants.h"
@@ -775,6 +776,37 @@ HandlerResult handleSOP1(RaiseContext &Ctx, const DecodedInst &Di,
   // GFX12+ `s_barrier_signal` appears in SOP1 encoding; model it as a no-op
   // (the paired SOPP `s_barrier_wait` does the actual rendezvous).
   if (Sop == CanonicalOp::S_BARRIER_SIGNAL) {
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::S_ADD_PC_I64) {
+    // PC-relative unconditional long-branch trampoline (gfx1250/gfx13).
+    // Hardware: PC_next = (PC_after_inst) + sign_extend(imm64).
+    // The corpus uses this as a trampoline immediately after a conditional
+    // branch that skips over it; the instruction itself is always an
+    // unconditional branch in the raised IR.
+    // decode.cpp::collectBranchTargets already computed and inserted the
+    // target offset as a block leader; we just need to emit the branch.
+    // The 64-bit literal offset is encoded as a lit64 operand. The AMDGPU
+    // disassembler returns MCOperand::createExpr(AMDGPUMCExpr::createLit64(...))
+    // when Hi_32(literal)==0 (the common case for forward branch offsets), NOT
+    // createImm(), so we must check isExpr() in addition to isImm().
+    const MCInst &Inst = Di.Inst;
+    int64_t Imm64 = 0;
+    for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
+      const MCOperand &MO = Inst.getOperand(I);
+      if (MO.isImm()) {
+        Imm64 = MO.getImm();
+        break;
+      }
+      if (MO.isExpr() && AMDGPU::isLitExpr(MO.getExpr())) {
+        Imm64 = AMDGPU::getLitValue(MO.getExpr());
+        break;
+      }
+    }
+    uint64_t Target = static_cast<uint64_t>(
+        static_cast<int64_t>(Di.Offset + Di.Size) + Imm64);
+    Ctx.B.CreateBr(Ctx.lookupBB(Target));
     Hr.Handled = true;
     return Hr;
   }

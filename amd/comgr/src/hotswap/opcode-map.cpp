@@ -245,6 +245,9 @@ static const Entry kCanonTable[] = {
     // is how the corpus surfaces it (gfx1250 disasm) and what the
     // CanonicalOp enum comment in canonical-op.h documents.
     E(S_SWAPPC_B64, S_SWAP_PC_I64),
+    // gfx1250/gfx13 PC-relative unconditional long-branch trampoline.
+    // LLVM MC opcode is `S_ADD_PC_I64` (SOPInstructions.td).
+    E(S_ADD_PC_I64, S_ADD_PC_I64),
     E(S_ABS_I32, S_ABS_I32),
     E(S_SET_VGPR_MSB, S_SET_VGPR_MSB),
     E(S_BITSET0_B32, S_BITSET0_B32),
@@ -368,6 +371,11 @@ static const Entry kCanonTable[] = {
     // needs an entry here.
     E(V_MOV_B16_e64, V_MOV_B16),
     E(V_SWAP_B32, V_SWAP_B32),
+    // GFX6+ indexed vector move. M0 holds the dynamic lane index.
+    // v_movrels_b32: read VGPR[src + M0] into dst.
+    // v_movreld_b32: write src into VGPR[dst + M0].
+    E(V_MOVRELS_B32_e64, V_MOVRELS_B32),
+    E(V_MOVRELD_B32_e64, V_MOVRELD_B32),
     E(V_NOP_e64, V_NOP),
     E(V_NOT_B32_e64, V_NOT_B32),
     E(V_BFREV_B32_e64, V_BFREV_B32),
@@ -867,6 +875,7 @@ static const Entry kCanonTable[] = {
     E(FLAT_ATOMIC_SWAP, FLAT_ATOMIC_SWAP),
     E(FLAT_ATOMIC_CMPSWAP, FLAT_ATOMIC_CMPSWAP),
     E(FLAT_ATOMIC_ADD_F32, FLAT_ATOMIC_ADD_F32),
+    E(FLAT_ATOMIC_ADD_F64, FLAT_ATOMIC_ADD_F64),
 
     // ---------------------------------------------------------------------
     // GLOBAL atomics
@@ -883,8 +892,16 @@ static const Entry kCanonTable[] = {
     E(GLOBAL_ATOMIC_SWAP, GLOBAL_ATOMIC_SWAP),
     E(GLOBAL_ATOMIC_CMPSWAP, GLOBAL_ATOMIC_CMPSWAP),
     E(GLOBAL_ATOMIC_ADD_F32, GLOBAL_ATOMIC_ADD_F32),
+    E(GLOBAL_ATOMIC_ADD_F64, GLOBAL_ATOMIC_ADD_F64),
     E(GLOBAL_ATOMIC_PK_ADD_BF16, GLOBAL_ATOMIC_PK_ADD_BF16),
     E(GLOBAL_ATOMIC_PK_ADD_F16, GLOBAL_ATOMIC_PK_ADD_F16),
+    // GFX12+ standalone cache maintenance (FLAT format, no address operand).
+    // gfx1250 (GFX13) real forms are *_gfx13; both collapse to the base pseudo
+    // via buildMcToPseudoMap, so only the base pseudo needs a canon entry.
+    E(GLOBAL_INV, GLOBAL_INV),
+    E(GLOBAL_INV_gfx13, GLOBAL_INV),
+    E(GLOBAL_WB, GLOBAL_WB),
+    E(GLOBAL_WB_gfx13, GLOBAL_WB),
 
     // ---------------------------------------------------------------------
     // SMEM atomics (enumerate addressing forms: IMM / SGPR / SGPR_IMM)
@@ -965,6 +982,22 @@ static const Entry kCanonTable[] = {
     // flags it as a Class 2 obstruction (wave-size-translation.md
     // §6) in the cross-wave case.
     E(DS_SWIZZLE_B32, DS_SWIZZLE_B32),
+    // GFX11+ LDS CAS, 32-bit. DS_Real_gfx11_gfx12_gfx13 at
+    // DSInstructions.td:1603 defines the real forms; the disassembler
+    // for gfx1250 (GFX13) emits DS_CMPSTORE_RTN_B32_gfx13.
+    // buildMcToPseudoMap maps DS_CMPSTORE_RTN_B32_gfx{11,12,13} back
+    // to the base pseudo DS_CMPSTORE_RTN_B32 before the kCanonTable
+    // lookup, so only the base pseudo and the _gfx9 parallel-pseudo
+    // (used by the GFX9+ assembler) need entries here.
+    E(DS_CMPSTORE_RTN_B32,       DS_CMPSTORE_RTN_B32),
+    E(DS_CMPSTORE_RTN_B32_gfx9,  DS_CMPSTORE_RTN_B32),
+    // 64-bit and non-returning variants follow the same gfx9/gfx13 pattern.
+    E(DS_CMPSTORE_RTN_B64,       DS_CMPSTORE_RTN_B64),
+    E(DS_CMPSTORE_RTN_B64_gfx9,  DS_CMPSTORE_RTN_B64),
+    E(DS_CMPSTORE_B32,           DS_CMPSTORE_B32),
+    E(DS_CMPSTORE_B32_gfx9,      DS_CMPSTORE_B32),
+    E(DS_CMPSTORE_B64,           DS_CMPSTORE_B64),
+    E(DS_CMPSTORE_B64_gfx9,      DS_CMPSTORE_B64),
 
     // ---------------------------------------------------------------------
     // MUBUF direct-to-LDS loads (distinct semantics from VGPR-dest loads)

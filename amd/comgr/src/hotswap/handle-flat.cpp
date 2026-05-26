@@ -1223,7 +1223,7 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
   }
 
   // flat_atomic_* -- same as global_atomic but flat address space
-  if (Sop >= CanonicalOp::FLAT_ATOMIC_ADD && Sop <= CanonicalOp::FLAT_ATOMIC_ADD_F32) {
+  if (Sop >= CanonicalOp::FLAT_ATOMIC_ADD && Sop <= CanonicalOp::FLAT_ATOMIC_ADD_F64) {
     // Contract: the RTN/non-RTN collapse in OpcodeMap relies on
     // IsAtomicRet <=> (numDefs > 0) to decide result writeback below.
     assert(((Di.TsFlags & SIInstrFlags::IsAtomicRet) != 0) == (Di.NumDefs > 0) &&
@@ -1291,6 +1291,22 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
       if (MemOffset != 0) Addr = Ctx.B.CreateInBoundsGEP(Ctx.I8Ty, Addr, Ctx.B.getInt64(MemOffset));
       StData = Op.srcReg(DataIdx);
     }
+    if (Sop == CanonicalOp::FLAT_ATOMIC_ADD_F64) {
+      // 64-bit FP atomic: data is a VGPR pair; result written to VGPR pair.
+      Value *Data64 = Ctx.Regs.readReg64(Ctx.B, StData);
+      Value *DataF64 = Ctx.B.CreateBitCast(Data64, Ctx.F64Ty);
+      Ctx.emitUnderExec([&] {
+        auto *Rmw = Ctx.B.CreateAtomicRMW(AtomicRMWInst::FAdd, Addr, DataF64,
+                                          MaybeAlign(),
+                                          AtomicOrdering::SequentiallyConsistent);
+        if (Di.NumDefs > 0)
+          Ctx.Regs.writeReg64(Ctx.B, Op.dst(),
+                              Ctx.B.CreateBitCast(Rmw, Ctx.I64Ty));
+      });
+      Hr.Handled = true;
+      return Hr;
+    }
+
     Value *Data = Ctx.Regs.readReg32(Ctx.B, StData);
 
     if (Sop == CanonicalOp::FLAT_ATOMIC_CMPSWAP) {
@@ -1344,6 +1360,26 @@ HandlerResult handleFLAT(RaiseContext &Ctx, const DecodedInst &Di,
         if (IsFp) RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I32Ty);
         Ctx.Regs.writeReg32(Ctx.B, Op.dst(), RetVal);
       }
+    });
+    Hr.Handled = true;
+    return Hr;
+  }
+
+  // ---- Global atomic f64 ----
+  if (Sop == CanonicalOp::GLOBAL_ATOMIC_ADD_F64) {
+    assert(((Di.TsFlags & SIInstrFlags::IsAtomicRet) != 0) == (Di.NumDefs > 0) &&
+           "global atomic f64: IsAtomicRet disagrees with numDefs");
+    FlatAddr Fa = decodeGlobalStoreAddr(Ctx, Di, Op, /*elemBytes=*/8,
+                                         "GLOBAL_ATOMIC_F64");
+    Value *Data64 = Ctx.Regs.readReg64(Ctx.B, Fa.StData);
+    Value *DataF64 = Ctx.B.CreateBitCast(Data64, Ctx.F64Ty);
+    Ctx.emitUnderExec([&] {
+      Value *Prev = Ctx.B.CreateAtomicRMW(AtomicRMWInst::FAdd, Fa.Ptr, DataF64,
+                                          MaybeAlign(),
+                                          AtomicOrdering::Monotonic);
+      if (Di.NumDefs > 0)
+        Ctx.Regs.writeReg64(Ctx.B, Op.dst(),
+                            Ctx.B.CreateBitCast(Prev, Ctx.I64Ty));
     });
     Hr.Handled = true;
     return Hr;
