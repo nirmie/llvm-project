@@ -17,6 +17,14 @@
 ; current HEAD (0 failures); fix was already merged in the opcode-map
 ; + handle-sop1 work tracked by the earlier bug records.
 ;
+; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-006
+; Identical recurrence: 96 s_and_not1_saveexec_b32 UnsupportedOpcode
+; hits across 96 rocBLAS GEMVT kernels (sample kernel identical to
+; the 09-18-05Z run). The gfx1250 fatbin reproduces cleanly at
+; current HEAD (728/728 kernels OK, 0 failures); fix was already
+; merged in the opcode-map + handle-sop1 work tracked by the earlier
+; bug records.
+;
 ; Regression test for s_and_not1_saveexec_b32 (gfx12 renamed assembly
 ; form of S_ANDN2_SAVEEXEC_B32).  The LLVM MC disassembles the gfx12
 ; encoding to S_ANDN2_SAVEEXEC_B32 internally; the hotswap opcode-map
