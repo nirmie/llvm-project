@@ -5,6 +5,11 @@
 ; (SOPInstructions.td:269-271 lowers it from ctpop). It also writes
 ; SCC = (D.u != 0); the raiser derives that automatically from the
 ; handler's SccResult (raiser.cpp:1202).
+;
+; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-008
+; (136 UnsupportedOpcode hits for s_bcnt1_i32_b32 across 12 kernels in
+; the rocsolver syevj fatbin; handler was added in a prior fix but the
+; bug-id was not yet pinned in this test).
 
 ; CHECK-LABEL: define amdgpu_kernel void @s_bcnt1_i32_b32_kernel(
 ; CHECK: call i32 @llvm.ctpop.i32(i32 {{.*}})
