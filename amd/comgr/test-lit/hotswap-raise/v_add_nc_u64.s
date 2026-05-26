@@ -11,6 +11,7 @@
 ; the opcode-map E(V_ADD_U64_e64, V_ADD_NC_U64) entry ensures routing).
 ; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-013
 ; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-013
+; Also covers Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-013
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_add_nc_u64_kernel(
 ; CHECK: add i64
