@@ -14,6 +14,14 @@
 ; Regression target for UnsupportedOpcode failure observed in the
 ; rocSOLVER stedcj_solve kernel (float variant, 109 hits across 9 kernels).
 ; Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-025
+;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-025:
+; Same rocSOLVER stedcj_solve workload (fatbin_co_0141.co) re-filed as
+; UnsupportedOpcode on v_frexp_exp_i32_f64 (109 hits, 9 kernels) at commit
+; 8f2db5ec2edc.  The opcode-map (V_FREXP_EXP_I32_F64_e64 ->
+; CanonicalOp::V_FREXP_EXP_I32_F64) and handle-valu.cpp (amdgcn.frexp.exp)
+; fix is already in place; all 33 kernels raise OK (0 fail).
+; Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-025
 
 ; IR-LABEL: define amdgpu_kernel void @v_frexp_exp_i32_f64_kernel(
 ; IR: call i32 @llvm.amdgcn.frexp.exp.i32.f64(double
