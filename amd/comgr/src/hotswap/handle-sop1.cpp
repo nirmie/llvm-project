@@ -9,6 +9,8 @@
 #include "handlers.h"
 #include "canonical-op-attrs.h"
 
+#include "MCTargetDesc/AMDGPUMCExpr.h"
+
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/IR/Constants.h"
@@ -491,11 +493,21 @@ HandlerResult handleSOP1(RaiseContext &Ctx, const DecodedInst &Di,
     // unconditional branch in the raised IR.
     // decode.cpp::collectBranchTargets already computed and inserted the
     // target offset as a block leader; we just need to emit the branch.
+    // s_add_pc_i64: 12-byte gfx1250/gfx13 PC-relative long-branch trampoline.
+    // The 64-bit literal offset is encoded as a lit64 operand. The AMDGPU
+    // disassembler returns MCOperand::createExpr(AMDGPUMCExpr::createLit64(...))
+    // when Hi_32(literal)==0 (the common case for forward branch offsets), NOT
+    // createImm(), so we must check isExpr() in addition to isImm().
     const MCInst &Inst = Di.Inst;
     int64_t Imm64 = 0;
     for (unsigned I = 0; I < Inst.getNumOperands(); ++I) {
-      if (Inst.getOperand(I).isImm()) {
-        Imm64 = Inst.getOperand(I).getImm();
+      const MCOperand &MO = Inst.getOperand(I);
+      if (MO.isImm()) {
+        Imm64 = MO.getImm();
+        break;
+      }
+      if (MO.isExpr() && AMDGPU::isLitExpr(MO.getExpr())) {
+        Imm64 = AMDGPU::getLitValue(MO.getExpr());
         break;
       }
     }

@@ -45,11 +45,10 @@ struct SourceHiddenArgValue {
   llvm::Value *Value = nullptr;
   // Non-empty when Matched is true and Value is null.
   std::string FailureDetail;
-  // True when Matched=true and Value=null because the dword straddles a
-  // hidden-arg/gap boundary (byte 0 is inside a classified hidden arg but a
-  // later byte falls in unclassified padding).  Distinguishes this safe-
-  // fallback case from an unsupported hidden-arg kind, which must still
-  // refuse.
+  // True when Value is null because the dword straddles a hidden-arg/gap
+  // boundary (some bytes match a hidden arg, a later byte does not).  This
+  // case is safe to fall back to amdgcn_implicitarg_ptr.  False when Value
+  // is null due to an unsupported hidden-arg kind, which should be refused.
   bool IsGapSpan = false;
 };
 

@@ -1,5 +1,5 @@
 ; RUN: %llvm_mc -mcpu=gfx1250 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
-; RUN:   && raise_cli %t.hsaco --target-isa=gfx950 --emit-ir=scratch_store_b128_gfx950_kernel 2>&1 | %FileCheck %s
+; RUN:   && %raise_cli %t.hsaco --isa=gfx1250 --target-isa=gfx950 --emit-ir=scratch_store_b128_gfx950_kernel 2>&1 | %FileCheck %s
 ;
 ; Regression test for scratch_store_b128 (gfx13 SCRATCH_STORE_DWORDX4) with
 ; private_segment_fixed_size=0 and --target-isa=gfx950 (CDNA3).

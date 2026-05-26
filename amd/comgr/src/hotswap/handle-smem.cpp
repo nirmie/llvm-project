@@ -208,8 +208,8 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
         }
         if (!Dw.Value) {
           if (!Dw.IsGapSpan) {
-            Hr.Failure = RaiseFailure::unsupportedShape(Di, "SMEM",
-                                                        Dw.FailureDetail);
+            Hr.Failure =
+                RaiseFailure::unsupportedShape(Di, "SMEM", Dw.FailureDetail);
             return Hr;
           }
           // The dword straddles a hidden-arg/gap boundary: byte I=0 is in a
@@ -222,7 +222,8 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
                 &Ctx.M, Intrinsic::amdgcn_implicitarg_ptr);
           Value *ImplPtr =
               Ctx.B.CreateCall(FnImplicitArgPtrMixed, {}, "implicitarg_ptr");
-          int64_t ImplOff = ByteOffset + D * 4 - Ctx.Kernargs.ImplicitArgsBase;
+          int64_t ImplOff =
+              ByteOffset + D * 4 - Ctx.Kernargs.ImplicitArgsBase;
           Value *Ep =
               ImplOff == 0
                   ? ImplPtr
