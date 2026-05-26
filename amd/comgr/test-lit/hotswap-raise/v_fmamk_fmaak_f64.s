@@ -11,7 +11,8 @@
 ; Pins Bug-Id 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-024 and
 ;       Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-024 and
 ;       Bug-Id 2026-05-26T12-18-34Z_qwen2.5-7b-instruct-024 and
-;       Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-024:
+;       Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-024 and
+;       Bug-Id 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-024:
 ; v_fmamk_f64 reported UnsupportedOpcode (3 hits across 3 kernels of a
 ; rocBLAS lasyf workload, fatbin_co_0145.co) when transpiling gfx1250→gfx950
 ; at commit 8f2db5ec2edc. The opcode-map + handle-valu.cpp handler (fma
