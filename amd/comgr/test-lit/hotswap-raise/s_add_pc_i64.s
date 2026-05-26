@@ -14,6 +14,10 @@
 ;   offset 0x10: s_endpgm           (landing pad for both branches)
 ;
 ; The raiser must emit `br label %bb_0x10` for the s_add_pc_i64.
+;
+; Also covers Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-005
+; (142 UnsupportedOpcode hits for s_add_pc_i64 across 142 kernels
+; in a rocSOLVER getf2_small run on 2026-05-26).
 
 ; CHECK-LABEL: define amdgpu_kernel void @s_add_pc_i64_kernel(
 ; CHECK:       bb_0x4:
