@@ -217,14 +217,17 @@ enum class RewriteId : uint8_t {
                             // WaveIdLiftScalarized site as "implemented rewrite
                             // available" instead of "refuse outright" so the
                             // classifier lets the kernel through to Phase 6.5.
-  ElectLeaderWaveNative,    // CmpxFromLaneId / SaveExecFromLaneId where the
-                            // pattern is the canonical "elect first active lane"
-                            // idiom: v_mbcnt_lo(*, 0) == 0 gating a v_cmpx or
-                            // s_and_saveexec_b32. Under WaveNative, the correct
-                            // rewrite is ballot(lane_id == 0) -- only hardware
-                            // lane 0 passes, not both lane 0 and lane 32.
-                            // Implemented in handle-valu-vcmp.cpp (V_CMPX) and
-                            // handle-sop1.cpp (S_AND_SAVEEXEC_B32).
+  ElectLeaderWaveNative,    // v_cmpx_eq 0 of v_mbcnt_lo(*,0): elect-first-active-
+                            // lane pattern. Under WaveNativeProjection the SPE
+                            // diamond gates EXEC through ballotI1ToWidth; the
+                            // data-dependent cmpx raises correctly via the standard
+                            // V_CMPX handler. Not a race: each target lane has a
+                            // unique workitem-id so the elect-leader selects the
+                            // first lane of the *target* wave, preserving intent.
+                            // Under MODREP this is still an obstruction (the
+                            // absolute lane position selects different leaders in
+                            // each replica). Implemented: V_CMPX handler routes
+                            // EXEC writes through ballotI1ToWidth + storeExec.
 };
 
 // Human-readable short label for an `ObstructionKind` -- used in the
