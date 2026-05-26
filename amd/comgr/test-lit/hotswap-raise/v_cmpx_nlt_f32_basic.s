@@ -27,6 +27,11 @@
 ; as UnsupportedOpcode on v_cmpx_nlt_f32 (226 hits, 16 kernels). The handler
 ; remains effective; all 81 kernels raise OK (81/81) confirming no regression.
 ;
+; Pins Bug-Id 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-019:
+; Same rocSOLVER geqr2_kernel_small workload (fatbin_co_0173.co) re-filed again
+; as UnsupportedOpcode on v_cmpx_nlt_f32 (226 hits, 16 kernels). The handler
+; remains effective; all 81 kernels raise OK (81/81) confirming no regression.
+;
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_nlt_f32_basic_kernel(
 ; CHECK: fcmp uge float
 ; CHECK-NOT: UnsupportedOpcode
