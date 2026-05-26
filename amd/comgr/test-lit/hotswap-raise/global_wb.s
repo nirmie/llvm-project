@@ -5,6 +5,7 @@
 ; It writes dirty L1/L2 cache lines back to the next cache level without
 ; necessarily invalidating the cache. On gfx950 (HasMfma/GFX940+) the nearest
 ; equivalent is llvm.amdgcn.s.dcache.wb (gfx9+ scalar D$ writeback).
+; Bug-Id: 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-004
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_wb_kernel(
 ; CHECK: call void @llvm.amdgcn.s.dcache.wb()
