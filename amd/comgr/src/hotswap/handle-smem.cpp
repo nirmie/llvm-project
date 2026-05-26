@@ -171,16 +171,49 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
             RaiseFailure::unsupportedShape(Di, "SMEM", HiddenBase.FailureDetail);
         return Hr;
       }
+      // Materialise the implicitarg_ptr once for any dword that falls
+      // outside all known hidden-arg entries (e.g. padding after the last
+      // hidden_* arg in a wide s_load_b256/b512 that spans the end of the
+      // hidden-arg region). A `!Dw.Matched` result means the byte is simply
+      // not covered by any arg entry; fall back to `amdgcn_implicitarg_ptr`
+      // with the rebased offset rather than failing. A `Dw.Matched &&
+      // !Dw.Value` result (unsupported hidden-arg kind) still propagates the
+      // failure so the caller can decide.
+      Function *FnImplicitArgPtrLoop = nullptr;
+      Value *ImplPtrLoop = nullptr;
+      auto getImplPtrLoop = [&]() -> Value * {
+        if (!ImplPtrLoop) {
+          FnImplicitArgPtrLoop = Intrinsic::getOrInsertDeclaration(
+              &Ctx.M, Intrinsic::amdgcn_implicitarg_ptr);
+          ImplPtrLoop = Ctx.B.CreateCall(FnImplicitArgPtrLoop, {},
+                                         "implicitarg_ptr_loop");
+        }
+        return ImplPtrLoop;
+      };
       for (int D = 0; D < LoadDwords; D++) {
         SourceHiddenArgValue Dw =
             D == 0 ? HiddenBase
                    : emitSourceHiddenDword(HiddenCtx, ByteOffset + D * 4);
-        if (!Dw.Matched || !Dw.Value) {
-          Hr.Failure = RaiseFailure::unsupportedShape(
-              Di, "SMEM",
-              Dw.FailureDetail.empty()
-                  ? "source hidden-arg SMEM load spans non-hidden bytes"
-                  : Dw.FailureDetail);
+        if (!Dw.Matched) {
+          // Byte is not covered by any kernarg arg entry; read from the
+          // target-runtime implicit-arg block at the rebased offset.
+          int64_t ImplOff =
+              (ByteOffset + D * 4) - Ctx.Kernargs.ImplicitArgsBase;
+          Value *Ep =
+              ImplOff == 0
+                  ? getImplPtrLoop()
+                  : Ctx.B.CreateInBoundsGEP(Ctx.I8Ty, getImplPtrLoop(),
+                                             Ctx.B.getInt64(ImplOff),
+                                             "impl_gep_d");
+          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D,
+                               Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_load_d"));
+          continue;
+        }
+        if (!Dw.Value) {
+          Hr.Failure = RaiseFailure::unsupportedShape(Di, "SMEM",
+                                                      Dw.FailureDetail.empty()
+                                                          ? "source hidden-arg SMEM load spans non-hidden bytes"
+                                                          : Dw.FailureDetail);
           return Hr;
         }
         Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, Dw.Value);

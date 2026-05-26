@@ -100,6 +100,23 @@ Value *emitHiddenRemainder(SourceHiddenArgContext &Ctx, unsigned Dim) {
                           Twine("source_hidden_remainder_") + Twine(Dim));
 }
 
+Value *emitHiddenGlobalOffset(SourceHiddenArgContext &Ctx, unsigned Dim) {
+  // `hidden_global_offset_{x,y,z}` is an i64 at byte offset Dim*8 from
+  // `amdgcn_implicitarg_ptr` in the standard HSA ABI (both gfx9 and gfx12
+  // lay out global offsets at implicit-arg bytes 0, 8, 16). The runtime
+  // fills these from the AQL dispatch packet's `kernarg_address` shadow
+  // copy of the OpenCL global offset; HIP always passes 0, but we must
+  // read the target-ABI value rather than hardcoding it so that
+  // OpenCL-via-rocBLAS callers that do set a non-zero offset are correct.
+  Function *ImplArgPtrFn =
+      Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::amdgcn_implicitarg_ptr);
+  Value *ImplPtr = Ctx.B.CreateCall(ImplArgPtrFn, {}, "impl_ptr");
+  Value *Ptr = Ctx.B.CreateConstInBoundsGEP1_32(Ctx.I8Ty, ImplPtr,
+                                                 Dim * 8u);
+  return Ctx.B.CreateLoad(Type::getInt64Ty(Ctx.C), Ptr,
+                          Twine("source_hidden_global_offset_") + Twine(Dim));
+}
+
 Value *emitGridDims(SourceHiddenArgContext &Ctx) {
   Value *GridY = emitDispatchGridSize(Ctx, 1);
   Value *GridZ = emitDispatchGridSize(Ctx, 2);
@@ -147,6 +164,12 @@ SourceHiddenArgValue emitHiddenArgValue(SourceHiddenArgContext &Ctx,
     Result.Value = emitHiddenRemainder(Ctx, 2);
   else if (Kind == SourceHiddenArgKind::HiddenGridDims)
     Result.Value = emitGridDims(Ctx);
+  else if (Kind == SourceHiddenArgKind::HiddenGlobalOffsetX)
+    Result.Value = emitHiddenGlobalOffset(Ctx, 0);
+  else if (Kind == SourceHiddenArgKind::HiddenGlobalOffsetY)
+    Result.Value = emitHiddenGlobalOffset(Ctx, 1);
+  else if (Kind == SourceHiddenArgKind::HiddenGlobalOffsetZ)
+    Result.Value = emitHiddenGlobalOffset(Ctx, 2);
   else
     return unsupportedHiddenKind("<unknown>");
   return Result;
@@ -192,14 +215,16 @@ SourceHiddenArgValue emitSourceHiddenInteger(SourceHiddenArgContext &Ctx,
     SourceHiddenArgValue Byte =
         emitSourceHiddenByte(Ctx, ByteOffset + static_cast<int>(I));
     if (!Byte.Matched) {
-      if (I == 0)
-        return {};
-      Result.Matched = true;
-      Result.FailureDetail =
-          (Twine("source hidden dword at byte offset ") + Twine(ByteOffset) +
-           " spans non-hidden byte " + Twine(ByteOffset + static_cast<int>(I)))
-              .str();
-      return Result;
+      // This byte is not covered by any classified hidden-arg entry (it is
+      // in an unclassified gap between hidden_* args, or past the end of
+      // the hidden-arg block).  Return Matched=false so that the multi-
+      // dword SMEM loop in handle-smem.cpp falls back to loading the whole
+      // dword from amdgcn_implicitarg_ptr at the rebased byte offset,
+      // rather than emitting a hard failure.  This covers the case where
+      // a wide s_load_b128 straddles a classified hidden arg and a padding
+      // gap (e.g. hidden_group_size_x at bytes 12-13 followed by two gap
+      // bytes at 14-15).
+      return {};
     }
     if (!Byte.Value)
       return Byte;
