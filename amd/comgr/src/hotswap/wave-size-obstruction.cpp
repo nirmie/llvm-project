@@ -858,9 +858,19 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       }
       ExplicitDefsTainted = OldExecTainted;
       VccTainted = false;
-      ExecTainted = OldExecTainted || SourceTainted;
+      // When this saveexec is the elect-leader pattern (e.g.
+      // `s_and_saveexec_b32 vcc` of `v_cmp_eq 0, mbcnt_lo`), the WaveNative
+      // handler rewrites the mask to `ballot(lane_id==0)`, producing a
+      // wave-size-correct EXEC.  Do not propagate the mbcnt-derived
+      // SourceTainted into EXEC in that case; doing so would false-positive
+      // on subsequent `s_mov_b32 sN, exec_lo` / `s_xor_b32` / ANDN2 chains
+      // that are actually wave-size-oblivious once the ballot rewrite lands.
+      // If IsElectLeader is false (ordinary mbcnt-fed saveexec, genuinely
+      // wave-size-sensitive), keep the taint.
+      ExecTainted = OldExecTainted || (SourceTainted && !IsElectLeader);
       SccTainted = ExecTainted;
       Tracker.ElectLeaderVcc = false;
+
     }
 
     // Clear elect-leader tracking on any destination register that is not one
