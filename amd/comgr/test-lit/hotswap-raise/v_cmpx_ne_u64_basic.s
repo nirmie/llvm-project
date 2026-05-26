@@ -17,6 +17,12 @@
 ; This exercises the opcode-map parser path:
 ;   V_CMPX_NE_U64 -> CanonicalOp::V_CMPX, VCmpMeta{ICMP_NE, 64, IsFloat=false}
 ; which in turn drives the 64-bit src loading in handleValuVcmp().
+;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-016:
+; 20 rocBLAS iamax/iamin kernels (fatbin_co_0059.co) were refused with
+; UnsupportedOpcode on v_cmpx_ne_u64 at hotswap commit 8f2db5ec2edc.
+; The fix routes all V_CMPX_* variants through parseVCmpPseudoName()
+; -> CanonicalOp::V_CMPX in opcode-map.cpp, handled by handleValuVcmp().
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_ne_u64_basic_kernel(
 ; The handler emits the 64-bit pair reconstruction for v[0:1], then the
