@@ -40,6 +40,13 @@
 ; at hotswap commit 8f2db5ec2edc. The frexp_mant/frexp_exp handlers in
 ; handle-valu.cpp were already in place; all 21 kernels in fatbin_co_0135.co
 ; raise OK with the current binary.
+;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-026:
+; Same UnsupportedOpcode on v_frexp_mant_f64 [VOP1], 20 hits across 1
+; rocSOLVER stebz_bisection_kernel (double-precision) in fatbin_co_0135.co
+; at hotswap commit 8f2db5ec2edc. The frexp_mant/frexp_exp handlers in
+; handle-valu.cpp were already in place; all 21 kernels in fatbin_co_0135.co
+; raise OK with the current binary.
 
 ; IR-LABEL: define amdgpu_kernel void @v_frexp_mant_f64_kernel(
 ; IR: call double @llvm.amdgcn.frexp.mant.f64(double
