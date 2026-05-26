@@ -8,6 +8,15 @@
 ; Pins VOP3P v_pk_add_f16: packed <2 x half> lane selection and negation
 ; come from decoded srcN_modifiers, arithmetic lowers to lane-wise fadd, and
 ; clamp is applied after the add via maxnum/minnum.
+;
+; Pins Bug-Id 2026-05-26T06-22-51Z_qwen2.5-7b-instruct-030:
+; 48 hits across 48 rocBLAS geam_min_plus kernels (sample:
+; _ZN12_GLOBAL__N_120geam_min_plus_kernelIDF16_Dv2_DF16_S1_Li32ELi8ELi256E...
+; in fatbin_co_0034.co) were reported as UnsupportedOpcode for v_pk_add_f16
+; at hotswap commit 8f2db5ec2edc.  The VOP3P handler under
+; CanonicalOp::V_PK_ADD_F16 in handle-valu-vop3p.cpp emits lane-wise fadd
+; with op_sel / neg_lo / neg_hi modifier support; all 306 kernels in
+; fatbin_co_0034.co raise successfully (306 ok, 0 fail).
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_add_f16_basic_kernel(
 ; BASIC: fadd <2 x half>
