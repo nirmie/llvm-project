@@ -23,8 +23,14 @@ struct ParsedReg {
   // (see raise-context.cpp). Tensile gfx1250 emits them as F16 source
   // operands (e.g. `v_sub_f16 v64, src_vccz, v48`), so the dispatch
   // path must recognise them or the kernel crashes inside parseReg.
+  // ApertureReg BaseIdx encoding for APERTURE_SRC kind:
+  //   0 = SRC_SHARED_BASE, 1 = SRC_SHARED_LIMIT,
+  //   2 = SRC_PRIVATE_BASE, 3 = SRC_PRIVATE_LIMIT,
+  //   4 = SRC_FLAT_SCRATCH_LO, 5 = SRC_FLAT_SCRATCH_HI,
+  //   6 = SRC_POPS_EXITING_WAVE_ID
   enum Kind { SGPR, VGPR, AGPR, VCC, EXEC, SCC, MODE, M0, FLAT_SCR, TTMP,
-              LDS_DIRECT, SRC_VCCZ, SRC_EXECZ, SRC_SCC, NOREG, OTHER };
+              LDS_DIRECT, SRC_VCCZ, SRC_EXECZ, SRC_SCC, NOREG, OTHER,
+              APERTURE_SRC };
   Kind RegKind = OTHER;
   int BaseIdx = -1;
   int Width = 1;
