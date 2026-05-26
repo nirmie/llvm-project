@@ -9,6 +9,13 @@
 ; flag bits in TSFlags, so the dispatch path is handled by a canonical-op check
 ; before the format-flag dispatch in raiser.cpp.
 ; Tests both gfx942 and gfx950 targets (wave64 targets for gfx1250 wave32 source).
+;
+; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-027:
+; 71-hit / 71-kernel rocprim scan workload (fatbin_co_0298.co) re-filed as
+; UnsupportedOpcode on v_illegal at hotswap commit 8f2db5ec2edc. Both the
+; CanonicalOp::V_ILLEGAL handler in handle-valu.cpp and the pre-dispatch
+; guard in raiser.cpp remain in place; all 93 kernels in the .co raise OK
+; against --target-isa=gfx950.
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_illegal_kernel(
 ; CHECK: call void @llvm.trap()
