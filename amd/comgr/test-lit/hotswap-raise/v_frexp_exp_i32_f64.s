@@ -33,6 +33,12 @@
 ; kernels at hotswap commit 8f2db5ec2edc.  Fix (V_FREXP_EXP_I32_F64_e64 ->
 ; CanonicalOp::V_FREXP_EXP_I32_F64 in opcode-map.cpp + amdgcn.frexp.exp
 ; emission in handle-valu.cpp) already present; all 33 kernels raise OK.
+;
+; Pins Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-025:
+; Same rocSOLVER stedcj_solve workload (fatbin_co_0141.co), 109 hits across 9
+; kernels at hotswap commit 8f2db5ec2edc.  Fix (V_FREXP_EXP_I32_F64_e64 ->
+; CanonicalOp::V_FREXP_EXP_I32_F64 in opcode-map.cpp + amdgcn.frexp.exp
+; emission in handle-valu.cpp) already present; all 33 kernels raise OK.
 
 ; IR-LABEL: define amdgpu_kernel void @v_frexp_exp_i32_f64_kernel(
 ; IR: call i32 @llvm.amdgcn.frexp.exp.i32.f64(double
