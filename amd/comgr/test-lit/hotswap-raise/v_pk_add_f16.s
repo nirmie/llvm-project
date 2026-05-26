@@ -45,6 +45,12 @@
 ; Same rocBLAS geam_min_plus workload (fatbin_co_0034.co) re-filed as
 ; UnsupportedOpcode on v_pk_add_f16 at hotswap commit 8f2db5ec2edc. All
 ; 306 kernels raise OK against --target-isa=gfx950 with the existing fix.
+;
+; Pins Bug-Id 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-030:
+; Same rocBLAS geam_min_plus workload (fatbin_co_0034.co) re-filed again as
+; UnsupportedOpcode on v_pk_add_f16 at hotswap commit 8f2db5ec2edc. All
+; 306 kernels (including DF16/packed-half geam kernels) raise OK against
+; --target-isa=gfx950 with the existing handler in handle-valu-vop3p.cpp.
 
 ; BASIC-LABEL: define amdgpu_kernel void @v_pk_add_f16_basic_kernel(
 ; BASIC: fadd <2 x half>
