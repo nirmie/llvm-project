@@ -9,6 +9,7 @@
 ;
 ; Also covers Bug-Id: 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-004
 ; Also covers Bug-Id: 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-004
+; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-004
 ; 315 global_wb UnsupportedOpcode hits across 315 rocBLAS TRSV kernels
 ; (e.g. rocblas_trsv_big_batch_device). Fix was already present; this
 ; annotation pins regression coverage to this bug record.
