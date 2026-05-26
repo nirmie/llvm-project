@@ -51,6 +51,12 @@
 ; time as UnsupportedOpcode on v_cmpx_ne_u64 (20 hits, 20 kernels). The
 ; handler remains effective via parseVCmpPseudoName() -> CanonicalOp::V_CMPX;
 ; all 20 kernels raise OK (20/20) confirming no regression.
+;
+; Pins Bug-Id 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-016:
+; Same 20 rocBLAS iamax/iamin kernels (fatbin_co_0059.co) re-filed a seventh
+; time as UnsupportedOpcode on v_cmpx_ne_u64 (20 hits, 20 kernels). The
+; handler remains effective via parseVCmpPseudoName() -> CanonicalOp::V_CMPX;
+; all 20 kernels raise OK (20/20) confirming no regression.
 
 ; CHECK-LABEL: define amdgpu_kernel void @v_cmpx_ne_u64_basic_kernel(
 ; The handler emits the 64-bit pair reconstruction for v[0:1], then the
