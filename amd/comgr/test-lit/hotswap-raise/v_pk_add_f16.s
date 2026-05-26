@@ -18,6 +18,11 @@
 ; with op_sel / neg_lo / neg_hi modifier support; all 306 kernels in
 ; fatbin_co_0034.co raise successfully (306 ok, 0 fail).
 ;
+; Pins Bug-Id 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-030:
+; Same workload (fatbin_co_0034.co, 48 hit(s) across 48 kernels) re-reported
+; as UnsupportedOpcode on v_pk_add_f16 at hotswap commit 8f2db5ec2edc.
+; Confirmed fixed: all 306 kernels raise OK against --target-isa=gfx950.
+;
 ; Pins Bug-Id 2026-05-26T08-08-10Z_qwen2.5-7b-instruct-030:
 ; Same UnsupportedOpcode failure for v_pk_add_f16: 48 hits across 48
 ; rocBLAS geam_min_plus kernels using _Float16 x2 types in
