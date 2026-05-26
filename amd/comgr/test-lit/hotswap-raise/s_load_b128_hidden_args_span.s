@@ -5,6 +5,13 @@
 ;
 ; Regression test for Bug-Id: 2026-05-25T22-08-35Z_qwen2.5-7b-instruct-009.
 ;
+; Also covers Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-009
+; Identical recurrence: 18 s_load_b128 UnsupportedOpcode hits across 2
+; rocsolver kernels (sample: _ZN9rocsolver6v33300L25stedcx_mergeUpdate_kernelIfEEviiPT_lS3_iilS3_S3_Pi
+; on gfx1250). The fatbin reproduces cleanly at current HEAD (37/37
+; kernels OK, 0 failures); fix was already merged in the smem-b128-hidden-arg-span
+; work tracked by the earlier bug records.
+;
 ; An s_load_b128 (4-dword = 16-byte SMEM load) whose base is the
 ; kernarg-segment-ptr pair and whose byte offset falls within the source
 ; ISA's implicit-args block previously failed with "source hidden-arg SMEM
