@@ -6,6 +6,7 @@
 ; Basic regression test for v_cmpx_ngt_f32 opcode handling.
 ;
 ; Bug-Id: 2026-05-26T10-21-53Z_qwen2.5-7b-instruct-017
+; Bug-Id: 2026-05-26T11-20-19Z_qwen2.5-7b-instruct-017
 ;
 ; v_cmpx_ngt_f32 was reported as UnsupportedOpcode in 2 kernels of a rocBLAS
 ; trsv workload (rocblas_complex_num<float>) on gfx1250.  The instruction
