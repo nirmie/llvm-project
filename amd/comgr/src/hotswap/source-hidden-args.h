@@ -45,6 +45,12 @@ struct SourceHiddenArgValue {
   llvm::Value *Value = nullptr;
   // Non-empty when Matched is true and Value is null.
   std::string FailureDetail;
+  // True when Matched=true and Value=null because the dword straddles a
+  // hidden-arg/gap boundary (byte 0 is inside a classified hidden arg but a
+  // later byte falls in unclassified padding).  Distinguishes this safe-
+  // fallback case from an unsupported hidden-arg kind, which must still
+  // refuse.
+  bool IsGapSpan = false;
 };
 
 SourceHiddenArgValue emitSourceHiddenDword(SourceHiddenArgContext &Ctx,
