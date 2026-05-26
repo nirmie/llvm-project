@@ -28,6 +28,11 @@
 ; CanonicalOp::V_DIV_SCALE_F64 decodes the (src0==src2) numerator-scale and
 ; (src0==src1) denominator-scale operand shapes and lowers both to
 ; llvm.amdgcn.div.scale.f64 with the correct immarg flag.
+;
+; Pins Bug-Id 2026-05-26T09-18-05Z_qwen2.5-7b-instruct-022:
+; Same workload re-reported: 1612 hits across 1037 rocBLAS trtri kernels
+; (fatbin_co_0008.co) at hotswap commit 8f2db5ec2edc. The handler remains in
+; place; all 32 kernels in the .co raise OK, confirming the fix is effective.
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
