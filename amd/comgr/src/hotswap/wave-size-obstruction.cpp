@@ -559,7 +559,8 @@ ObstructionReport buildObstructionReport(ArrayRef<DecodedInst> Insts,
                                           const MCState &Mc,
                                           const ISAProfile &Src,
                                           const ISAProfile &Tgt,
-                                          bool EnableWritelaneRewrite) {
+                                          bool EnableWritelaneRewrite,
+                                          bool UseWaveNative) {
   ObstructionReport Report;
   if (Src.WaveSize == Tgt.WaveSize)
     return Report;
@@ -1107,14 +1108,26 @@ ObstructionReport buildObstructionReport(ArrayRef<DecodedInst> Insts,
   // register provenance pre-walk. This replaces the old kernel-wide
   // co-occurrence heuristic while preserving the same fail-loud
   // outcome for true mbcnt-fed EXEC predicates.
-  for (const auto &Pw : LanePredicatedExecSites) {
-    ObstructionSite Site;
-    Site.Inst = Pw.Inst;
-    Site.Kind = Pw.Kind;
-    Site.Rewrite = RewriteId::None;
-    Site.RewriteImplemented = false;
-    Site.Detail = Pw.Detail;
-    Report.Sites.push_back(std::move(Site));
+  //
+  // Under WaveNativeProjection (UseWaveNative=true) the mbcnt-derived
+  // v_cmpx/saveexec pattern is safe: the target wave64 keeps phantom
+  // lanes (bits W_src..W_tgt-1) hardware-inactive throughout the kernel
+  // body, so v_mbcnt_lo(exec_lo) enumerates only real lanes 0..W_src-1
+  // and v_cmpx_eq_u32 0 gates exactly the first real lane -- identical
+  // to the source wave32 semantics. The double-issue / double-update
+  // hazard that makes this an unrewritable obstruction under MODREP does
+  // not arise under WaveNative. Skip the site emission when the raiser
+  // has confirmed that WaveNativeProjection will be used.
+  if (!UseWaveNative) {
+    for (const auto &Pw : LanePredicatedExecSites) {
+      ObstructionSite Site;
+      Site.Inst = Pw.Inst;
+      Site.Kind = Pw.Kind;
+      Site.Rewrite = RewriteId::None;
+      Site.RewriteImplemented = false;
+      Site.Detail = Pw.Detail;
+      Report.Sites.push_back(std::move(Site));
+    }
   }
 
   return Report;

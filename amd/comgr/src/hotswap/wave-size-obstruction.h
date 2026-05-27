@@ -301,11 +301,21 @@ struct ObstructionReport {
 // that want to pin the pre-rewrite REFUSE contract (lit fixtures for
 // the `c1_wave_id_lift_scalarized` REFUSE sibling, etc.) pass `false`
 // explicitly. See wave-size-translation.md §5.6.3.
+// `useWaveNative` signals that the raiser will use WaveNativeProjection
+// for this kernel (wave32 source -> wave64 target, non-phantom-lane
+// regime). Under WaveNative the mbcnt-derived v_cmpx / s_*_saveexec
+// pattern is safe: the target wave64 has its upper phantom lanes
+// hardware-inactive (exec bits 32..63 == 0) so v_mbcnt_lo(exec_lo)
+// enumerates real lanes 0..W_src-1 only, and `v_cmpx_eq_u32 0`
+// gates exactly the first real lane. The double-issue hazard that
+// makes CmpxFromLaneId unrewritable under MODREP (each replica's lane 0
+// would independently pass the eq-0 test) does not arise under WaveNative.
 ObstructionReport buildObstructionReport(llvm::ArrayRef<DecodedInst> Insts,
                                           const MCState &Mc,
                                           const ISAProfile &Src,
                                           const ISAProfile &Tgt,
-                                          bool EnableWritelaneRewrite = true);
+                                          bool EnableWritelaneRewrite = true,
+                                          bool UseWaveNative = false);
 
 // ----------------------------------------------------------------------------
 // Render the report into a human-readable trace. Intended for
