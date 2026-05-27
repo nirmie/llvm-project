@@ -717,6 +717,80 @@ HandlerResult handleDS(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
 
+  // DS_CMPSTORE_RTN_B32/B64 and DS_CMPSTORE_B32/B64 -- LDS atomic compare-
+  // and-swap (GFX11+ naming, a.k.a. DS_CMPST_RTN_B32 on pre-GFX11 with
+  // swapped data operands).
+  //
+  // GFX11+ MCInst operand layout (DS_1A2D_RET / DS_1A2D_NORET):
+  //   RET:   (outs vdst), (ins addr, data0=new_val, data1=cmp_val, offset, gds)
+  //   NORET: (outs),      (ins addr, data0=new_val, data1=cmp_val, offset, gds)
+  //
+  // So srcMap[0]=addr, srcMap[1]=new_val, srcMap[2]=cmp_val.
+  // Note: GFX11+ swapped data0/data1 vs pre-GFX11 DS_CMPST_* (where
+  // data0=cmp, data1=new).  DSInstructions.td DSAtomicCmpXChg_mc documents
+  // this swap explicitly at line 1245.
+  //
+  // Lower via LLVM's `cmpxchg` IR instruction on addrspace(3) (LDS):
+  //   old = cmpxchg ptr addrspace(3), cmp_val, new_val monotonic monotonic
+  // The RTN variants extract the old value from the returned pair; the
+  // NORET variants discard it.
+  //
+  // EXEC gating: LDS atomics are not convergent and do not read other
+  // lanes' values, so phantom lanes on a sub-wave-width WG must be gated
+  // out (their addr is undef/stale and would atomically touch an arbitrary
+  // LDS slot). Wrap in emitUnderExec.
+  if (Sop == CanonicalOp::DS_CMPSTORE_RTN_B32 ||
+      Sop == CanonicalOp::DS_CMPSTORE_RTN_B64 ||
+      Sop == CanonicalOp::DS_CMPSTORE_B32 ||
+      Sop == CanonicalOp::DS_CMPSTORE_B64) {
+    bool Is64 = (Sop == CanonicalOp::DS_CMPSTORE_RTN_B64 ||
+                 Sop == CanonicalOp::DS_CMPSTORE_B64);
+    bool IsRtn = (Sop == CanonicalOp::DS_CMPSTORE_RTN_B32 ||
+                  Sop == CanonicalOp::DS_CMPSTORE_RTN_B64);
+
+    Value *Addr32 = Op.src(0);
+    for (unsigned K = 1; K < Op.nSrcs(); K++) {
+      if (Di.isImm(Op.srcIdx(K))) {
+        int64_t Imm = Di.getImm(Op.srcIdx(K));
+        if (Imm != 0)
+          Addr32 = Ctx.B.CreateAdd(Addr32,
+                                   ConstantInt::get(Ctx.I32Ty, Imm), "ds_off");
+        break;
+      }
+    }
+    Value *Addr64 = Ctx.B.CreateZExt(Addr32, Ctx.I64Ty, "ds_addr");
+    auto *LdsPtrTy = PointerType::get(Ctx.C, 3);
+    Value *Ptr = Ctx.B.CreateIntToPtr(Addr64, LdsPtrTy, "ds_cas_ptr");
+
+    ParsedReg NewReg = Op.srcReg(1); // data0 = new_value
+    ParsedReg CmpReg = Op.srcReg(2); // data1 = cmp_value
+
+    Value *NewVal, *CmpVal;
+    if (Is64) {
+      NewVal = Ctx.Regs.readReg64(Ctx.B, NewReg);
+      CmpVal = Ctx.Regs.readReg64(Ctx.B, CmpReg);
+    } else {
+      NewVal = Ctx.Regs.readReg32(Ctx.B, NewReg);
+      CmpVal = Ctx.Regs.readReg32(Ctx.B, CmpReg);
+    }
+
+    Ctx.emitUnderExec([&] {
+      auto *Cas = Ctx.B.CreateAtomicCmpXchg(
+          Ptr, CmpVal, NewVal, MaybeAlign(),
+          AtomicOrdering::Monotonic,
+          AtomicOrdering::Monotonic);
+      if (IsRtn) {
+        Value *OldVal = Ctx.B.CreateExtractValue(Cas, 0, "ds_cas_old");
+        if (Is64)
+          Ctx.Regs.writeReg64(Ctx.B, Op.dst(), OldVal);
+        else
+          Ctx.Regs.writeReg32(Ctx.B, Op.dst(), OldVal);
+      }
+    });
+    Hr.Handled = true;
+    return Hr;
+  }
+
   if (Sop == CanonicalOp::DS_BPERMUTE_B32) {
     // Backwards permute: per-lane GATHER. Each lane reads the `src1`
     // value from a *source* lane whose index is `src0 >> 2` (the
