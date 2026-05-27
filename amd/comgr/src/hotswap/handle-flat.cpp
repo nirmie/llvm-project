@@ -127,25 +127,49 @@ std::string formatScratchAbiDetail(RaiseContext &Ctx, const Twine &Why) {
 AllocaInst *getOrCreateSourcePrivateSegment(RaiseContext &Ctx,
                                             const DecodedInst &Di,
                                             HandlerResult &Hr) {
+  // gfx1250 (HasTensorOps) uses hardware-managed scratch: the runtime
+  // allocates per-workitem scratch and programs FLAT_SCRATCH registers
+  // before kernel launch. The compiler may therefore emit scratch_*
+  // instructions with private_segment_fixed_size=0 in the KD --
+  // the size is implicit, not declared in the kernel descriptor.
+  // Treat this as a "dynamically sized" scratch segment and allocate
+  // a conservatively large frame (64 KB per workitem) so the lifted
+  // IR can materialise a valid addrspace(5) base; the AMDGPU backend
+  // will compute the actual KD size from the alloca geometry after
+  // frame layout, producing a properly-sized target KD.
+  static constexpr uint32_t KGfx12HwScratchFallback = 65536;
+
   if (Ctx.SourcePrivateSegmentFixedSize == 0) {
-    std::string Detail = formatScratchAbiDetail(
-        Ctx,
-        "scratch_* requires source KD private-segment allocation, but "
-        "the parsed source KD reports zero private_segment_fixed_size; "
-        "refusing rather than inventing scratch backing.");
-    errs() << "transpiler: FLAT scratch refused: " << Di.Mnemonic
-           << " -- " << Detail << "\n";
-    Hr.Failure = RaiseFailure::unsupportedShape(
-        Di, "FLAT", Detail);
-    return nullptr;
+    if (!Ctx.Isa.HasTensorOps) {
+      std::string Detail = formatScratchAbiDetail(
+          Ctx,
+          "scratch_* requires source KD private-segment allocation, but "
+          "the parsed source KD reports zero private_segment_fixed_size; "
+          "refusing rather than inventing scratch backing.");
+      errs() << "transpiler: FLAT scratch refused: " << Di.Mnemonic
+             << " -- " << Detail << "\n";
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "FLAT", Detail);
+      return nullptr;
+    }
+    // gfx1250: fall through with a 64 KB synthetic frame (see above).
+    LLVM_DEBUG(dbgs() << "transpiler: FLAT scratch ABI: gfx1250 hw-scratch "
+                      << "with zero private_segment_fixed_size -- using "
+                      << KGfx12HwScratchFallback
+                      << " byte synthetic frame for '"
+                      << Ctx.Kernel->getName() << "'\n");
   }
 
   if (Ctx.ScratchPrivateSegmentAlloca)
     return Ctx.ScratchPrivateSegmentAlloca;
 
+  uint32_t FrameSize = Ctx.SourcePrivateSegmentFixedSize != 0
+                           ? Ctx.SourcePrivateSegmentFixedSize
+                           : KGfx12HwScratchFallback;
+
   BasicBlock &Entry = Ctx.Kernel->getEntryBlock();
   IRBuilder<> EntryB(&*Entry.getFirstInsertionPt());
-  auto *Size = ConstantInt::get(Ctx.I32Ty, Ctx.SourcePrivateSegmentFixedSize);
+  auto *Size = ConstantInt::get(Ctx.I32Ty, FrameSize);
   auto *Alloca =
       EntryB.CreateAlloca(Ctx.I8Ty, /*AddrSpace=*/5, Size,
                           "source_private_segment");
@@ -154,7 +178,8 @@ AllocaInst *getOrCreateSourcePrivateSegment(RaiseContext &Ctx,
   Ctx.UsesScratchPrivateSegment = true;
   LLVM_DEBUG(dbgs() << "transpiler: FLAT scratch ABI: allocated source "
                     << "private segment model for '" << Ctx.Kernel->getName()
-                    << "' size=" << Ctx.SourcePrivateSegmentFixedSize
+                    << "' size=" << FrameSize
+                    << " (kd_fixed=" << Ctx.SourcePrivateSegmentFixedSize << ")"
                     << " compute_pgm_rsrc2=0x"
                     << utohexstr(Ctx.SourceComputePgmRsrc2)
                     << " kernel_code_properties=0x"
