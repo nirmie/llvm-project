@@ -11,14 +11,14 @@
 
 ; CHECK-LABEL: define amdgpu_kernel void @c2_dpp_row_xmask_partial_mask_kernel(
 ; CHECK-NOT: call i32 @llvm.amdgcn.update.dpp.i32(
-; CHECK-DAG: %cwd_dpp_source_lane = and i32 %{{.+}}, 31
-; CHECK-DAG: %[[ROW_SHIFT:.+]] = lshr i32 %cwd_dpp_source_lane, 4
-; CHECK-DAG: %cwd_dpp_source_row = and i32 %[[ROW_SHIFT]], 3
-; CHECK-DAG: %[[BANK_SHIFT:.+]] = lshr i32 %cwd_dpp_source_lane, 2
-; CHECK-DAG: %cwd_dpp_source_bank = and i32 %[[BANK_SHIFT]], 3
-; CHECK-DAG: lshr i32 1, %cwd_dpp_source_row
+; CHECK-DAG: %cwd_dpp_within_row = and i32 %{{.+}}, 15
+; CHECK-DAG: %[[ROW_SHIFT:.+]] = lshr i32 %cwd_lane_id, 4
+; CHECK-DAG: %cwd_dpp_row = and i32 %[[ROW_SHIFT]], 3
+; CHECK-DAG: %[[BANK_SHIFT:.+]] = lshr i32 %cwd_lane_id, 2
+; CHECK-DAG: %cwd_dpp_bank = and i32 %[[BANK_SHIFT]], 3
+; CHECK-DAG: lshr i32 1, %cwd_dpp_row
 ; CHECK-DAG: %cwd_dpp_row_active = icmp ne i32 %{{.+}}, 0
-; CHECK-DAG: lshr i32 5, %cwd_dpp_source_bank
+; CHECK-DAG: lshr i32 5, %cwd_dpp_bank
 ; CHECK-DAG: %cwd_dpp_bank_active = icmp ne i32 %{{.+}}, 0
 ; CHECK-DAG: %cwd_dpp_lane_active = and i1 %cwd_dpp_row_active, %cwd_dpp_bank_active
 ; CHECK-DAG: %cwd_dpp_gated = select i1 %cwd_dpp_lane_active, i32 %{{.+}}, i32 %{{.+}}
