@@ -493,7 +493,7 @@ static RaiseResult raiseToIRImpl(llvm::ArrayRef<uint8_t> TextBytes,
   {
     ObstructionReport Report =
         buildObstructionReport(Insts, Mc, Isa, TargetIsa,
-                               EnableWritelaneRewrite);
+                               EnableWritelaneRewrite, UseWaveNative);
     for (const auto &S : Report.Sites)
       if (S.Kind == ObstructionKind::WaveIdLiftScalarized)
         ++ClassifierWaveIdLiftScalarizedSites;

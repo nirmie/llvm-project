@@ -1,5 +1,5 @@
 ; RUN: %llvm_mc -mcpu=gfx1250 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
-; RUN:   && %not raise_cli %t.hsaco --target-isa=gfx942 --emit-ir=c4_lane_dep_cmpx_kernel 2>&1 | %FileCheck %s --check-prefix=STDERR
+; RUN:   && %not raise_cli %t.hsaco --target-isa=gfx942 --disable-wave-native --emit-ir=c4_lane_dep_cmpx_kernel 2>&1 | %FileCheck %s --check-prefix=STDERR
 ;
 ; Class 4 "lane-position-dependent EXEC writes" (hotswap/docs/
 ; wave-size-translation.md §6). The v_cmpx's LHS flows from
