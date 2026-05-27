@@ -95,6 +95,22 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
     ParsedReg Dest = Op.dst();
     ParsedReg Base = Op.srcReg(0);
 
+    // s_load_b* allows any SReg_32 (incl. vcc_hi, m0, flat_scr_lo) as dest on
+    // gfx12+. For single-dword loads route through writeReg32 which handles
+    // all register kinds; for multi-dword loads only SGPR destinations make
+    // architectural sense (vcc/exec/m0 are 32-bit registers).
+    if (Dest.RegKind != ParsedReg::SGPR && LoadDwords > 1) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "SMEM", "multi-dword scalar load to non-SGPR destination");
+      return Hr;
+    }
+    auto storeDest = [&](int D, Value *V) {
+      if (Dest.RegKind == ParsedReg::SGPR)
+        Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, V);
+      else
+        Ctx.Regs.writeReg32(Ctx.B, Dest, V); // D==0 guaranteed by guard above
+    };
+
     unsigned OffIdx = Op.srcIdx(1);
     bool ImmOffset = Di.isImm(OffIdx);
     int64_t ByteOffset = ImmOffset ? Op.srcImm(1) : 0;
@@ -160,8 +176,7 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
           Value *Ep = (D == 0) ? Gep
                                : Ctx.B.CreateInBoundsGEP(
                                      Ctx.I8Ty, Gep, Ctx.B.getInt64(D * 4));
-          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D,
-                               Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_load"));
+          storeDest(D, Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_load"));
         }
         Hr.Handled = true;
         return Hr;
@@ -205,8 +220,7 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
                   : Ctx.B.CreateInBoundsGEP(Ctx.I8Ty, getImplPtrLoop(),
                                              Ctx.B.getInt64(ImplOff),
                                              "impl_gep_d");
-          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D,
-                               Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_load_d"));
+          storeDest(D, Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "impl_load_d"));
           continue;
         }
         if (!Dw.Value) {
@@ -216,7 +230,7 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
                                                           : Dw.FailureDetail);
           return Hr;
         }
-        Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D, Dw.Value);
+        storeDest(D, Dw.Value);
       }
       Hr.Handled = true;
       return Hr;
@@ -260,8 +274,7 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
         Value *Ep = (D == 0) ? Ptr
                              : Ctx.B.CreateInBoundsGEP(Ctx.I8Ty, Ptr,
                                                        Ctx.B.getInt64(D * 4));
-        Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx + D,
-                             Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "smem_load"));
+        storeDest(D, Ctx.B.CreateLoad(Ctx.I32Ty, Ep, "smem_load"));
       }
     }
     Hr.Handled = true;
@@ -329,7 +342,10 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
                 RaiseFailure::unsupportedShape(Di, "SMEM", Hidden.FailureDetail);
             return Hr;
           }
-          Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx, Hidden.Value);
+          if (Dest.RegKind == ParsedReg::SGPR)
+            Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx, Hidden.Value);
+          else
+            Ctx.Regs.writeReg32(Ctx.B, Dest, Hidden.Value);
           Hr.Handled = true;
           return Hr;
         }
@@ -354,7 +370,10 @@ HandlerResult handleSMEM(RaiseContext &Ctx, const DecodedInst &Di,
     Value *Ext = IsSigned
                      ? Ctx.B.CreateSExt(Narrow, Ctx.I32Ty, ExtName)
                      : Ctx.B.CreateZExt(Narrow, Ctx.I32Ty, ExtName);
-    Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx, Ext);
+    if (Dest.RegKind == ParsedReg::SGPR)
+      Ctx.Regs.storeSGPR32(Ctx.B, Dest.BaseIdx, Ext);
+    else
+      Ctx.Regs.writeReg32(Ctx.B, Dest, Ext);
     Hr.Handled = true;
     return Hr;
   }
