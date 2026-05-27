@@ -285,6 +285,17 @@ public:
     return false;
   }
 
+  // Check whether a specific source operand (by SrcMap index) is tainted.
+  bool srcTaintedAt(const DecodedInst &Di, unsigned SrcIdx) const {
+    if (SrcIdx >= Di.NumSrcs)
+      return false;
+    unsigned OpIdx = Di.SrcMap[SrcIdx];
+    if (OpIdx >= Di.Inst.getNumOperands())
+      return false;
+    const MCOperand &Op = Di.Inst.getOperand(OpIdx);
+    return Op.isReg() && isRegTainted(Op.getReg());
+  }
+
   bool execTainted() const {
     return isRegTainted(AMDGPU::EXEC_LO) || isRegTainted(AMDGPU::EXEC_HI) ||
            isRegTainted(AMDGPU::EXEC);
@@ -448,6 +459,17 @@ findLanePredicatedExecSites(ArrayRef<DecodedInst> Insts,
       VccTainted = false;
       ExecTainted = OldExecTainted || SourceTainted;
       SccTainted = ExecTainted;
+    } else if (Sop == CanonicalOp::DS_BPERMUTE_B32) {
+      // ds_bpermute_b32 vdst, addr, data0: addr (SrcMap[0]) is typically
+      // mbcnt-derived (it selects *which lane* to read from) but does not
+      // determine the mathematical content of the output value.  Only the
+      // data source (SrcMap[1]) carries value provenance.  Propagating addr
+      // taint into vdst causes false-positive SaveExecFromLaneId when the
+      // result feeds a V_CMP that then gates s_and_saveexec_b32.
+      ExplicitDefsTainted = Tracker.srcTaintedAt(Di, 1);
+      VccTainted = SourceTainted;
+      ExecTainted = OldExecTainted || SourceTainted;
+      SccTainted = SourceTainted;
     }
 
     Tracker.updateAfterInstruction(Di, ExplicitDefsTainted, VccTainted,
