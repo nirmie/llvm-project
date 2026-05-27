@@ -31,6 +31,13 @@
 ; commit 8f2db5ec2edc. The wave-native exemption (EnableWaveNative=true passed
 ; to buildObstructionReport) already suppresses the NonCommutativeAtomic site;
 ; all 45 kernels in fatbin_co_0134.co raise OK with the current binary.
+;
+; Pins Bug-Id 2026-05-27T00-59-17Z_qwen2.5-7b-instruct-001:
+; UnsupportedOpcode (cross-wave-replica-race) on global_atomic_cmpswap_b32,
+; 32 hits across 8 rocSOLVER bdsqr kernels in fatbin_co_0134.co at hotswap
+; commit b9729c01dc60. Fix: pass UseWaveNative to buildObstructionReport() so
+; the NonCommutativeAtomic obstruction is suppressed for vector atomics under
+; WaveNativeProjection; all kernels in fatbin_co_0134.co raise OK.
 
 ; CHECK-LABEL: define amdgpu_kernel void @global_atomic_cmpswap_b32_kernel(
 ; Under wave-native the handler emits a flat-pointer `cmpxchg`; no

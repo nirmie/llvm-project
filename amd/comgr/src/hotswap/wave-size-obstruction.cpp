@@ -951,18 +951,26 @@ ObstructionReport buildObstructionReport(ArrayRef<DecodedInst> Insts,
     // unsupportedOpcode path.
     //
     // Vector atomics (GLOBAL / FLAT / BUFFER _SWAP / _CMPSWAP): the
-    // race is *lane-level* -- under modulo-replication the wave64
-    // source is projected onto two wave32 sub-waves, so lanes `i` and
-    // `i + W_s` issue concurrently against the same target slot. For
-    // non-commutative binops the two possible orderings produce
-    // different terminal values, and the source program has no way to
-    // restore the intended single-wave ordering.
+    // race is *lane-level* -- under modulo-replication the source wave32
+    // is replicated into two wave32 sub-waves within the target wave64,
+    // so lanes `i` and `i + W_s` issue concurrently against the same
+    // target slot. For non-commutative binops the two possible orderings
+    // produce different terminal values.
+    //
+    // Under WaveNativeProjection this race does NOT apply: the source
+    // wave32 occupies only the low W_s lanes of the target wave64; the
+    // high lanes are phantom-inactive and never issue the atomic.  The
+    // `emitUnderExec` diamond in the handler gates the cmpxchg through
+    // `br i1 %lane_active`, so phantom lanes are no-ops.  Skip the
+    // obstruction site and let the handler emit the lifted IR.
     if (Sop == CanonicalOp::GLOBAL_ATOMIC_SWAP ||
         Sop == CanonicalOp::GLOBAL_ATOMIC_CMPSWAP ||
         Sop == CanonicalOp::FLAT_ATOMIC_SWAP ||
         Sop == CanonicalOp::FLAT_ATOMIC_CMPSWAP ||
         Sop == CanonicalOp::BUFFER_ATOMIC_SWAP ||
         Sop == CanonicalOp::BUFFER_ATOMIC_CMPSWAP) {
+      if (UseWaveNative)
+        continue; // no lane-level replica race under WaveNative
       ObstructionSite Site;
       Site.Inst = &Di;
       Site.Kind = ObstructionKind::NonCommutativeAtomic;

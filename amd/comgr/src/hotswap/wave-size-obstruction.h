@@ -310,6 +310,13 @@ struct ObstructionReport {
 // gates exactly the first real lane. The double-issue hazard that
 // makes CmpxFromLaneId unrewritable under MODREP (each replica's lane 0
 // would independently pass the eq-0 test) does not arise under WaveNative.
+//
+// Additionally, `useWaveNative` suppresses the Class-3 NonCommutativeAtomic
+// site for *vector* atomics (GLOBAL/FLAT/BUFFER SWAP/CMPSWAP): under WaveNative
+// the source wave32 occupies the low half of the target wave64 and the high half
+// is phantom-inactive, so there is no lane-i / lane-i+W_s replica race.
+// Scalar atomics (S_ATOMIC_SWAP / S_ATOMIC_DEC) are NOT suppressed: the
+// wave-level double-issue race applies equally under WaveNative.
 ObstructionReport buildObstructionReport(llvm::ArrayRef<DecodedInst> Insts,
                                           const MCState &Mc,
                                           const ISAProfile &Src,
