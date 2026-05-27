@@ -34,7 +34,7 @@
 ; And the supported-family list MUST appear so a reviewer seeing a
 ; new refusal knows the current rewrite scope without cross-
 ; referencing source.
-; CHECK-DAG: quad_perm, row_shl:N, row_shr:N and row_xmask:N
+; CHECK-DAG: quad_perm, row_shl:N and row_shr:N
 
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx1250"
 	.amdhsa_code_object_version 6
