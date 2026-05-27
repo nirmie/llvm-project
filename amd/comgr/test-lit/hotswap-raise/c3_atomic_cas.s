@@ -1,10 +1,20 @@
 ; RUN: %llvm_mc -mcpu=gfx1250 %s -o %t.o && %ld_lld -shared %t.o -o %t.hsaco \
-; RUN:   && %not raise_cli %t.hsaco --target-isa=gfx942 --emit-ir=c3_atomic_cas_kernel 2>&1 | %FileCheck %s --check-prefix=STDERR
+; RUN:   && %not raise_cli %t.hsaco --target-isa=gfx942 --disable-wave-native \
+; RUN:     --emit-ir=c3_atomic_cas_kernel 2>&1 | %FileCheck %s --check-prefix=STDERR
 ;
 ; Class 3 "inter-replica race via shared state" — see hotswap/docs/
 ; wave-size-translation.md §6. Non-commutative atomics have no
 ; rewrite that preserves the source semantics on a wider target
-; wave. The classifier must refuse.
+; wave under ModuloReplicationProjection. The classifier must refuse
+; when WaveNative is disabled (--disable-wave-native).
+;
+; Under WaveNativeProjection (the default) the NonCommutativeAtomic site
+; is suppressed for vector atomics because phantom lanes are inactive, so
+; the lane-i / lane-i+W_s replica race does not exist.  This test pins
+; the MODREP refusal path with --disable-wave-native.
+;
+; See also global_atomic_cmpswap_b32_wave_native.s which pins the WaveNative
+; pass (the default projection that allows the lift to proceed).
 ;
 ; The audited corpus did not exercise this pattern, so this test exists
 ; as a guard / regression fence, not because any corpus kernel trips it.
