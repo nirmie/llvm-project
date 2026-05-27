@@ -376,6 +376,7 @@ static const Entry kCanonTable[] = {
     // v_movreld_b32: write src into VGPR[dst + M0].
     E(V_MOVRELS_B32_e64, V_MOVRELS_B32),
     E(V_MOVRELD_B32_e64, V_MOVRELD_B32),
+    E(V_ILLEGAL, V_ILLEGAL),
     E(V_NOP_e64, V_NOP),
     E(V_NOT_B32_e64, V_NOT_B32),
     E(V_BFREV_B32_e64, V_BFREV_B32),

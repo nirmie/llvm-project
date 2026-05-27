@@ -64,6 +64,23 @@ void buildSrcMap(DecodedInst &Di, const MCInstrDesc &Desc) {
   unsigned Opc = Inst.getOpcode();
   int OldIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::old);
   int VdstInIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst_in);
+  // v_movreld_b32 (and v_movrelsd_b32): HasDst=0 but EmitDst=1, so the MCInst
+  // has a vdst operand at index 0 that is a source-base register, NOT a true
+  // output.  The gfx12 real form uses OpName::vdst (not OpName::vdst_in), so
+  // VdstInIdx is -1 and the existing check doesn't fire.  getNumDefs()==0
+  // makes FirstSrcIdx=0, so buildSrcMap picks up index 0 as srcMap[0]=0, but
+  // OpName::src0 says src0 is at index 1 → srcMap disagreement → LLVM ERROR.
+  // Skip the first MCOperand for these opcodes by treating their vdst slot as
+  // an implicit-fallback position: the handler reads it via Op.srcReg(0) after
+  // adjusting for the one-slot shift, matching what the old-branch handler does.
+  int VdstAsSourceBaseIdx = -1;
+  if (Desc.getNumDefs() == 0) {
+    int VdstIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst);
+    int Src0Idx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::src0);
+    // Only apply when vdst is at 0 and src0 is at 1 (the movreld/movrelsd layout).
+    if (VdstIdx == 0 && Src0Idx == 1)
+      VdstAsSourceBaseIdx = VdstIdx;
+  }
   auto OpInfos = Desc.operands();
   unsigned PendingModIdx = UINT_MAX;
   for (unsigned I = Di.FirstSrcIdx; I < Inst.getNumOperands(); ++I) {
@@ -72,7 +89,8 @@ void buildSrcMap(DecodedInst &Di, const MCInstrDesc &Desc) {
       PendingModIdx = I;
       continue;
     }
-    if (static_cast<int>(I) == OldIdx || static_cast<int>(I) == VdstInIdx) {
+    if (static_cast<int>(I) == OldIdx || static_cast<int>(I) == VdstInIdx ||
+        static_cast<int>(I) == VdstAsSourceBaseIdx) {
       PendingModIdx = UINT_MAX;
       continue;
     }

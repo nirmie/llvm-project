@@ -616,6 +616,17 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  // ---- v_illegal ----
+  // Hardware trap instruction (encoding 0x00000000). Lower to llvm.trap so
+  // the unconditional-fault semantics are preserved in the translated binary.
+  if (Sop == CanonicalOp::V_ILLEGAL) {
+    Function *TrapFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::trap);
+    Ctx.B.CreateCall(TrapFn, {});
+    Ctx.B.CreateUnreachable();
+    Hr.Handled = true;
+    return Hr;
+  }
   // ---- v_mov_b32 ----
   if (Sop == CanonicalOp::V_MOV_B32) {
     Ctx.writeReg32(Op.dst(), Op.src(0));
@@ -2462,6 +2473,86 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     Value *VB = Ctx.Regs.readReg32(Ctx.B, DstB);
     Ctx.writeReg32(DstA, VB);
     Ctx.writeReg32(DstB, VA);
+    Hr.Handled = true;
+    return Hr;
+  }
+  // v_movrels_b32 vdst, vsrc_base
+  // Reads VGPR[base(vsrc) + M0] -> vdst. M0 is the runtime index; the static
+  // base is the register number of vsrc. Model as extractelement from a vector
+  // of consecutive VGPRs; the gfx950 backend re-lowers to native v_movrels_b32.
+  //
+  // Note on MCInst layout: the gfx12 real form (HasDst=0, EmitDst=1) puts the
+  // src-base register at MCInst[0] and the actual src0 at MCInst[1].
+  // buildSrcMap now skips MCInst[0] (the vdst source-base slot) when
+  // NumDefs==0 and vdst is at index 0, so srcMap[0] points to MCInst[1]
+  // (src0).  Op.srcReg(0) therefore yields the src-base register directly.
+  if (Sop == CanonicalOp::V_MOVRELS_B32) {
+    ParsedReg BaseReg = Op.srcReg(0);
+    if (BaseReg.RegKind != ParsedReg::VGPR) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP1", "v_movrels_b32: base register must be VGPR");
+      return Hr;
+    }
+    int Base = BaseReg.BaseIdx;
+    unsigned Cap = static_cast<unsigned>(AllocaRegFile::KVGPRCap);
+    unsigned N = (Base >= 0 && static_cast<unsigned>(Base) < Cap)
+                     ? std::min(Cap - static_cast<unsigned>(Base), 64u)
+                     : 64u;
+    Value *M0Val = Ctx.B.CreateLoad(Ctx.I32Ty, Ctx.Regs.M0, "movrels_m0");
+    auto *VecTy = FixedVectorType::get(Ctx.I32Ty, N);
+    Value *Vec = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I < N; ++I)
+      Vec = Ctx.B.CreateInsertElement(
+          Vec, Ctx.Regs.loadVGPR32(Ctx.B, Base + static_cast<int>(I)),
+          I, "movrels_ins");
+    Value *Result = Ctx.B.CreateExtractElement(Vec, M0Val, "movrels_result");
+    Ctx.writeReg32(Op.dst(), Result);
+    Hr.Handled = true;
+    return Hr;
+  }
+  // v_movreld_b32 vdst_base, vsrc
+  // Writes vsrc -> VGPR[base(vdst) + M0]. M0 is the runtime index; the static
+  // base is the register number of vdst. Model as insertelement followed by
+  // scatter back. The gfx950 backend re-lowers to native v_movreld_b32.
+  //
+  // MCInst layout for gfx12 real (HasDst=0, EmitDst=1): [vdst_base, src0].
+  // buildSrcMap skips vdst_base (MCInst[0]) so srcMap[0]=MCInst[1] (src0).
+  // The base register must be obtained from the raw MCInst via Di.Inst directly.
+  if (Sop == CanonicalOp::V_MOVRELD_B32) {
+    // The vdst_base is at MCInst operand 0 (skipped by buildSrcMap).
+    // Read it directly since it's not in the srcMap.
+    const MCOperand &BaseOp = Di.Inst.getOperand(0);
+    if (!BaseOp.isReg()) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP1", "v_movreld_b32: base operand is not a register");
+      return Hr;
+    }
+    ParsedReg BaseReg = Ctx.parseReg(BaseOp.getReg());
+    if (BaseReg.RegKind != ParsedReg::VGPR) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP1", "v_movreld_b32: base register must be VGPR");
+      return Hr;
+    }
+    int Base = BaseReg.BaseIdx;
+    unsigned Cap = static_cast<unsigned>(AllocaRegFile::KVGPRCap);
+    unsigned N = (Base >= 0 && static_cast<unsigned>(Base) < Cap)
+                     ? std::min(Cap - static_cast<unsigned>(Base), 64u)
+                     : 64u;
+    Value *M0Val = Ctx.B.CreateLoad(Ctx.I32Ty, Ctx.Regs.M0, "movreld_m0");
+    Value *WriteVal = Ctx.B.CreateZExtOrTrunc(Op.src(0), Ctx.I32Ty,
+                                              "movreld_val");
+    auto *VecTy = FixedVectorType::get(Ctx.I32Ty, N);
+    Value *Vec = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I < N; ++I)
+      Vec = Ctx.B.CreateInsertElement(
+          Vec, Ctx.Regs.loadVGPR32(Ctx.B, Base + static_cast<int>(I)),
+          I, "movreld_ins");
+    Value *NewVec = Ctx.B.CreateInsertElement(Vec, WriteVal, M0Val,
+                                              "movreld_new");
+    for (unsigned I = 0; I < N; ++I) {
+      Value *Elem = Ctx.B.CreateExtractElement(NewVec, I, "movreld_ext");
+      Ctx.Regs.storeVGPR32(Ctx.B, Base + static_cast<int>(I), Elem);
+    }
     Hr.Handled = true;
     return Hr;
   }

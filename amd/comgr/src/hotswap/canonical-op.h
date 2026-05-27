@@ -351,7 +351,7 @@ enum class CanonicalOp : uint16_t {
   S_ADD_NC_U64, S_SUB_NC_U64,
 
   // -- VOP1 --
-  V_MOV_B32, V_MOV_B64, V_MOV_B16, V_NOP, V_NOT_B32, V_BFREV_B32,
+  V_MOV_B32, V_MOV_B64, V_MOV_B16, V_NOP, V_ILLEGAL, V_NOT_B32, V_BFREV_B32,
   // GFX6+ indexed vector move. `v_movrels_b32 vdst, vsrc_base` reads
   // VGPR[vsrc_base + M0], where M0 holds the dynamic lane index.
   // `v_movreld_b32 vdst_base, vsrc` writes VGPR[vdst_base + M0].
