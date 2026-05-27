@@ -1714,6 +1714,87 @@ HandlerResult handleVALU(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
 
+  // ---- FP64 IEEE divide helpers ----
+  if (Sop == CanonicalOp::V_DIV_FIXUP_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S0 = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Value *S1 = Ctx.B.CreateBitCast(Op.src64(1), F64Ty);
+    Value *S2 = Ctx.B.CreateBitCast(Op.src64(2), F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::amdgcn_div_fixup,
+                                                     {F64Ty});
+    Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(Ctx.B.CreateCall(Fn, {S0, S1, S2}, "divfixup64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_DIV_FMAS_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    Value *S0 = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
+    Value *S1 = Ctx.B.CreateBitCast(Op.src64(1), F64Ty);
+    Value *S2 = Ctx.B.CreateBitCast(Op.src64(2), F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::amdgcn_div_fmas,
+                                                     {F64Ty});
+    Value *Vcc = Ctx.Regs.loadVCC(Ctx.B);
+    Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(Ctx.B.CreateCall(Fn, {S0, S1, S2, Vcc}, "divfmas64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  if (Sop == CanonicalOp::V_DIV_SCALE_F64) {
+    auto *F64Ty = Type::getDoubleTy(Ctx.C);
+    auto SameOperand = [&](unsigned A, unsigned B) -> bool {
+      bool AIsReg = Op.isSrcReg(A), BIsReg = Op.isSrcReg(B);
+      if (AIsReg != BIsReg) return false;
+      if (AIsReg) {
+        ParsedReg Ra = Op.srcReg(A), Rb = Op.srcReg(B);
+        return Ra.RegKind == Rb.RegKind && Ra.BaseIdx == Rb.BaseIdx;
+      }
+      unsigned Ai = Op.srcIdx(A), Bi = Op.srcIdx(B);
+      if (!Op.Di.isImm(Ai) || !Op.Di.isImm(Bi)) return false;
+      return Op.Di.getImm(Ai) == Op.Di.getImm(Bi);
+    };
+    bool Src0EqSrc2 = SameOperand(0, 2);
+    bool Src0EqSrc1 = SameOperand(0, 1);
+    bool ScaleNumerator;
+    if (Src0EqSrc2 && !Src0EqSrc1) {
+      ScaleNumerator = true;
+    } else if (Src0EqSrc1 && !Src0EqSrc2) {
+      ScaleNumerator = false;
+    } else {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3",
+          "v_div_scale_f64 operand triple does not match a known "
+          "divide-scaling shape: expected (numer, denom, numer) or "
+          "(denom, denom, numer).");
+      return Hr;
+    }
+    unsigned Peer = ScaleNumerator ? 2u : 1u;
+    if (Op.srcMod(0) != Op.srcMod(Peer)) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3",
+          "v_div_scale_f64 matched-identity pair has asymmetric FP modifiers.");
+      return Hr;
+    }
+    Value *Numer = Ctx.B.CreateBitCast(
+        ScaleNumerator ? Op.src64(0) : Op.src64(2), F64Ty);
+    Value *Denom = Ctx.B.CreateBitCast(Op.src64(1), F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::amdgcn_div_scale,
+                                                     {F64Ty});
+    Value *R = Ctx.B.CreateCall(Fn, {Numer, Denom,
+                 ScaleNumerator ? Ctx.B.getTrue() : Ctx.B.getFalse()}, "divscale64");
+    Ctx.writeReg64(Op.dst(0), Ctx.B.CreateBitCast(Ctx.B.CreateExtractValue(R, 0), Ctx.I64Ty));
+    Value *Flag = Ctx.B.CreateExtractValue(R, 1);
+    if (Di.NumDefs >= 2 && Di.isReg(1)) {
+      ParsedReg FlagDst = Op.dst(1);
+      if (FlagDst.RegKind == ParsedReg::VCC)
+        Ctx.Regs.storeVCC(Ctx.B, Flag);
+      else if (FlagDst.RegKind == ParsedReg::SGPR && FlagDst.BaseIdx >= 0)
+        Ctx.Regs.storeSGPR32(Ctx.B, FlagDst.BaseIdx, Ctx.B.CreateZExt(Flag, Ctx.I32Ty));
+    } else {
+      Ctx.Regs.storeVCC(Ctx.B, Flag);
+    }
+    Hr.Handled = true;
+    return Hr;
+  }
+
   // ---- 3-source integer VOP3 ----
   if (Sop == CanonicalOp::V_ADD3_U32) {
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateAdd(Ctx.B.CreateAdd(Op.src(0), Op.src(1)), Op.src(2), "vadd3"));

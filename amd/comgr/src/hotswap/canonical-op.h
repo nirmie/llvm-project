@@ -372,6 +372,11 @@ enum class CanonicalOp : uint16_t {
   V_LDEXP_F32,
   V_FLOOR_F32, V_CEIL_F32, V_TRUNC_F32, V_RNDNE_F32, V_FRACT_F32,
   V_CEIL_F64,
+  // VOP1 FP64 transcendentals and conversions.
+  V_FLOOR_F64, V_TRUNC_F64,
+  V_RSQ_F64,
+  V_CVT_I32_F64,
+  V_FREXP_EXP_I32_F64, V_FREXP_MANT_F64,
   V_READFIRSTLANE_B32,
   // VOP1 packed FP8/BF8 -> 2x F32 expansion (VOP1Instructions.td:652-
   // 653, profile VOPProfileCVT_PK_F32_F8). Reads 16 bits of the i32
@@ -646,6 +651,9 @@ enum class CanonicalOp : uint16_t {
   // exists -- the pseudo is VOP3-only -- so output modifiers are
   // required to be present in the MC operand table and must be default.
   V_LDEXP_F64,
+  // VOP3 FP64 IEEE-conformant divide helpers. Lifted to matching
+  // `llvm.amdgcn.div.{fixup,fmas,scale}.f64` intrinsics.
+  V_DIV_FIXUP_F64, V_DIV_FMAS_F64, V_DIV_SCALE_F64,
 
   V_MAX_U32, V_MIN_U32, V_MAX_I32, V_MIN_I32,
   V_PERMLANE16_B32, V_PERMLANEX16_B32, V_PERMLANE64_B32,
@@ -701,6 +709,14 @@ enum class CanonicalOp : uint16_t {
   V_PK_ADD_BF16, V_PK_MUL_BF16,
   V_PK_MIN_NUM_BF16, V_PK_MAX_NUM_BF16,
   V_PK_FMA_BF16,
+  // gfx12+/gfx1250 packed f16 minimumNumber/maximumNumber
+  // (V_PK_MIN_F16 / V_PK_MAX_F16 pseudos; gfx12/13 asm renames them
+  // to `v_pk_min_num_f16` / `v_pk_max_num_f16`).
+  V_PK_MIN_NUM_F16, V_PK_MAX_NUM_F16,
+  // gfx1250 3-input packed f16 min (V_PK_MIN3_NUM_F16, AMDGPUfmin3).
+  V_PK_MIN3_NUM_F16,
+  // gfx12+/gfx13 scalar 3-input f16 min (V_MIN3_NUM_F16; base pseudo V_MIN3_F16_e64).
+  V_MIN3_NUM_F16,
 
   // VOP3P packed-pair `<2 x i16>` int ops (gfx9+, available on both
   // gfx942 and gfx1250 -- same MC encoding family). Operand profile is

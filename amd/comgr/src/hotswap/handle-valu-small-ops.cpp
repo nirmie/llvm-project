@@ -589,6 +589,74 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  case CanonicalOp::V_FLOOR_F64: {
+    if (!requireDefaultOutputModsIfPresent(Di, Hr))
+      return Hr;
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
+    S = Op.applyMods(0, S);
+    Function *FloorFn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::floor, {Ctx.F64Ty});
+    Ctx.writeReg64(Op.dst(),
+                   Ctx.B.CreateBitCast(
+                       Ctx.B.CreateCall(FloorFn, {S}, "floor64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_TRUNC_F64: {
+    if (!requireDefaultOutputModsIfPresent(Di, Hr))
+      return Hr;
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
+    S = Op.applyMods(0, S);
+    Function *TruncFn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::trunc, {Ctx.F64Ty});
+    Ctx.writeReg64(Op.dst(),
+                   Ctx.B.CreateBitCast(
+                       Ctx.B.CreateCall(TruncFn, {S}, "trunc64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_RSQ_F64: {
+    if (!requireDefaultOutputModsIfPresent(Di, Hr))
+      return Hr;
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
+    S = Op.applyMods(0, S);
+    Function *RsqFn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_rsq, {Ctx.F64Ty});
+    Ctx.writeReg64(Op.dst(),
+                   Ctx.B.CreateBitCast(
+                       Ctx.B.CreateCall(RsqFn, {S}, "rsq64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_CVT_I32_F64: {
+    Value *V = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateFPToSI(V, Ctx.I32Ty, "cvt_i32_f64"));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_FREXP_EXP_I32_F64: {
+    if (!requireDefaultOutputModsIfPresent(Di, Hr))
+      return Hr;
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_frexp_exp,
+        {Ctx.I32Ty, Ctx.F64Ty});
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateCall(Fn, {S}, "frexp_exp_i32_f64"));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_FREXP_MANT_F64: {
+    if (!requireDefaultOutputModsIfPresent(Di, Hr))
+      return Hr;
+    Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_frexp_mant, {Ctx.F64Ty});
+    Ctx.writeReg64(Op.dst(),
+                   Ctx.B.CreateBitCast(
+                       Ctx.B.CreateCall(Fn, {S}, "frexp_mant_f64"), Ctx.I64Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
   case CanonicalOp::V_TRUNC_F32: {
     if (!requireDefaultOutputModsIfPresent(Di, Hr))
       return Hr;

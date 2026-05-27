@@ -434,6 +434,12 @@ static const Entry kCanonTable[] = {
     E(V_FLOOR_F32_e64, V_FLOOR_F32),
     E(V_CEIL_F32_e64, V_CEIL_F32),
     E(V_CEIL_F64_e64, V_CEIL_F64),
+    E(V_FLOOR_F64_e64, V_FLOOR_F64),
+    E(V_TRUNC_F64_e64, V_TRUNC_F64),
+    E(V_RSQ_F64_e64, V_RSQ_F64),
+    E(V_CVT_I32_F64_e64, V_CVT_I32_F64),
+    E(V_FREXP_EXP_I32_F64_e64, V_FREXP_EXP_I32_F64),
+    E(V_FREXP_MANT_F64_e64, V_FREXP_MANT_F64),
     E(V_TRUNC_F32_e64, V_TRUNC_F32),
     E(V_RNDNE_F32_e64, V_RNDNE_F32),
     E(V_FRACT_F32_e64, V_FRACT_F32),
@@ -677,6 +683,9 @@ static const Entry kCanonTable[] = {
     // single e64 entry covers both encodings.
     E(V_RCP_F64_e64, V_RCP_F64),
     E(V_LDEXP_F64_e64, V_LDEXP_F64),
+    E(V_DIV_FIXUP_F64_e64, V_DIV_FIXUP_F64),
+    E(V_DIV_FMAS_F64_e64, V_DIV_FMAS_F64),
+    E(V_DIV_SCALE_F64_e64, V_DIV_SCALE_F64),
 
     // ---------------------------------------------------------------------
     // More VOP3 32-bit int min/max and lane perms
@@ -716,6 +725,18 @@ static const Entry kCanonTable[] = {
     E(V_PK_MIN_NUM_BF16, V_PK_MIN_NUM_BF16),
     E(V_PK_MAX_NUM_BF16, V_PK_MAX_NUM_BF16),
     E(V_PK_FMA_BF16, V_PK_FMA_BF16),
+    // gfx12+/gfx1250 packed f16 min/max (pseudos V_PK_MIN_F16 / V_PK_MAX_F16;
+    // assembler renames them to v_pk_min_num_f16 / v_pk_max_num_f16 on gfx12/13).
+    // gfx12/13 real-instruction names collapse to V_PK_MIN_F16/V_PK_MAX_F16
+    // via buildMcToPseudoMap; map the base pseudos to our canonical ops here.
+    E(V_PK_MIN_F16, V_PK_MIN_NUM_F16),
+    E(V_PK_MAX_F16, V_PK_MAX_NUM_F16),
+    // gfx1250 3-input packed f16 min (VOP3P_Real_gfx1250<0x38>).
+    E(V_PK_MIN3_NUM_F16, V_PK_MIN3_NUM_F16),
+    // gfx12+/gfx13 scalar 3-input f16 min (V_MIN3_F16_e64 base pseudo;
+    // gfx12/13 asm renames to v_min3_num_f16; t16/fake16 variants collapse
+    // via buildPseudoAliasMap).
+    E(V_MIN3_F16_e64, V_MIN3_NUM_F16),
     // LLVM has no `V_PK_MAX_F32`/`V_PK_MIN_F32` pseudo (only F16 variants);
     // leave the matching CanonicalOps unmapped until one appears.
     E(V_PK_MOV_B32, V_PK_MOV_B32),

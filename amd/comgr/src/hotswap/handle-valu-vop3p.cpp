@@ -479,6 +479,104 @@ HandlerResult handleValuVoP3P(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  case CanonicalOp::V_PK_MIN_NUM_F16:
+  case CanonicalOp::V_PK_MAX_NUM_F16: {
+    constexpr unsigned KnownPkF16Mods =
+        SISrcMods::NEG | SISrcMods::NEG_HI | SISrcMods::OP_SEL_0 |
+        SISrcMods::OP_SEL_1;
+    unsigned Mods[2] = {};
+    if (!readPackedSrcMods(Di, Op, 2, KnownPkF16Mods, Mods, Hr))
+      return Hr;
+
+    int ClampIdx = AMDGPU::getNamedOperandIdx(Di.Inst.getOpcode(),
+                                              AMDGPU::OpName::clamp);
+    if (ClampIdx < 0 || !Di.isImm(static_cast<unsigned>(ClampIdx))) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3P",
+          (diagnosticMnemonic(Di) + " missing immediate clamp operand").str());
+      return Hr;
+    }
+    int64_t ClampImm = Di.getImm(static_cast<unsigned>(ClampIdx));
+    if (ClampImm != 0 && ClampImm != 1) {
+      Hr.Failure = RaiseFailure::unsupportedShape(
+          Di, "VOP3P",
+          (diagnosticMnemonic(Di) + " clamp operand is not 0 or 1").str());
+      return Hr;
+    }
+
+    auto *V2f16 = FixedVectorType::get(Ctx.F16Ty, 2);
+    PackedSrcOptions Opts;
+    Opts.ApplyFloatNeg = true;
+    Opts.Name = "pk_f16_src";
+    Value *S0 = readPacked2Src(Ctx, Op, 0, Ctx.F16Ty, Mods[0], Opts);
+    Value *S1 = readPacked2Src(Ctx, Op, 1, Ctx.F16Ty, Mods[1], Opts);
+    const bool IsMin = Sop == CanonicalOp::V_PK_MIN_NUM_F16;
+    Intrinsic::ID Id = IsMin ? Intrinsic::minnum : Intrinsic::maxnum;
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, Id, {V2f16});
+    const char *Name = IsMin ? "pk_min_num_f16" : "pk_max_num_f16";
+    Value *Res = Ctx.B.CreateCall(Fn, {S0, S1}, Name);
+
+    if (ClampImm != 0) {
+      Function *MaxFn = Intrinsic::getOrInsertDeclaration(
+          &Ctx.M, Intrinsic::maxnum, {V2f16});
+      Function *MinFn = Intrinsic::getOrInsertDeclaration(
+          &Ctx.M, Intrinsic::minnum, {V2f16});
+      Value *Zero = ConstantVector::getSplat(
+          ElementCount::getFixed(2), ConstantFP::get(Ctx.F16Ty, 0.0));
+      Value *One = ConstantVector::getSplat(
+          ElementCount::getFixed(2), ConstantFP::get(Ctx.F16Ty, 1.0));
+      Res = Ctx.B.CreateCall(MaxFn, {Res, Zero}, Twine(Name) + "_clamp_lo");
+      Res = Ctx.B.CreateCall(MinFn, {Res, One}, Twine(Name) + "_clamp");
+    }
+
+    Ctx.writeReg32(Op.dst(),
+                   Ctx.B.CreateBitCast(Res, Ctx.I32Ty, Twine(Name) + "_pack"));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_PK_MIN3_NUM_F16: {
+    constexpr unsigned KnownPkF16Mods =
+        SISrcMods::NEG | SISrcMods::NEG_HI | SISrcMods::OP_SEL_0 |
+        SISrcMods::OP_SEL_1;
+    unsigned Mods[3] = {};
+    if (!readPackedSrcMods(Di, Op, 3, KnownPkF16Mods, Mods, Hr))
+      return Hr;
+
+    auto *V2f16 = FixedVectorType::get(Ctx.F16Ty, 2);
+    PackedSrcOptions Opts;
+    Opts.ApplyFloatNeg = true;
+    Opts.Name = "pk_f16_src";
+    Value *S0 = readPacked2Src(Ctx, Op, 0, Ctx.F16Ty, Mods[0], Opts);
+    Value *S1 = readPacked2Src(Ctx, Op, 1, Ctx.F16Ty, Mods[1], Opts);
+    Value *S2 = readPacked2Src(Ctx, Op, 2, Ctx.F16Ty, Mods[2], Opts);
+    Function *MinFn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::minnum, {V2f16});
+    Value *M01 = Ctx.B.CreateCall(MinFn, {S0, S1}, "pk_min3_f16_m01");
+    Value *Res = Ctx.B.CreateCall(MinFn, {M01, S2}, "pk_min3_f16");
+    Ctx.writeReg32(Op.dst(),
+                   Ctx.B.CreateBitCast(Res, Ctx.I32Ty, "pk_min3_f16_pack"));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_MIN3_NUM_F16: {
+    // VOP3 scalar 3-input f16 min: result = min(min(src0, src1), src2).
+    // Half operands come in as i32 low half; bitcast each to half.
+    Value *S0 = Ctx.B.CreateBitCast(
+        Ctx.B.CreateTrunc(Op.src(0), Ctx.B.getInt16Ty()), Ctx.F16Ty);
+    Value *S1 = Ctx.B.CreateBitCast(
+        Ctx.B.CreateTrunc(Op.src(1), Ctx.B.getInt16Ty()), Ctx.F16Ty);
+    Value *S2 = Ctx.B.CreateBitCast(
+        Ctx.B.CreateTrunc(Op.src(2), Ctx.B.getInt16Ty()), Ctx.F16Ty);
+    Function *MinFn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::minnum, {Ctx.F16Ty});
+    Value *M01 = Ctx.B.CreateCall(MinFn, {S0, S1}, "min3_f16_m01");
+    Value *Res = Ctx.B.CreateCall(MinFn, {M01, S2}, "min3_f16");
+    Value *Result32 = Ctx.B.CreateZExt(
+        Ctx.B.CreateBitCast(Res, Ctx.B.getInt16Ty()), Ctx.I32Ty);
+    Ctx.writeReg32(Op.dst(), Result32);
+    Hr.Handled = true;
+    return Hr;
+  }
   case CanonicalOp::V_PK_ADD_F32:
   case CanonicalOp::V_PK_MUL_F32:
   case CanonicalOp::V_PK_FMA_F32:
