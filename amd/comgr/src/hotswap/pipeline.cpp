@@ -132,7 +132,8 @@ int toolTimeoutSeconds() {
   return timeout;
 }
 
-int runTool(llvm::StringRef program, llvm::ArrayRef<llvm::StringRef> args) {
+int runTool(llvm::StringRef program, llvm::ArrayRef<llvm::StringRef> args,
+            std::string *errMsgOut = nullptr) {
   LLVM_DEBUG({
     llvm::dbgs() << "transpiler: Running:";
     for (auto &a : args) llvm::dbgs() << " " << a;
@@ -142,6 +143,8 @@ int runTool(llvm::StringRef program, llvm::ArrayRef<llvm::StringRef> args) {
   auto exeOrErr = llvm::sys::findProgramByName(program);
   if (!exeOrErr) {
     llvm::errs() << "transpiler: tool not found: " << program << "\n";
+    if (errMsgOut)
+      *errMsgOut = "tool not found: " + program.str();
     return -1;
   }
 
@@ -153,6 +156,8 @@ int runTool(llvm::StringRef program, llvm::ArrayRef<llvm::StringRef> args) {
   if (rc != 0)
     llvm::errs() << "transpiler: " << program << " failed (exit " << rc << ")"
                  << (errMsg.empty() ? "" : ": " + errMsg) << "\n";
+  if (errMsgOut)
+    *errMsgOut = errMsg;
   return rc;
 }
 
@@ -338,8 +343,12 @@ static bool raiseAndCompileKernel(const TextSection &text,
   std::string asmPath = tmpDir.filePath(fileStem + ".s");
 
   auto writeIrStart = timingStart(options.CollectTimings);
-  if (!writeFile(irPath, raised.IrText))
+  if (!writeFile(irPath, raised.IrText)) {
+    result.FailKernel = kernelName;
+    result.FailReason = "ir_write_failed";
+    result.FailDetail = "failed to write IR to " + irPath;
     return false;
+  }
 
   static const char *s_dumpInput = std::getenv("HSA_HOTSWAP_DUMP_INPUT");
   if (s_dumpInput && s_dumpInput[0] == '1' && !raised.DisasmText.empty())
@@ -350,11 +359,28 @@ static bool raiseAndCompileKernel(const TextSection &text,
   std::string llcBin = std::string(LLVM_TOOLS_DIR) + "/llc";
   std::string mcpuLlc = ("-mcpu=" + targetISA).str();
   auto llcStart = timingStart(options.CollectTimings);
-  if (runTool(llcBin, {llcBin, "-march=amdgcn", mcpuLlc, "-filetype=asm", "-o",
-                       asmPath, irPath}) != 0) {
+  // GCNSubtarget enables FeatureGFX1250B0 unconditionally (cl::init(true)),
+  // causing `.gfx1250_revision: B0` to appear in all code objects.  The ROCm
+  // HSA runtime rejects that metadata on non-gfx1250 hardware, yielding an
+  // unloadable HSACO.  Pass the flag as false for any non-gfx1250 target.
+  {
+    llvm::SmallVector<llvm::StringRef, 10> llcArgs = {
+        llcBin, "-march=amdgcn", mcpuLlc, "-filetype=asm", "-o", asmPath,
+        irPath};
+    if (!targetISA.starts_with("gfx1250"))
+      llcArgs.push_back("-amdgpu-gfx1250-b0-specific=false");
+    std::string llcErrMsg;
+    int llcRc = runTool(llcBin, llcArgs, &llcErrMsg);
     result.Timings.llcSeconds += timingElapsed(options.CollectTimings, llcStart);
-    llvm::errs() << "transpiler: llc failed for '" << kernelName << "'\n";
-    return false;
+    if (llcRc != 0) {
+      llvm::errs() << "transpiler: llc failed for '" << kernelName << "'\n";
+      result.FailKernel = kernelName;
+      result.FailReason = (llcRc == -2) ? "llc_timeout" : "llc_failed";
+      result.FailDetail = llcErrMsg.empty()
+                              ? ("llc exit " + std::to_string(llcRc))
+                              : llcErrMsg;
+      return false;
+    }
   }
   result.Timings.llcSeconds += timingElapsed(options.CollectTimings, llcStart);
 
@@ -377,12 +403,22 @@ static bool raiseAndCompileKernel(const TextSection &text,
   std::string mcBin = std::string(LLVM_TOOLS_DIR) + "/llvm-mc";
   std::string mcpuMc = ("-mcpu=" + targetISA).str();
   auto llvmMcStart = timingStart(options.CollectTimings);
-  if (runTool(mcBin, {mcBin, "-triple=amdgcn-amd-amdhsa", mcpuMc,
-                      "-filetype=obj", "-o", objPath, asmPath}) != 0) {
+  {
+    std::string mcErrMsg;
+    int mcRc = runTool(mcBin, {mcBin, "-triple=amdgcn-amd-amdhsa", mcpuMc,
+                               "-filetype=obj", "-o", objPath, asmPath},
+                       &mcErrMsg);
     result.Timings.llvmMcSeconds +=
         timingElapsed(options.CollectTimings, llvmMcStart);
-    llvm::errs() << "transpiler: llvm-mc failed for '" << kernelName << "'\n";
-    return false;
+    if (mcRc != 0) {
+      llvm::errs() << "transpiler: llvm-mc failed for '" << kernelName << "'\n";
+      result.FailKernel = kernelName;
+      result.FailReason = (mcRc == -2) ? "llvm_mc_timeout" : "llvm_mc_failed";
+      result.FailDetail = mcErrMsg.empty()
+                              ? ("llvm-mc exit " + std::to_string(mcRc))
+                              : mcErrMsg;
+      return false;
+    }
   }
   result.Timings.llvmMcSeconds +=
       timingElapsed(options.CollectTimings, llvmMcStart);
@@ -482,8 +518,11 @@ PipelineResult runPipeline(llvm::MemoryBufferRef codeObjectData,
     return finish();
 
   auto linkStart = timingStart(options.CollectTimings);
-  if (!linkObjects({objPath}, hsacoPath))
+  if (!linkObjects({objPath}, hsacoPath)) {
+    result.FailReason = "link_failed";
+    result.FailDetail = "ld.lld failed to link single-kernel HSACO";
     return finish();
+  }
   result.Timings.linkSeconds += timingElapsed(options.CollectTimings, linkStart);
 
   auto readHsacoStart = timingStart(options.CollectTimings);
@@ -589,8 +628,11 @@ PipelineResult runPipelineAllKernels(llvm::MemoryBufferRef codeObjectData,
 
   std::string hsacoPath = tmpDir.filePath("merged.Hsaco");
   auto linkStart = timingStart(options.CollectTimings);
-  if (!linkObjects(objPaths, hsacoPath))
+  if (!linkObjects(objPaths, hsacoPath)) {
+    result.FailReason = "link_failed";
+    result.FailDetail = "ld.lld failed to link merged HSACO";
     return finish();
+  }
   result.Timings.linkSeconds += timingElapsed(options.CollectTimings, linkStart);
 
   auto readHsacoStart = timingStart(options.CollectTimings);
