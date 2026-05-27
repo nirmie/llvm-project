@@ -350,11 +350,21 @@ static bool raiseAndCompileKernel(const TextSection &text,
   std::string llcBin = std::string(LLVM_TOOLS_DIR) + "/llc";
   std::string mcpuLlc = ("-mcpu=" + targetISA).str();
   auto llcStart = timingStart(options.CollectTimings);
-  if (runTool(llcBin, {llcBin, "-march=amdgcn", mcpuLlc, "-filetype=asm", "-o",
-                       asmPath, irPath}) != 0) {
-    result.Timings.llcSeconds += timingElapsed(options.CollectTimings, llcStart);
-    llvm::errs() << "transpiler: llc failed for '" << kernelName << "'\n";
-    return false;
+  // GCNSubtarget enables FeatureGFX1250B0 unconditionally (cl::init(true)),
+  // causing `.gfx1250_revision: B0` to appear in all code objects.  The ROCm
+  // HSA runtime rejects that metadata on non-gfx1250 hardware, yielding an
+  // unloadable HSACO.  Pass the flag as false for any non-gfx1250 target.
+  {
+    llvm::SmallVector<llvm::StringRef, 10> llcArgs = {
+        llcBin, "-march=amdgcn", mcpuLlc, "-filetype=asm", "-o", asmPath,
+        irPath};
+    if (!targetISA.starts_with("gfx1250"))
+      llcArgs.push_back("-amdgpu-gfx1250-b0-specific=false");
+    if (runTool(llcBin, llcArgs) != 0) {
+      result.Timings.llcSeconds += timingElapsed(options.CollectTimings, llcStart);
+      llvm::errs() << "transpiler: llc failed for '" << kernelName << "'\n";
+      return false;
+    }
   }
   result.Timings.llcSeconds += timingElapsed(options.CollectTimings, llcStart);
 
