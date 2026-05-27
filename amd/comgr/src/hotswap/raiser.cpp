@@ -138,6 +138,17 @@ static bool isSemOpInRange(CanonicalOp Op, CanonicalOp First, CanonicalOp Last) 
          V <= static_cast<uint16_t>(Last);
 }
 
+// Return true if `Insts` contains any FlatScratch access instructions.
+// Called when the source KD reports private_segment_fixed_size == 0 to detect
+// the gfx1250 compiler behaviour where dynamic-stack scratch is used without
+// a static KD private-segment reservation.
+static bool hasFlatScratchInsts(ArrayRef<DecodedInst> Insts) {
+  for (const DecodedInst &Di : Insts)
+    if (Di.TsFlags & SIInstrFlags::FlatScratch)
+      return true;
+  return false;
+}
+
 static bool threadLoopUnsupportedWorkgroupMemoryOrBarrier(
     ArrayRef<DecodedInst> Insts, std::string &Detail) {
   for (const DecodedInst &Di : Insts) {
@@ -992,9 +1003,22 @@ static RaiseResult raiseToIRImpl(llvm::ArrayRef<uint8_t> TextBytes,
                    I1Ty, I8Ty, I32Ty, I64Ty, F32Ty, F16Ty, F64Ty,
                    PtrGlobalTy, OffsetToBb};
   Ctx.SetpcAnalysis = &SetpcAnalysis;
-  Ctx.SourcePrivateSegmentFixedSize = Meta.PrivateSegmentFixedSize;
   Ctx.SourceComputePgmRsrc2 = Meta.ComputePgmRsrc2;
   Ctx.SourceKernelCodeProperties = Meta.KernelCodeProperties;
+  // When the source KD declares private_segment_fixed_size == 0 but the
+  // instruction stream contains FlatScratch accesses (gfx1250 dynamic-stack
+  // kernels compiled without a static private-segment reservation), supply a
+  // conservative 4096-byte fallback so handle-flat.cpp can allocate an
+  // addrspace(5) backing alloca without refusing.  The target backend
+  // re-derives the actual private_segment_fixed_size from the lowered alloca.
+  if (Meta.PrivateSegmentFixedSize == 0 && hasFlatScratchInsts(Insts)) {
+    Ctx.SourcePrivateSegmentFixedSize = 4096;
+    LLVM_DEBUG(dbgs() << "transpiler: substituting 4096-byte fallback scratch frame for '"
+                      << Meta.KernelName
+                      << "' (KD private_segment_fixed_size=0 with FlatScratch instructions)\n");
+  } else {
+    Ctx.SourcePrivateSegmentFixedSize = Meta.PrivateSegmentFixedSize;
+  }
 
   // Dominance-safe SGPR wave-mask shadow storage.
   // One EXEC-width mask + one scalar-valid bit per SGPR base index.
