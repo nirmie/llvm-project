@@ -1210,6 +1210,11 @@ static RaiseResult raiseToIRImpl(llvm::ArrayRef<uint8_t> TextBytes,
     // when the same-target intrinsic-emit path lands.
     else if (Flags & SIInstrFlags::TENSOR_CNT)
       Hr = handleVIMAGE(Ctx, Di, Op);
+    // V_ILLEGAL (encoding 0x00000000) is an InstSI with no VOP format bits,
+    // so it falls through all flag-based dispatch arms. Route explicitly to
+    // handleVALU which already emits llvm.trap + unreachable for this CanonOp.
+    else if (Di.CanonOp == CanonicalOp::V_ILLEGAL)
+      Hr = handleVALU(Ctx, Di, Op);
 
     // Operand-read paths (`readOp32` / `readOp64`) cannot bail mid-
     // handler, so they record any unsupported-register failures into
