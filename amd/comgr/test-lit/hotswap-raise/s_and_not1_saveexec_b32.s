@@ -7,6 +7,7 @@
 ; Also covers Bug-Id: 2026-05-26T13-18-35Z_qwen2.5-7b-instruct-006
 ; Also covers Bug-Id: 2026-05-26T14-14-07Z_qwen2.5-7b-instruct-006
 ; Also covers Bug-Id: 2026-05-26T15-20-57Z_qwen2.5-7b-instruct-006
+; Also covers Bug-Id: 2026-05-27T00-59-17Z_qwen2.5-7b-instruct-002
 ;
 ; `s_and_not1_saveexec_b32` (GFX11/GFX12/GFX13 assembly rename for
 ; S_ANDN2_SAVEEXEC_B32) was reported as UnsupportedOpcode in 96 kernels across
