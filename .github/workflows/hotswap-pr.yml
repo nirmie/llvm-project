@@ -1,0 +1,68 @@
+name: Hotswap PR CI
+
+on:
+  pull_request:
+  push:
+    branches: [hotswap]
+  workflow_dispatch:
+    inputs:
+      force_clean:
+        description: "Wipe /persist/build before configuring"
+        type: boolean
+        default: false
+
+concurrency:
+  group: hotswap-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lit:
+    runs-on: [self-hosted, linux, rocm, gfx950, hotswap]
+    container:
+      image: rocm/pytorch:latest
+      # Lit tests for hotswap don't execute on the GPU, so no /dev/kfd or
+      # /dev/dri mounts are needed for this workflow. The nightly model run
+      # (deferred) will need them; on this host only GPU index >=3 is usable
+      # (gpu0/1 dead, gpu2 in use by other workloads). Constrain with
+      # HIP_VISIBLE_DEVICES=3 (or higher) when that workflow lands.
+      options: >-
+        -v /home/nisenthi/hotswap/test/hotswap-ci-persist/build:/persist/build
+        -v /home/nisenthi/hotswap/test/hotswap-ci-persist/ccache:/persist/ccache
+      env:
+        CCACHE_DIR: /persist/ccache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ninja-build ccache cmake
+
+      - name: Force clean (manual trigger only)
+        if: ${{ inputs.force_clean == true }}
+        run: rm -rf /persist/build/*
+
+      - name: Stabilize source path
+        # ninja stores absolute paths in its depfiles; $GITHUB_WORKSPACE varies
+        # per job, so we point cmake at a stable symlink instead. This lets the
+        # persistent /persist/build tree stay valid across runs.
+        run: ln -sfn "$GITHUB_WORKSPACE" /persist/src
+
+      - name: Configure
+        run: |
+          cmake -G Ninja -S /persist/src/llvm -B /persist/build \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
+            -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_CCACHE_BUILD=ON \
+            -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON
+
+      - name: Build + lit
+        run: ninja -C /persist/build check-comgr
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s
