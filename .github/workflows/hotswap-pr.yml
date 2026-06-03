@@ -20,49 +20,45 @@ permissions:
 
 jobs:
   lit:
+    # NOTE: deliberately no top-level `container:` here. The GHA runner creates
+    # a `github_network_*` bridge for each container-job and Docker allocates
+    # it the next free /16 in default-address-pools, which on this shared host
+    # collides with a developer laptop subnet (172.19.0.0/16) and black-holes
+    # SSH. We can't restart the Docker daemon (other users have containers
+    # running) so we run docker manually with --network host below — no new
+    # bridge gets created.
     runs-on: [self-hosted, linux, rocm, gfx950, hotswap]
-    container:
-      image: rocm/pytorch:latest
-      # Lit tests for hotswap don't execute on the GPU, so no /dev/kfd or
-      # /dev/dri mounts are needed for this workflow. The nightly model run
-      # (deferred) will need them; on this host only GPU index >=3 is usable
-      # (gpu0/1 dead, gpu2 in use by other workloads). Constrain with
-      # HIP_VISIBLE_DEVICES=3 (or higher) when that workflow lands.
-      options: >-
-        -v /home/nisenthi/hotswap/test/hotswap-ci-persist/build:/persist/build
-        -v /home/nisenthi/hotswap/test/hotswap-ci-persist/ccache:/persist/ccache
-      env:
-        CCACHE_DIR: /persist/ccache
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build deps
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ninja-build ccache cmake
-
       - name: Force clean (manual trigger only)
         if: ${{ inputs.force_clean == true }}
-        run: rm -rf /persist/build/*
+        run: rm -rf /home/nisenthi/hotswap/test/hotswap-ci-persist/build/*
 
-      - name: Stabilize source path
-        # ninja stores absolute paths in its depfiles; $GITHUB_WORKSPACE varies
-        # per job, so we point cmake at a stable symlink instead. This lets the
-        # persistent /persist/build tree stay valid across runs.
-        run: ln -sfn "$GITHUB_WORKSPACE" /persist/src
-
-      - name: Configure
+      - name: Build + lit (in rocm/pytorch container, host network)
         run: |
-          cmake -G Ninja -S /persist/src/llvm -B /persist/build \
-            -DLLVM_ENABLE_PROJECTS="clang;lld" \
-            -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_CCACHE_BUILD=ON \
-            -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON
-
-      - name: Build + lit
-        run: ninja -C /persist/build check-comgr
-
-      - name: ccache stats
-        if: always()
-        run: ccache -s
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE":/src:ro \
+            -v /home/nisenthi/hotswap/test/hotswap-ci-persist/build:/persist/build \
+            -v /home/nisenthi/hotswap/test/hotswap-ci-persist/ccache:/persist/ccache \
+            -e CCACHE_DIR=/persist/ccache \
+            -w /persist/build \
+            rocm/pytorch:latest \
+            bash -c '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends ninja-build ccache cmake
+              # ninja stores absolute paths in depfiles; keep /persist/src stable
+              # across runs (where /src varies with the GHA workspace path).
+              ln -sfn /src /persist/src
+              cmake -G Ninja -S /persist/src/llvm -B /persist/build \
+                -DLLVM_ENABLE_PROJECTS="clang;lld" \
+                -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DLLVM_CCACHE_BUILD=ON \
+                -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON
+              # -j 32 keeps load + I/O polite on the shared 256-core host.
+              ninja -j 32 -C /persist/build check-comgr
+              ccache -s
+            '

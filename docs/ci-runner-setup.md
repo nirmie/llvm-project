@@ -132,6 +132,23 @@ When real fleet machines are available, run a long-lived runner per host
 (`self-hosted,linux,rocm,gfx950,hotswap`). The workflow needs no change —
 labels are the gate.
 
+## Why the workflow uses `docker run --network host` (not the `container:` keyword)
+
+GitHub Actions' `jobs.<id>.container:` keyword causes the runner to create a
+dedicated bridge network (`github_network_*`) per job, and Docker allocates
+that bridge the next free `/16` from its `default-address-pools`. On this
+shared host that allocator pattern landed on `172.19.0.0/16`, which collided
+with a developer-laptop subnet and black-holed direct SSH for an entire
+afternoon. We can't fix this via `/etc/docker/daemon.json` without
+restarting the Docker daemon, which would disrupt other users' running
+containers.
+
+Workaround: the workflow runs `docker run --rm --network host ...` from a
+step instead of using the `container:` keyword. Host networking means no
+new bridge is created — no `172.x` allocation. Trade-off: the container
+sees all of the host's network interfaces, but the job only pulls/builds
+and doesn't expose ports, so this is fine.
+
 ## Coexistence with the model-test harness
 
 The end-to-end model-test harness (`harsh-amd/rocm-hotswap-testing`) runs
