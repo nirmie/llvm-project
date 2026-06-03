@@ -63,12 +63,14 @@ cd /home/nisenthi/hotswap/test/actions-runner
   --labels self-hosted,linux,rocm,gfx950,hotswap \
   --work _work \
   --unattended \
-  --ephemeral
+  --ephemeral \
+  --disableupdate
 ```
 
-`--ephemeral` means the runner auto-deregisters after one job — combined with
-`./run.sh --once` below, this gives a clean "single test run then gone"
-flow with no persistent daemon.
+`--ephemeral` means the runner auto-deregisters after one job. `--disableupdate`
+prevents the runner from auto-upgrading itself mid-startup; without it, an
+update cycle can invalidate the registration before the first job is picked
+up ("Runner not found" error).
 
 If the runner tarball is missing, download it:
 
