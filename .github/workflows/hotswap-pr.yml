@@ -53,33 +53,32 @@ jobs:
               # ninja stores absolute paths in depfiles; keep /persist/src stable
               # across runs (where /src varies with the GHA workspace path).
               ln -sfn /src /persist/src
-              mkdir -p /persist/build/llvm /persist/build/device-libs /persist/build/comgr
 
-              # Stage 1: LLVM + clang + lld. comgr/device-libs are standalone
-              # CMake projects (not LLVM_EXTERNAL_PROJECTS), built against
-              # this LLVM build dir via CMAKE_PREFIX_PATH.
-              cmake -G Ninja -S /persist/src/llvm -B /persist/build/llvm \
+              # One-time wipe if the persistent dir still holds the legacy
+              # three-stage layout from earlier CI iterations.
+              if [ -d /persist/build/llvm ] || [ -d /persist/build/device-libs ] || [ -d /persist/build/comgr ]; then
+                echo "Detected stale three-stage build layout; wiping for new unified layout."
+                rm -rf /persist/build/*
+              fi
+
+              # comgr is added as an LLVM_EXTERNAL_PROJECT so it lands inside
+              # the LLVM build tree (tools/comgr) and libamd_comgr.so ends up
+              # in /persist/build/lib alongside the LLVM libs. This matches
+              # the local dev build and means lit-built test binaries pick up
+              # OUR libamd_comgr.so naturally (instead of /opt/rocm/lib).
+              # Device-libs bitcode is consumed at runtime from /opt/rocm in
+              # the container; we do not build our own.
+              cmake -G Ninja -S /persist/src/llvm -B /persist/build \
                 -DLLVM_ENABLE_PROJECTS="clang;lld" \
+                -DLLVM_EXTERNAL_PROJECTS="amd_comgr" \
+                -DLLVM_EXTERNAL_AMD_COMGR_SOURCE_DIR=/persist/src/amd/comgr \
                 -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DLLVM_CCACHE_BUILD=ON
-              # -j 32 keeps load + I/O polite on the shared 256-core host.
-              # Build all of LLVM (not a subset target) so comgr finds every
-              # library it links against via find_package(LLVM/Clang/LLD).
-              ninja -j 32 -C /persist/build/llvm
-
-              # Stage 2: device-libs (needed for comgr).
-              cmake -G Ninja -S /persist/src/amd/device-libs -B /persist/build/device-libs \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_PREFIX_PATH=/persist/build/llvm
-              ninja -j 32 -C /persist/build/device-libs
-
-              # Stage 3: comgr — owns COMGR_ENABLE_HOTSWAP_TRANSPILE and check-comgr.
-              cmake -G Ninja -S /persist/src/amd/comgr -B /persist/build/comgr \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_PREFIX_PATH="/persist/build/llvm;/persist/build/device-libs" \
+                -DLLVM_CCACHE_BUILD=ON \
                 -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON
-              ninja -j 32 -C /persist/build/comgr check-comgr
+
+              # -j 32 keeps load + I/O polite on the shared 256-core host.
+              ninja -j 32 -C /persist/build check-comgr
 
               ccache -s
             '
