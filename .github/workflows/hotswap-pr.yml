@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --network host \
-            -v "$GITHUB_WORKSPACE":/src:ro \
+            -v "$GITHUB_WORKSPACE":/persist/src:ro \
             -v /home/nisenthi/hotswap/test/hotswap-ci-persist/build:/persist/build \
             -v /home/nisenthi/hotswap/test/hotswap-ci-persist/ccache:/persist/ccache \
             -e CCACHE_DIR=/persist/ccache \
@@ -50,24 +50,18 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends ninja-build ccache cmake
 
-              # Container runs as root; /src is bind-mounted from the host
-              # ($GITHUB_WORKSPACE, uid 1000), so git refuses to operate on
-              # it without an explicit safe.directory exception. comgr reads
-              # git commit/branch into COMGR_GIT_COMMIT/COMGR_GIT_BRANCH at
-              # configure time; without this they end up "not-available".
-              git config --global --add safe.directory /src
+              # Container runs as root; /persist/src is bind-mounted from the
+              # host ($GITHUB_WORKSPACE, uid 1000), so git refuses to operate
+              # on it without an explicit safe.directory exception. comgr
+              # reads git commit/branch into COMGR_GIT_COMMIT/COMGR_GIT_BRANCH
+              # at configure time; without this they end up "not-available".
               git config --global --add safe.directory /persist/src
-
-              # ninja stores absolute paths in depfiles; keep /persist/src stable
-              # across runs (where /src varies with the GHA workspace path).
-              ln -sfn /src /persist/src
 
               # Always wipe a stale CMakeCache.txt: this workflow has gone
               # through several incompatible layouts during bring-up and a
-              # stale cache makes cmake fail with confusing errors like
-              # "source directory does not exist". ccache (separate dir)
-              # still amortizes individual cc1 invocations, so a fresh
-              # configure stays fast.
+              # stale cache makes cmake fail with confusing errors. ccache
+              # (separate dir) still amortizes individual cc1 invocations,
+              # so a fresh configure stays fast.
               rm -rf /persist/build/*
 
               # ld.lld lives at /opt/rocm/llvm/bin/ in this container and is
