@@ -84,15 +84,26 @@ jobs:
               # device-libs in-tree, configure fails at
               # amd/comgr/cmake/DeviceLibs.cmake:151 "Could not find list of
               # device libraries".
+              # device-libs is listed FIRST so its targets register the
+              # AMD_DEVICE_LIBS global property before comgr's DeviceLibs.cmake
+              # reads it.
+              #
+              # CMAKE_DISABLE_FIND_PACKAGE_hip stops comgr/test/CMakeLists.txt
+              # from trying find_package(hip), which transitively loads
+              # /opt/rocm/lib/cmake/AMDDeviceLibsConfig.cmake and collides
+              # with our in-tree device-libs targets. The find_package(hip)
+              # is a leftover (not referenced anywhere in test/CMakeLists.txt)
+              # so disabling it is safe.
               cmake -G Ninja -S /persist/src/llvm -B /persist/build \
                 -DLLVM_ENABLE_PROJECTS="clang;lld" \
-                -DLLVM_EXTERNAL_PROJECTS="amd_comgr;rocm-device-libs" \
-                -DLLVM_EXTERNAL_AMD_COMGR_SOURCE_DIR=/persist/src/amd/comgr \
+                -DLLVM_EXTERNAL_PROJECTS="rocm-device-libs;amd_comgr" \
                 -DLLVM_EXTERNAL_ROCM_DEVICE_LIBS_SOURCE_DIR=/persist/src/amd/device-libs \
+                -DLLVM_EXTERNAL_AMD_COMGR_SOURCE_DIR=/persist/src/amd/comgr \
                 -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DLLVM_CCACHE_BUILD=ON \
-                -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON
+                -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON \
+                -DCMAKE_DISABLE_FIND_PACKAGE_hip=ON
 
               # -j 32 keeps load + I/O polite on the shared 256-core host.
               ninja -j 32 -C /persist/build check-comgr
