@@ -69,22 +69,30 @@ jobs:
                 rm -rf /persist/build/*
               fi
 
-              # comgr is added as an LLVM_EXTERNAL_PROJECT so it lands inside
-              # the LLVM build tree (tools/comgr) and libamd_comgr.so ends up
-              # in /persist/build/lib alongside the LLVM libs. This matches
-              # the local dev build and means lit-built test binaries pick up
-              # OUR libamd_comgr.so naturally (instead of /opt/rocm/lib).
-              # Device-libs bitcode is consumed at runtime from /opt/rocm in
-              # the container; we do not build our own.
+              # comgr + device-libs are added as LLVM_EXTERNAL_PROJECTS so they
+              # land inside the LLVM build tree (tools/comgr, tools/rocm-device-libs)
+              # and libamd_comgr.so ends up in /persist/build/lib alongside the LLVM
+              # libs. This matches the local dev build and means lit-built test
+              # binaries pick up OUR libamd_comgr.so naturally (instead of
+              # /opt/rocm/lib).
+              #
+              # device-libs is required at *configure* time: in
+              # LLVM_EXTERNAL_PROJECTS mode, comgr/CMakeLists.txt skips its
+              # standalone find_package(AMDDeviceLibs) and instead reads the
+              # global AMD_DEVICE_LIBS property that device-libs populates when
+              # built in-tree (amd/device-libs/cmake/OCL.cmake:176). Without
+              # device-libs in-tree, configure fails at
+              # amd/comgr/cmake/DeviceLibs.cmake:151 "Could not find list of
+              # device libraries".
               cmake -G Ninja -S /persist/src/llvm -B /persist/build \
                 -DLLVM_ENABLE_PROJECTS="clang;lld" \
-                -DLLVM_EXTERNAL_PROJECTS="amd_comgr" \
+                -DLLVM_EXTERNAL_PROJECTS="amd_comgr;rocm-device-libs" \
                 -DLLVM_EXTERNAL_AMD_COMGR_SOURCE_DIR=/persist/src/amd/comgr \
+                -DLLVM_EXTERNAL_ROCM_DEVICE_LIBS_SOURCE_DIR=/persist/src/amd/device-libs \
                 -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DLLVM_CCACHE_BUILD=ON \
-                -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON \
-                -DAMDDeviceLibs_DIR=/opt/rocm/lib/cmake/AMDDeviceLibs
+                -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON
 
               # -j 32 keeps load + I/O polite on the shared 256-core host.
               ninja -j 32 -C /persist/build check-comgr
