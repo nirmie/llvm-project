@@ -69,40 +69,43 @@ jobs:
                 rm -rf /persist/build/*
               fi
 
-              # comgr + device-libs are added as LLVM_EXTERNAL_PROJECTS so they
-              # land inside the LLVM build tree (tools/comgr, tools/rocm-device-libs)
-              # and libamd_comgr.so ends up in /persist/build/lib alongside the LLVM
-              # libs. This matches the local dev build and means lit-built test
-              # binaries pick up OUR libamd_comgr.so naturally (instead of
-              # /opt/rocm/lib).
+              # ld.lld lives at /opt/rocm/llvm/bin/ in this container and is
+              # not on the default PATH; LLVM_USE_LINKER=lld needs it findable
+              # by the host gcc before LLVM has built its own lld.
+              export PATH=/opt/rocm/llvm/bin:$PATH
+
+              # Build invocation mirrors the documented one at
+              # rocm-hotswap-testing/docs/gpt-oss-e2e.md:
+              #   * comgr + device-libs live inside the LLVM build tree as
+              #     LLVM_EXTERNAL_PROJECTS, so libamd_comgr.so ends up in
+              #     /persist/build/lib next to LLVM libs and lit-built test
+              #     binaries pick OUR libamd_comgr.so by normal build-tree
+              #     lookup (not /opt/rocm/lib).
+              #   * device-libs is listed FIRST so its targets register the
+              #     AMD_DEVICE_LIBS global property before comgr's
+              #     DeviceLibs.cmake (line 151) reads it.
+              #   * HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR is baked into the comgr
+              #     build; raise_cli shells out to llc / llvm-mc / ld.lld
+              #     using this dir.
+              #   * LLVM_USE_LINKER=lld speeds up linking.
               #
-              # device-libs is required at *configure* time: in
-              # LLVM_EXTERNAL_PROJECTS mode, comgr/CMakeLists.txt skips its
-              # standalone find_package(AMDDeviceLibs) and instead reads the
-              # global AMD_DEVICE_LIBS property that device-libs populates when
-              # built in-tree (amd/device-libs/cmake/OCL.cmake:176). Without
-              # device-libs in-tree, configure fails at
-              # amd/comgr/cmake/DeviceLibs.cmake:151 "Could not find list of
-              # device libraries".
-              # device-libs is listed FIRST so its targets register the
-              # AMD_DEVICE_LIBS global property before comgr's DeviceLibs.cmake
-              # reads it.
-              #
-              # CMAKE_DISABLE_FIND_PACKAGE_hip stops comgr/test/CMakeLists.txt
-              # from trying find_package(hip), which transitively loads
-              # /opt/rocm/lib/cmake/AMDDeviceLibsConfig.cmake and collides
-              # with our in-tree device-libs targets. The find_package(hip)
-              # is a leftover (not referenced anywhere in test/CMakeLists.txt)
-              # so disabling it is safe.
+              # CMAKE_DISABLE_FIND_PACKAGE_hip is an addition over the docs:
+              # comgr/test/CMakeLists.txt:214 calls find_package(hip), which
+              # transitively loads /opt/rocm/lib/cmake/AMDDeviceLibsConfig.cmake
+              # and collides with our in-tree device-libs targets. The
+              # find_package(hip) result is unused in test/CMakeLists.txt so
+              # disabling is safe.
               cmake -G Ninja -S /persist/src/llvm -B /persist/build \
-                -DLLVM_ENABLE_PROJECTS="clang;lld" \
-                -DLLVM_EXTERNAL_PROJECTS="rocm-device-libs;amd_comgr" \
-                -DLLVM_EXTERNAL_ROCM_DEVICE_LIBS_SOURCE_DIR=/persist/src/amd/device-libs \
-                -DLLVM_EXTERNAL_AMD_COMGR_SOURCE_DIR=/persist/src/amd/comgr \
-                -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DLLVM_CCACHE_BUILD=ON \
+                -DLLVM_ENABLE_PROJECTS="clang;lld" \
+                -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
+                -DLLVM_EXTERNAL_PROJECTS="device-libs;comgr" \
+                -DLLVM_EXTERNAL_DEVICE_LIBS_SOURCE_DIR=/persist/src/amd/device-libs \
+                -DLLVM_EXTERNAL_COMGR_SOURCE_DIR=/persist/src/amd/comgr \
                 -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON \
+                -DHOTSWAP_TRANSPILER_LLVM_TOOLS_DIR=/persist/build/bin \
+                -DLLVM_USE_LINKER=lld \
+                -DLLVM_CCACHE_BUILD=ON \
                 -DCMAKE_DISABLE_FIND_PACKAGE_hip=ON
 
               # -j 32 keeps load + I/O polite on the shared 256-core host.
