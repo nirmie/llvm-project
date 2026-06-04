@@ -38,6 +38,8 @@ jobs:
       - name: Build + lit (in rocm/pytorch container, host network)
         run: |
           set -euo pipefail
+          echo "=== HOST: GITHUB_WORKSPACE=$GITHUB_WORKSPACE ==="
+          ls "$GITHUB_WORKSPACE"/llvm/CMakeLists.txt
           docker run --rm --network host \
             -v "$GITHUB_WORKSPACE":/persist/src:ro \
             -v /home/nisenthi/hotswap/test/hotswap-ci-persist/build:/persist/build \
@@ -46,7 +48,16 @@ jobs:
             -w /persist/build \
             rocm/pytorch:latest \
             bash -c '
-              set -euo pipefail
+              set -euxo pipefail
+              echo "=== CONTAINER: /persist contents ==="
+              ls -la /persist
+              echo "=== CONTAINER: /persist/src contents ==="
+              ls /persist/src | head -20
+              echo "=== CONTAINER: probe key files ==="
+              ls /persist/src/llvm/CMakeLists.txt
+              ls /persist/src/amd/comgr/CMakeLists.txt
+              ls /persist/src/amd/device-libs/CMakeLists.txt
+              echo "=== diagnostic done ==="
               apt-get update
               apt-get install -y --no-install-recommends ninja-build ccache cmake
 
