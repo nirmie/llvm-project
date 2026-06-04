@@ -46,12 +46,7 @@ jobs:
             -w /persist/build \
             rocm/pytorch:latest \
             bash -c '
-              set -euxo pipefail
-              echo "=== diagnostic: container view ==="
-              ls -la /persist /src | head -20
-              ls /src/llvm/CMakeLists.txt
-              echo "=== /src is bind-mounted from GHA workspace; populated by actions/checkout ==="
-
+              set -euo pipefail
               apt-get update
               apt-get install -y --no-install-recommends ninja-build ccache cmake
 
@@ -66,17 +61,14 @@ jobs:
               # ninja stores absolute paths in depfiles; keep /persist/src stable
               # across runs (where /src varies with the GHA workspace path).
               ln -sfn /src /persist/src
-              echo "=== after symlink ==="
-              ls -la /persist
-              ls /persist/src/llvm/CMakeLists.txt
-              echo "=== diagnostic done ==="
 
-              # One-time wipe if the persistent dir still holds the legacy
-              # three-stage layout from earlier CI iterations.
-              if [ -d /persist/build/llvm ] || [ -d /persist/build/device-libs ] || [ -d /persist/build/comgr ]; then
-                echo "Detected stale three-stage build layout; wiping for new unified layout."
-                rm -rf /persist/build/*
-              fi
+              # Always wipe a stale CMakeCache.txt: this workflow has gone
+              # through several incompatible layouts during bring-up and a
+              # stale cache makes cmake fail with confusing errors like
+              # "source directory does not exist". ccache (separate dir)
+              # still amortizes individual cc1 invocations, so a fresh
+              # configure stays fast.
+              rm -rf /persist/build/*
 
               # ld.lld lives at /opt/rocm/llvm/bin/ in this container and is
               # not on the default PATH; LLVM_USE_LINKER=lld needs it findable
