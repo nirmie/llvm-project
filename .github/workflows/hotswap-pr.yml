@@ -50,6 +50,14 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends ninja-build ccache cmake
 
+              # Container runs as root; /src is bind-mounted from the host
+              # ($GITHUB_WORKSPACE, uid 1000), so git refuses to operate on
+              # it without an explicit safe.directory exception. comgr reads
+              # git commit/branch into COMGR_GIT_COMMIT/COMGR_GIT_BRANCH at
+              # configure time; without this they end up "not-available".
+              git config --global --add safe.directory /src
+              git config --global --add safe.directory /persist/src
+
               # ninja stores absolute paths in depfiles; keep /persist/src stable
               # across runs (where /src varies with the GHA workspace path).
               ln -sfn /src /persist/src
@@ -75,7 +83,8 @@ jobs:
                 -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DLLVM_CCACHE_BUILD=ON \
-                -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON
+                -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON \
+                -DAMDDeviceLibs_DIR=/opt/rocm/lib/cmake/AMDDeviceLibs
 
               # -j 32 keeps load + I/O polite on the shared 256-core host.
               ninja -j 32 -C /persist/build check-comgr
