@@ -46,7 +46,12 @@ jobs:
             -w /persist/build \
             rocm/pytorch:latest \
             bash -c '
-              set -euo pipefail
+              set -euxo pipefail
+              echo "=== diagnostic: container view ==="
+              ls -la /persist /src | head -20
+              ls /src/llvm/CMakeLists.txt
+              echo "=== /src is bind-mounted from GHA workspace; populated by actions/checkout ==="
+
               apt-get update
               apt-get install -y --no-install-recommends ninja-build ccache cmake
 
@@ -61,6 +66,10 @@ jobs:
               # ninja stores absolute paths in depfiles; keep /persist/src stable
               # across runs (where /src varies with the GHA workspace path).
               ln -sfn /src /persist/src
+              echo "=== after symlink ==="
+              ls -la /persist
+              ls /persist/src/llvm/CMakeLists.txt
+              echo "=== diagnostic done ==="
 
               # One-time wipe if the persistent dir still holds the legacy
               # three-stage layout from earlier CI iterations.
