@@ -115,7 +115,61 @@ jobs:
                 -DCMAKE_DISABLE_FIND_PACKAGE_hip=ON
 
               # -j 32 keeps load + I/O polite on the shared 256-core host.
-              ninja -j 32 -C /persist/build check-comgr
+              # tee output so the summarize-lit step can parse it on the host
+              # (/persist/build is bind-mounted, so the file is visible there).
+              # pipefail ensures the docker step still fails when ninja fails.
+              ninja -j 32 -C /persist/build check-comgr 2>&1 \
+                | tee /persist/build/lit-output.log
 
               ccache -s
             '
+
+      - name: Summarize lit results
+        if: always()
+        run: |
+          set -euo pipefail
+          LOG=/home/nisenthi/hotswap/test/hotswap-ci-persist/build/lit-output.log
+          if [ ! -f "$LOG" ]; then
+            echo "no lit log at $LOG (ninja likely failed before lit ran)" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # strip ANSI color escapes the lit/FileCheck output is full of
+          NOCOLOR=$(mktemp)
+          sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$LOG" > "$NOCOLOR"
+
+          {
+            echo "## Lit test summary"
+            echo
+            echo '```'
+            grep -E \
+              "Total Discovered|^  Passed|^  Failed|^  Unsupported|^  Expectedly|^  Unresolved|^Testing Time" \
+              "$NOCOLOR" | tail -10 || echo "(no summary block found)"
+            echo '```'
+
+            if grep -q "^Failed Tests" "$NOCOLOR"; then
+              FAILED_LIST=$(sed -n '/^Failed Tests/,/^Testing Time:/p' "$NOCOLOR" \
+                            | grep -E "^\s+Comgr :: " \
+                            | sed -E 's/^\s+Comgr :: //')
+
+              echo
+              echo "### Failures grouped by suite"
+              echo
+              echo '| Suite | Count |'
+              echo '|-------|-------|'
+              echo "$FAILED_LIST" \
+                | awk -F/ '{ print (NF>1 ? $1 : "(root)") }' \
+                | sort | uniq -c | sort -rn \
+                | awk '{ printf "| %s | %d |\n", $2, $1 }'
+
+              echo
+              echo "<details><summary>All failed tests</summary>"
+              echo
+              echo '```'
+              echo "$FAILED_LIST"
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
