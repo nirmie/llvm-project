@@ -97,6 +97,14 @@ if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
     target_link_options(raise_cli PRIVATE -Wl,--gc-sections)
   endif()
   add_dependencies(check-comgr raise_cli)
+
+  # raise_cli shells out to llvm-mc / llc / ld.lld / llvm-objdump at
+  # runtime via HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR. These aren't pulled
+  # in by amd_comgr or raise_cli link deps, so without an explicit
+  # build dep here `ninja check-comgr` runs the lit suite against a
+  # build tree that's missing them and every hotswap-raise test fails
+  # with "No such file or directory".
+  add_dependencies(check-comgr llvm-mc llc ld.lld llvm-objdump)
 endif()
 
 add_dependencies(check-comgr test-lit)
