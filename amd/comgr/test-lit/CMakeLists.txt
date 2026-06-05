@@ -117,14 +117,25 @@ if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
   # and re-evaluates them at deferred-call time, so we can't loop
   # over a variable -- the loop var is out of scope when the deferred
   # call fires. Spell each tool out as a literal argument instead.
+  # Canonical list mirrors the substitutions in lit.cfg.py
+  # (config.llvm_tools_dir + tool). `lld` is here instead of `ld.lld`
+  # because the latter is registered via add_lld_symlink which does
+  # not appear to expose a CMake target by that name -- building
+  # `lld` produces the ld.lld symlink as a side effect.
   cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
     CALL _comgr_add_check_comgr_tool_dep llvm-mc)
   cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
     CALL _comgr_add_check_comgr_tool_dep llc)
   cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
-    CALL _comgr_add_check_comgr_tool_dep ld.lld)
+    CALL _comgr_add_check_comgr_tool_dep lld)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep llvm-dis)
   cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
     CALL _comgr_add_check_comgr_tool_dep llvm-objdump)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep llvm-readelf)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep clang)
   cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
     CALL _comgr_add_check_comgr_tool_dep FileCheck)
   cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
