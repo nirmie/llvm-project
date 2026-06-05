@@ -158,8 +158,25 @@ jobs:
               echo
               echo '| Suite | Count |'
               echo '|-------|-------|'
+              # Bucket key: subdir if the path has one (hotswap-raise/foo.s
+              # -> hotswap-raise), otherwise the filename stem split on the
+              # first '.' AND truncated at the first '-' suffix segment
+              # past the family prefix (hotswap-wmma-hazard.s ->
+              # hotswap-wmma, hotswap-trampoline-ds-multi.s ->
+              # hotswap-trampoline). Keeps the hotswap-* families visible
+              # instead of collapsing them all under "(root)".
               echo "$FAILED_LIST" \
-                | awk -F/ '{ print (NF>1 ? $1 : "(root)") }' \
+                | awk -F/ '
+                    NF > 1 { print $1; next }
+                    {
+                      stem = $1
+                      sub(/\..*$/, "", stem)        # strip extension
+                      n = split(stem, parts, "-")
+                      if (n >= 2)
+                        print parts[1] "-" parts[2] # e.g. hotswap-wmma
+                      else
+                        print stem
+                    }' \
                 | sort | uniq -c | sort -rn \
                 | awk '{ printf "| %s | %d |\n", $2, $1 }'
 
