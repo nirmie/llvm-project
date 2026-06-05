@@ -98,33 +98,47 @@ if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
   endif()
   add_dependencies(check-comgr raise_cli)
 
-  # raise_cli shells out to llvm-mc / llc / ld.lld / llvm-objdump at
-  # runtime via HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR. These aren't pulled
-  # in by amd_comgr or raise_cli link deps, so without an explicit
-  # build dep here `ninja check-comgr` runs the lit suite against a
-  # build tree that's missing them and every hotswap-raise test fails
-  # with "No such file or directory".
+  # The hotswap-raise lit fixtures shell out to llvm-mc / llc / ld.lld
+  # / llvm-objdump (via HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR in raise_cli)
+  # and to FileCheck / not (via the standard lit RUN: pipelines).
+  # None of these are pulled in by amd_comgr or raise_cli link deps,
+  # so without an explicit build dep `ninja check-comgr` runs lit
+  # against a build tree that's missing them and every hotswap-raise
+  # test fails with "No such file or directory".
   #
-  # Deferred to the end of LLVM's top-level CMakeLists processing
+  # Each dep is deferred to the end of LLVM's top-level configure
   # because comgr is added as an LLVM_EXTERNAL_PROJECT and runs
-  # mid-configure: at this point `ld.lld` (created via
-  # add_lld_symlink in lld/tools/lld) is not yet a registered target,
-  # so an eager add_dependencies fails the configure step. By the
-  # end of the LLVM root dir all subprojects have been added.
-  foreach(_tool llvm-mc llc ld.lld llvm-objdump)
-    cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
-      CALL _comgr_check_test_tool_dep "${_tool}")
-  endforeach()
+  # mid-llvm-configure -- at this point `ld.lld` (created by
+  # add_lld_symlink in lld/tools/lld) is not yet a registered target
+  # and an eager add_dependencies fails the configure step. By the
+  # end of LLVM_MAIN_SRC_DIR all subprojects have been processed.
+  #
+  # NOTE: cmake_language(DEFER CALL ...) records arguments by string
+  # and re-evaluates them at deferred-call time, so we can't loop
+  # over a variable -- the loop var is out of scope when the deferred
+  # call fires. Spell each tool out as a literal argument instead.
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep llvm-mc)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep llc)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep ld.lld)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep llvm-objdump)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep FileCheck)
+  cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+    CALL _comgr_add_check_comgr_tool_dep not)
 endif()
 
-function(_comgr_check_test_tool_dep tool)
+function(_comgr_add_check_comgr_tool_dep tool)
   if(TARGET ${tool})
     add_dependencies(check-comgr ${tool})
   else()
     message(WARNING
-      "comgr lit tests reference ${tool} via HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR "
-      "but no such CMake target exists; skipping explicit build dep. "
-      "Tests will fail unless ${tool} is already present in the build tree.")
+      "comgr lit tests reference '${tool}' via HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR "
+      "or lit RUN: lines but no such CMake target exists; skipping explicit "
+      "build dep. Tests will fail unless '${tool}' is already in the build tree.")
   endif()
 endfunction()
 
