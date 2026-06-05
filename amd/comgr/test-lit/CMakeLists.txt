@@ -104,7 +104,28 @@ if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
   # build dep here `ninja check-comgr` runs the lit suite against a
   # build tree that's missing them and every hotswap-raise test fails
   # with "No such file or directory".
-  add_dependencies(check-comgr llvm-mc llc ld.lld llvm-objdump)
+  #
+  # Deferred to the end of LLVM's top-level CMakeLists processing
+  # because comgr is added as an LLVM_EXTERNAL_PROJECT and runs
+  # mid-configure: at this point `ld.lld` (created via
+  # add_lld_symlink in lld/tools/lld) is not yet a registered target,
+  # so an eager add_dependencies fails the configure step. By the
+  # end of the LLVM root dir all subprojects have been added.
+  foreach(_tool llvm-mc llc ld.lld llvm-objdump)
+    cmake_language(DEFER DIRECTORY "${LLVM_MAIN_SRC_DIR}"
+      CALL _comgr_check_test_tool_dep "${_tool}")
+  endforeach()
 endif()
+
+function(_comgr_check_test_tool_dep tool)
+  if(TARGET ${tool})
+    add_dependencies(check-comgr ${tool})
+  else()
+    message(WARNING
+      "comgr lit tests reference ${tool} via HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR "
+      "but no such CMake target exists; skipping explicit build dep. "
+      "Tests will fail unless ${tool} is already present in the build tree.")
+  endif()
+endfunction()
 
 add_dependencies(check-comgr test-lit)
