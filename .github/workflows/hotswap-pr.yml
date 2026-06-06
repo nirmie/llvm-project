@@ -61,14 +61,24 @@ jobs:
           # to the same underlying NFS file, so ccache + workspace
           # are shared seamlessly.
           COMPUTE_HOME=/home/AMD/nisenthi
-          COMPUTE_WORKSPACE="${GITHUB_WORKSPACE/#\/root/$COMPUTE_HOME}"
-          COMPUTE_CCACHE="${CCACHE_DIR/#\/root/$COMPUTE_HOME}"
+          # srun's inline --export=ALL,VAR=val parsing is unreliable
+          # for paths with slashes; set in shell first so --export=ALL
+          # picks them up via normal inheritance.
+          export GITHUB_WORKSPACE="${GITHUB_WORKSPACE/#\/root/$COMPUTE_HOME}"
+          export CCACHE_DIR="${CCACHE_DIR/#\/root/$COMPUTE_HOME}"
 
           # The whole build script lives in
           # .github/workflows/scripts/hotswap-build.sh (checked in
           # alongside this workflow) so we don't fight nested-quoting
           # bugs in bash -c '...'. srun runs the script inside a
           # fresh enroot container on a defq CPU node.
+          #
+          # --container-writable: pyxis defaults / to read-only;
+          # ninja and ccache aren't in rocm/pytorch so we need to
+          # apt-get install them on each run. Writes are discarded
+          # when the container ends (the sqsh is unchanged). Once
+          # this stabilizes we should bake the deps into a custom
+          # sqsh via lib/add_devtools_enroot_image.sh.
           srun \
             --partition=defq \
             --constraint=CPUONLY \
@@ -77,11 +87,12 @@ jobs:
             --cpus-per-task=64 \
             --mem=128G \
             --job-name=hotswap-pr-${{ github.run_id }} \
-            --chdir="$COMPUTE_WORKSPACE" \
+            --chdir="$GITHUB_WORKSPACE" \
             --container-image="$CONTAINER_IMAGE" \
+            --container-writable \
             --container-mounts=/home:/home,/cluster:/cluster \
-            --export=ALL,GITHUB_WORKSPACE="$COMPUTE_WORKSPACE",CCACHE_DIR="$COMPUTE_CCACHE" \
-            bash "$COMPUTE_WORKSPACE/.github/workflows/scripts/hotswap-build.sh" \
+            --export=ALL \
+            bash "$GITHUB_WORKSPACE/.github/workflows/scripts/hotswap-build.sh" \
             2>&1 | tee "$LIT_LOG"
 
       - name: Summarize lit results
