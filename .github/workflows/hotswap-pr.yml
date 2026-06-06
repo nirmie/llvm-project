@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       force_clean:
-        description: "Wipe persistent build dir before configuring"
+        description: "Wipe persistent ccache before configuring"
         type: boolean
         default: false
 
@@ -20,96 +20,59 @@ permissions:
 
 jobs:
   lit:
-    # Runs on the Alola self-hosted runner inside an enroot container
-    # built from rocm/pytorch (mirrored to Harbor as
-    # registry-sc-harbor.amd.com/hotswap-ci/rocm-pytorch). The runner
-    # itself lives at ~/ci/actions-runner inside the container; $HOME
-    # is NFS-backed and persists across container restarts.
+    # The GHA runner lives on the Alola login node inside a
+    # rocm/pytorch-based enroot dev container. It does almost no work
+    # itself -- the actual build + lit run is dispatched to a SLURM
+    # compute node via srun, which spins up a fresh enroot from the
+    # same sqsh on a dedicated CPU-only node. Login-node contention
+    # (100+ users) made cold compiles take 5 minutes per file during
+    # bring-up; the compile-* nodes are dedicated and idle.
     runs-on: [self-hosted, linux, rocm, alola, hotswap]
     env:
-      # Persistent locations on NFS (~/ci/persist survives container
-      # rebuilds; /tmp is a 1.2 TB tmpfs but vanishes on container
-      # restart, so we keep the build dir on NFS for incrementality).
-      BUILD_DIR: /root/ci/persist/build
+      # Persistent across SLURM jobs. NFS-backed via $HOME -> /home_mkm/AMD/...
       CCACHE_DIR: /root/ci/persist/ccache
       LIT_LOG: /root/ci/persist/build/lit-output.log
-      # /opt/rocm/llvm/bin holds clang, ld.lld, llvm-mc, FileCheck,
-      # not, llvm-dis, llvm-readelf, llvm-objdump etc. Putting it
-      # first means LLVM_USE_LINKER=lld finds ld.lld before the host
-      # gcc would look for the system linker.
-      PATH_PREFIX: /opt/rocm/llvm/bin
+      # Base enroot sqsh on /cluster (visible from any compute node).
+      # Mirrored from Docker Hub once via docker push; see
+      # alola-ci-setup.md section 0c.
+      CONTAINER_IMAGE: /cluster/images/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_rocm-pytorch_latest.sqsh
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Force clean (manual trigger only)
+      - name: Force clean ccache (manual trigger only)
         if: ${{ inputs.force_clean == true }}
-        run: rm -rf "$BUILD_DIR"/*
+        run: rm -rf "$CCACHE_DIR"/*
 
-      - name: Build + lit
+      - name: Build + lit (srun -> defq CPU node)
         run: |
           set -euo pipefail
-          export PATH="${PATH_PREFIX}:${PATH}"
-          mkdir -p "$BUILD_DIR" "$CCACHE_DIR"
+          mkdir -p "$CCACHE_DIR" "$(dirname "$LIT_LOG")"
 
-          # comgr reads git commit/branch into COMGR_GIT_COMMIT /
-          # COMGR_GIT_BRANCH at configure time; without
-          # safe.directory it ends up "not-available" because we run
-          # as root over an NFS workspace owned by a non-root uid.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-          # Always wipe a stale CMakeCache.txt: this workflow has gone
-          # through several incompatible layouts and a stale cache
-          # makes cmake fail with confusing errors. ccache (separate
-          # dir) still amortizes individual cc1 invocations, so a
-          # fresh configure stays fast.
-          rm -f "$BUILD_DIR"/CMakeCache.txt
-
-          # Build invocation:
-          #   * comgr + device-libs live inside the LLVM build tree
-          #     as LLVM_EXTERNAL_PROJECTS so libamd_comgr.so ends up
-          #     in $BUILD_DIR/lib next to LLVM libs and lit-built test
-          #     binaries pick OUR libamd_comgr.so by normal build-tree
-          #     lookup (not /opt/rocm/lib).
-          #   * device-libs is listed FIRST so its targets register
-          #     the AMD_DEVICE_LIBS global property before comgr's
-          #     DeviceLibs.cmake (line 151) reads it.
-          #   * HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR is baked into the
-          #     comgr build; raise_cli shells out to llc / llvm-mc /
-          #     ld.lld using this dir.
-          #   * LLVM_USE_LINKER=lld speeds up linking.
-          #   * CMAKE_DISABLE_FIND_PACKAGE_hip skips a find_package
-          #     call in comgr/test/CMakeLists.txt:214 that transitively
-          #     loads /opt/rocm/lib/cmake/AMDDeviceLibsConfig.cmake
-          #     and collides with our in-tree device-libs targets.
-          cmake -G Ninja -S "$GITHUB_WORKSPACE/llvm" -B "$BUILD_DIR" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;lld" \
-            -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
-            -DLLVM_EXTERNAL_PROJECTS="device-libs;comgr" \
-            -DLLVM_EXTERNAL_DEVICE_LIBS_SOURCE_DIR="$GITHUB_WORKSPACE/amd/device-libs" \
-            -DLLVM_EXTERNAL_COMGR_SOURCE_DIR="$GITHUB_WORKSPACE/amd/comgr" \
-            -DCOMGR_ENABLE_HOTSWAP_TRANSPILE=ON \
-            -DHOTSWAP_TRANSPILER_LLVM_TOOLS_DIR="$BUILD_DIR/bin" \
-            -DLLVM_USE_LINKER=lld \
-            -DLLVM_CCACHE_BUILD=ON \
-            -DCMAKE_DISABLE_FIND_PACKAGE_hip=ON
-
-          # -j 32 keeps load + I/O polite on the shared 192-core host.
-          # pipefail ensures the step fails if ninja fails even though
-          # tee succeeds. The lit log lands on NFS so the next step
-          # (on the same runner) can read it without bind mounts.
-          ninja -j 32 -C "$BUILD_DIR" check-comgr 2>&1 \
-            | tee "$LIT_LOG"
-
-          ccache -s
+          # The whole build script lives in
+          # .github/workflows/scripts/hotswap-build.sh (checked in
+          # alongside this workflow) so we don't fight nested-quoting
+          # bugs in bash -c '...'. srun runs the script inside a
+          # fresh container on a defq CPU node, inheriting our env.
+          srun \
+            --partition=defq \
+            --constraint=CPUONLY \
+            --time=2:00:00 \
+            --nodes=1 \
+            --cpus-per-task=64 \
+            --mem=128G \
+            --job-name=hotswap-pr-${{ github.run_id }} \
+            --container-image="$CONTAINER_IMAGE" \
+            --container-mount-home \
+            bash "$GITHUB_WORKSPACE/.github/workflows/scripts/hotswap-build.sh" \
+            2>&1 | tee "$LIT_LOG"
 
       - name: Summarize lit results
         if: always()
         run: |
           set -euo pipefail
           if [ ! -f "$LIT_LOG" ]; then
-            echo "no lit log at $LIT_LOG (ninja likely failed before lit ran)" \
+            echo "no lit log at $LIT_LOG (srun failed before lit ran)" \
               >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
