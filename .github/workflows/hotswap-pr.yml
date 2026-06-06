@@ -49,11 +49,26 @@ jobs:
           set -euo pipefail
           mkdir -p "$CCACHE_DIR" "$(dirname "$LIT_LOG")"
 
+          # Login-node dev container has our home remapped to /root
+          # via enroot's --container-mount-home. Compute nodes mount
+          # the same NFS at /home/AMD/nisenthi directly. We can't use
+          # --container-mount-home on srun (the compute container's
+          # /etc/passwd has nisenthi's HOME=/root, but the container
+          # runs as the host user (uid 244250564) which can't write
+          # to root-owned /root). Instead we bind /home and /cluster
+          # explicitly and translate any /root paths to /home/AMD/...
+          # before crossing the srun boundary. Both prefixes resolve
+          # to the same underlying NFS file, so ccache + workspace
+          # are shared seamlessly.
+          COMPUTE_HOME=/home/AMD/nisenthi
+          COMPUTE_WORKSPACE="${GITHUB_WORKSPACE/#\/root/$COMPUTE_HOME}"
+          COMPUTE_CCACHE="${CCACHE_DIR/#\/root/$COMPUTE_HOME}"
+
           # The whole build script lives in
           # .github/workflows/scripts/hotswap-build.sh (checked in
           # alongside this workflow) so we don't fight nested-quoting
           # bugs in bash -c '...'. srun runs the script inside a
-          # fresh container on a defq CPU node, inheriting our env.
+          # fresh enroot container on a defq CPU node.
           srun \
             --partition=defq \
             --constraint=CPUONLY \
@@ -62,9 +77,11 @@ jobs:
             --cpus-per-task=64 \
             --mem=128G \
             --job-name=hotswap-pr-${{ github.run_id }} \
+            --chdir="$COMPUTE_WORKSPACE" \
             --container-image="$CONTAINER_IMAGE" \
-            --container-mount-home \
-            bash "$GITHUB_WORKSPACE/.github/workflows/scripts/hotswap-build.sh" \
+            --container-mounts=/home:/home,/cluster:/cluster \
+            --export=ALL,GITHUB_WORKSPACE="$COMPUTE_WORKSPACE",CCACHE_DIR="$COMPUTE_CCACHE" \
+            bash "$COMPUTE_WORKSPACE/.github/workflows/scripts/hotswap-build.sh" \
             2>&1 | tee "$LIT_LOG"
 
       - name: Summarize lit results
