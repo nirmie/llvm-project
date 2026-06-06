@@ -28,5 +28,25 @@ config.environment['PATH'] = os.pathsep.join([config.comgr_lib_dir,
 config.environment['PATH'] = os.pathsep.join([config.comgr_obj_dir,
                                               config.environment['PATH']])
 
+# LLVM places shared libraries (libamd_comgr.so among them) at
+# ${LLVM_TOOLS_BINARY_DIR}/../lib in the build tree. Prepend that to
+# LD_LIBRARY_PATH so test binaries (hotswap-rewrite, raise_cli, etc.)
+# load OUR freshly-built libamd_comgr.so instead of the system one
+# at /opt/rocm/lib that rocm-runtime images put on LD_LIBRARY_PATH
+# and /etc/ld.so.conf.d/ by default. Without this, binaries that
+# depend on amd_comgr fail at runtime in containerized environments
+# with:
+#   /opt/rocm/lib/libamd_comgr.so.3:
+#     version `amd_comgr_3.2' not found (required by ...)
+# (the system .so is too old to expose the API version comgr's
+# tests need.)
+config.llvm_libs_dir = _fwd(
+    os.path.join(os.path.dirname(config.llvm_tools_dir), 'lib'))
+_existing_ld_library_path = os.environ.get('LD_LIBRARY_PATH', '')
+config.environment['LD_LIBRARY_PATH'] = (
+    config.llvm_libs_dir
+    + (os.pathsep + _existing_ld_library_path
+       if _existing_ld_library_path else ''))
+
 lit_config.load_config(
       config, os.path.join(config.my_src_root, "lit.cfg.py"))
