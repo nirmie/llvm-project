@@ -22,16 +22,19 @@ set -euxo pipefail
 
 echo "=== HOST: $(hostname) -- $(nproc) cpus, $(free -h | awk '/Mem:/ {print $2}') ram ==="
 
-# Fresh container from base sqsh: ninja and ccache aren't in
-# rocm/pytorch. Install them on every run (~20s). Also clear the
-# stale dpkg messagebus statoverride that blocks apt on this image
-# (known enroot quirk -- the rootfs references a system group that
-# doesn't exist in the running container's /etc/group).
+# Fresh container from base sqsh: ninja, ccache, and cmake aren't
+# in rocm/pytorch -- the login-node dev container has them only
+# because envsetup's add_devtools_enroot_image.sh baked them into
+# the *_dev.sqsh overlay. We pull the BASE sqsh, so install on
+# every run (~30s). Also clear the stale dpkg messagebus
+# statoverride that blocks apt on this image (known enroot quirk
+# -- the rootfs references a system group that doesn't exist in
+# the running container's /etc/group).
 dpkg-statoverride --list 2>&1 \
   | awk '$1=="messagebus" || $2=="messagebus" {print $NF}' \
   | xargs -r -n1 dpkg-statoverride --remove
 apt-get update -qq
-apt-get install -y --no-install-recommends ninja-build ccache
+apt-get install -y --no-install-recommends cmake ninja-build ccache
 
 # LLVM toolchain lives at /opt/rocm/llvm/bin in the rocm/pytorch
 # image (clang, ld.lld, llvm-mc, FileCheck, not, llvm-dis,
