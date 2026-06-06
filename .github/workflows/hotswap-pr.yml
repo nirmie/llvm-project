@@ -90,6 +90,7 @@ jobs:
             --chdir="$GITHUB_WORKSPACE" \
             --container-image="$CONTAINER_IMAGE" \
             --container-writable \
+            --container-remap-root \
             --container-mounts=/home:/home,/cluster:/cluster \
             --export=ALL \
             bash "$GITHUB_WORKSPACE/.github/workflows/scripts/hotswap-build.sh" \
