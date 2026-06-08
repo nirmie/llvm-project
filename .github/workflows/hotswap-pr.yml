@@ -3,7 +3,7 @@ name: Hotswap PR CI
 on:
   pull_request:
   push:
-    branches: [hotswap, alola-port-test]
+    branches: [hotswap]
   workflow_dispatch:
     inputs:
       force_clean:
