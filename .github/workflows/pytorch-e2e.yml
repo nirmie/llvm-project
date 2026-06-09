@@ -91,7 +91,13 @@ jobs:
             *) echo "unknown target_gfx ${{ inputs.target_gfx }}" >&2; exit 1 ;;
           esac
 
-          # Translate runner-side /root paths to the compute node's real NFS path.
+          # Translate runner-side /root paths to the compute node's real NFS
+          # path. The runner's HOME is remapped to /root via enroot
+          # --container-mount-home; compute nodes mount /home/AMD/nisenthi
+          # directly, so every /root path crossing the srun boundary
+          # (workspace for --chdir + mount + the script, output, harness)
+          # must be rewritten or srun can't chdir/find them.
+          export GITHUB_WORKSPACE="${GITHUB_WORKSPACE/#\/root/$COMPUTE_HOME}"
           OUTPUT_COMPUTE="${OUTPUT_ROOT/#\/root/$COMPUTE_HOME}"
           HARNESS_COMPUTE="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"
           mkdir -p "$OUTPUT_COMPUTE"

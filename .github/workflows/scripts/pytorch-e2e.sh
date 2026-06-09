@@ -84,6 +84,35 @@ export PYTORCH_GPU=0
 # cold transpile and results vanish when srun ends.
 export HSA_HOTSWAP_CACHE_DIR="$CACHE_DIR"
 
+# Stream the high-signal progress from a model's per-branch run.log files to
+# stdout (the GH Actions console) while run-model works. The harness redirects
+# branch output to run.log and emits little to stdout, so without this the CI
+# step looks frozen for the whole multi-minute transpile. We drop the millions
+# of ':3:'/':4:' HIP + rocBLAS trace lines (those stay in run.log) and stream
+# the rest: transpiler decisions, proof, token generation, errors.
+# Sets TAILER_PID. The background subshell inherits this script's stdout (so
+# lines stream live to the GH Actions console); do NOT capture it via $(...),
+# which would swallow the output and can hang the command substitution.
+TAILER_PID=""
+start_log_stream() {
+  local scratch="$1"
+  (
+    local lr="" rd=""
+    for _ in $(seq 1 240); do
+      lr=$(find "$scratch" -path "*/local/run.log" 2>/dev/null | head -1)
+      [ -n "$lr" ] && break
+      sleep 1
+    done
+    [ -z "$lr" ] && exit 0
+    rd=$(dirname "$(dirname "$lr")")
+    # -F retries hotswap/run.log until run-model creates it.
+    stdbuf -oL tail -n +1 -F "$rd/local/run.log" "$rd/hotswap/run.log" 2>/dev/null \
+      | grep --line-buffered -vE '^:[0-9]+:' \
+      | sed -u 's/^/    | /'
+  ) &
+  TAILER_PID=$!
+}
+
 overall_rc=0
 for m in $MODELS; do
   cfg="$CFG/$m.json"
@@ -99,8 +128,13 @@ for m in $MODELS; do
     sed -i "s/\"target_gfx\": \"gfx950\"/\"target_gfx\": \"$TARGET_GFX\"/" "$cfg"
   fi
 
-  echo "=== run-model $m  (target_gfx=$TARGET_GFX) ==="
+  echo "::group::run-model $m (target_gfx=$TARGET_GFX)"
+  start_log_stream "/output/$m"
   run-model "$m" || { rc=$?; echo "::warning::run-model $m exited rc=$rc"; overall_rc=1; }
+  [ -n "$TAILER_PID" ] && { kill "$TAILER_PID" 2>/dev/null || true; wait "$TAILER_PID" 2>/dev/null || true; }
+  sm=$(find "/output/$m" -name summary.md 2>/dev/null | head -1)
+  if [ -n "$sm" ]; then echo "----- summary.md ($m) -----"; cat "$sm"; fi
+  echo "::endgroup::"
 done
 
 exit "$overall_rc"
