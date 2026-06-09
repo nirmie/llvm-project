@@ -45,10 +45,15 @@ rocminfo 2>/dev/null | grep -E "Name:\s+gfx" | head -1 || true
 # their own location at runtime, so no host->container path rewrite is needed
 # (the only host-pathed file, deps/pytorch-env.config.sh, is NOT overlaid).
 if [ -d /harness ]; then
-  for d in scripts data runtime; do
-    [ -d "/harness/$d" ] && cp -a "/harness/$d/." "$REPO/$d/"
+  # Only the lightweight code dirs (scripts ~360K, runtime ~390K). NOT data/
+  # (~1.5G of fixtures) -- the model configs we need come from /ci-configs
+  # below, and the baked image already carries the rest of data/.
+  # --preserve=mode keeps exec bits without chown/xattr (which fail with
+  # "operation not supported" across the read-only bind-mount / NFS).
+  for d in scripts runtime; do
+    [ -d "/harness/$d" ] && cp -r --preserve=mode "/harness/$d/." "$REPO/$d/"
   done
-  [ -f /harness/Makefile ] && cp -a /harness/Makefile "$REPO/Makefile"
+  [ -f /harness/Makefile ] && cp --preserve=mode /harness/Makefile "$REPO/Makefile"
 fi
 # Back-compat / standalone: configs-only overlay (e.g. the conductor docker
 # test mounts just the model configs at /ci-configs).
