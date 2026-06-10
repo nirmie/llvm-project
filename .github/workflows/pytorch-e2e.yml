@@ -8,9 +8,10 @@ name: PyTorch HotSwap E2E
 #   G3 VLM         qwen2_5_vl_7b_instruct        (weights pending)
 #   G4 diffusion   sd_3_5_large
 #   G5 encoder     bge_large_en_v1_5             (boilerplate; new workload)
-# Fires on every PR; workflow_dispatch allows a custom model list / ISA.
+# Dispatch-only: the combined hotswap-e2e.yml (per-model matrix, single image)
+# is now the PR/nightly e2e gate. This single-job pytorch-only workflow is kept
+# for manual ad-hoc runs against the standalone pytorch-runner image.
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       models:

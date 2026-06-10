@@ -1,26 +1,33 @@
 name: Hotswap E2E (combined)
 
-# Combined PyTorch + SGLang model E2E. One workflow, two frameworks, rendered
-# as TWO separate tables. Each model is its own matrix job -> its own SLURM
-# allocation -> its own step summary, so the run's Summary page grows
-# CONTINUOUSLY as each SLURM job finishes (instead of one end-of-run render).
-# A final `aggregate` job renders the two consolidated tables.
+# Combined PyTorch + SGLang model E2E. One workflow, ONE image
+# (hotswap-model-runner: run-model for pytorch + run-sglang-model for sglang),
+# rendered as TWO separate tables. Each model is its own matrix job -> its own
+# SLURM allocation -> its own step summary, so the run's Summary page grows
+# CONTINUOUSLY as each SLURM job finishes. A crash in one model (OOM, segfault,
+# srun --time) is contained to that job; fail-fast:false keeps the rest going.
+# A final `aggregate` job renders the two consolidated tables AND publishes the
+# per-model status badges to the orphan `ci-status` branch (README scoreboard).
 #
-# Dispatch-only for now while it's validated; the live PR gate stays on
-# pytorch-e2e.yml until this replaces it. SGLang rows render as PENDING until
-# the sglang-runner image integration lands (see rep_hotswap/sglang-runner:
-# sglang pins torch==2.9.1 vs the base ROCm torch 2.12 -- WIP).
+# Triggers:
+#   pull_request      -> representative subset (fast PR signal)
+#   schedule (nightly)-> full model sweep (feeds the scoreboard)
+#   workflow_dispatch -> choose rep or full + ISA
 on:
+  pull_request:
+  schedule:
+    - cron: "37 6 * * *"   # ~01:37 ET nightly full sweep
   workflow_dispatch:
     inputs:
       target_gfx:
         type: choice
         options: [gfx950, gfx942]
         default: gfx950
-      sglang_ready:
-        description: "Set true once the sglang-runner sqsh is on Alola to actually run SGLang jobs"
-        type: boolean
-        default: false
+      sweep:
+        description: "rep = representative subset, full = every model"
+        type: choice
+        options: [full, rep]
+        default: full
 
 concurrency:
   group: hotswap-e2e-${{ github.ref }}
@@ -31,32 +38,56 @@ permissions:
 
 env:
   COMPUTE_HOME: /home/AMD/nisenthi
-  PYTORCH_IMAGE: /home/AMD/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_pytorch-runner_latest.sqsh
-  SGLANG_IMAGE: /home/AMD/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_sglang-runner_latest.sqsh
+  # Single image: run-model (cp312/torch2.12) + run-sglang-model (cp310/torch2.9.1)
+  # share one sqsh. Replaces the separate pytorch-runner / sglang-runner images.
+  IMAGE: /home/AMD/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_hotswap-model-runner_latest.sqsh
   MODELS_ROOT: /projects/hotswap-ci/models
   HARNESS_REPO: https://github.com/harsh-amd/rocm-hotswap-testing.git
   HARNESS_CHECKOUT: /cluster/hotswap-ci/rocm-hotswap-testing
+  # sglang-model-agnostic-debug is the superset branch: pytorch scripts + the
+  # sglang runner + the teacher-forced-skippable fix + CI model configs.
+  HARNESS_REF: users/nirmie/sglang-model-agnostic-debug
   CI_CONFIGS: /cluster/hotswap-ci/model-configs
   CACHE_HOST: /home/AMD/nisenthi/hotswap-cache-shared
-  # Per-run output root (run_id-scoped so matrix jobs + aggregate share one
-  # isolated dir without stale data from prior runs).
   OUTPUT_ROOT: /root/ci/hotswap-e2e/${{ github.run_id }}
 
 jobs:
+  # Pick the matrix by event: rep subset on PR (and dispatch sweep=rep), the
+  # full model set on schedule (and dispatch sweep=full). Emitting the matrix as
+  # JSON keeps PR runs to a handful of jobs on the single serialized runner.
+  setup:
+    runs-on: [self-hosted, linux, rocm, alola, hotswap]
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      pyt: ${{ steps.pick.outputs.pyt }}
+      sgl: ${{ steps.pick.outputs.sgl }}
+    steps:
+      - id: pick
+        run: |
+          set -euo pipefail
+          REP_PYT="qwen2_5_7b_instruct,phi4_mini"; REP_SGL="llama"
+          FULL_PYT="qwen2_5_7b_instruct,phi4_mini,qwen1_5_moe_a2_7b_chat,qwen2_5_vl_7b_instruct,sd_3_5_large,bge_large_en_v1_5"
+          FULL_SGL="llama,phi4_mini"
+          case "${{ github.event_name }}" in
+            pull_request) PYT="$REP_PYT"; SGL="$REP_SGL" ;;
+            schedule)     PYT="$FULL_PYT"; SGL="$FULL_SGL" ;;
+            workflow_dispatch)
+              if [ "${{ inputs.sweep }}" = "rep" ]; then PYT="$REP_PYT"; SGL="$REP_SGL";
+              else PYT="$FULL_PYT"; SGL="$FULL_SGL"; fi ;;
+            *) PYT="$FULL_PYT"; SGL="$FULL_SGL" ;;
+          esac
+          MATRIX=$(PYT="$PYT" SGL="$SGL" python3 -c 'import json,os; pyt=[m for m in os.environ["PYT"].split(",") if m]; sgl=[m for m in os.environ["SGL"].split(",") if m]; print(json.dumps({"include":[{"fw":"pytorch","model":m} for m in pyt]+[{"fw":"sglang","model":m} for m in sgl]}))')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "pyt=$PYT" >> "$GITHUB_OUTPUT"
+          echo "sgl=$SGL" >> "$GITHUB_OUTPUT"
+          echo "event=${{ github.event_name }} pyt=$PYT sgl=$SGL"
+
   models:
+    needs: setup
     runs-on: [self-hosted, linux, rocm, alola, hotswap]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { fw: pytorch, model: qwen2_5_7b_instruct }
-          - { fw: pytorch, model: phi4_mini }
-          - { fw: pytorch, model: qwen1_5_moe_a2_7b_chat }
-          - { fw: pytorch, model: qwen2_5_vl_7b_instruct }
-          - { fw: pytorch, model: sd_3_5_large }
-          - { fw: pytorch, model: bge_large_en_v1_5 }
-          - { fw: sglang,  model: llama }
-          - { fw: sglang,  model: phi4_mini }
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     name: ${{ matrix.fw }}-${{ matrix.model }}
     steps:
       - uses: actions/checkout@v4
@@ -67,8 +98,9 @@ jobs:
           CO="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"
           [ -d "$CO/.git" ] || git clone "$HARNESS_REPO" "$CO"
           git -C "$CO" fetch --all --prune
-          git -C "$CO" checkout users/nirmie/pytorch-model-agnostic-debug
+          git -C "$CO" checkout "$HARNESS_REF"
           git -C "$CO" pull --ff-only || true
+          echo "harness at $(git -C "$CO" rev-parse --short HEAD)"
 
       - name: Run ${{ matrix.fw }} model ${{ matrix.model }}
         run: |
@@ -76,15 +108,8 @@ jobs:
           OUTPUT_COMPUTE="${OUTPUT_ROOT/#\/root/$COMPUTE_HOME}"
           mkdir -p "$OUTPUT_COMPUTE/${{ matrix.model }}"
 
-          # SGLang path is not runnable until the sglang-runner sqsh exists on
-          # Alola; mark PENDING so the SGLang table shows the slot without failing.
-          if [ "${{ matrix.fw }}" = "sglang" ] && [ "${{ inputs.sglang_ready }}" != "true" ]; then
-            echo "sglang-runner image integration WIP (torch 2.9.1 pin vs ROCm 2.12)" \
-              > "$OUTPUT_COMPUTE/${{ matrix.model }}/PENDING"
-            echo "SGLang ${{ matrix.model }}: PENDING (image not ready)"; exit 0
-          fi
-
-          case "${{ inputs.target_gfx }}" in
+          TARGET_GFX="${{ inputs.target_gfx || 'gfx950' }}"
+          case "$TARGET_GFX" in
             gfx950) GPU_SEL=(--constraint=GFX950 --gres=gpu:1) ;;
             gfx942) GPU_SEL=(--gres=gpu:gfx942-mi300x:1) ;;
           esac
@@ -92,13 +117,13 @@ jobs:
           HARNESS_COMPUTE="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"
 
           if [ "${{ matrix.fw }}" = "pytorch" ]; then
-            IMAGE="$PYTORCH_IMAGE"; SCRIPT=pytorch-e2e.sh
+            SCRIPT=pytorch-e2e.sh
             export MODELS="${{ matrix.model }}"
           else
-            IMAGE="$SGLANG_IMAGE"; SCRIPT=sglang-e2e.sh
+            SCRIPT=sglang-e2e.sh
             export SGLANG_PROFILES="${{ matrix.model }}"
           fi
-          export TARGET_GFX="${{ inputs.target_gfx }}"
+          export TARGET_GFX
           export PYTORCH_TIMEOUT_SECONDS=3600 CACHE_DIR=/cache
 
           MOUNTS="$MODELS_ROOT:$MODELS_ROOT:ro,$HARNESS_COMPUTE:/harness:ro,$CI_CONFIGS:/ci-configs:ro"
@@ -119,11 +144,11 @@ jobs:
             "$OUTPUT_ROOT" "${{ matrix.fw }}=${{ matrix.model }}" >> "$GITHUB_STEP_SUMMARY" || true
 
   aggregate:
-    needs: models
+    needs: [setup, models]
     if: always()
     runs-on: [self-hosted, linux, rocm, alola, hotswap]
     # contents: write so the status-publish step can push the per-model badge
-    # JSONs to the orphan `ci-status` branch (job-scoped; the matrix jobs stay
+    # JSONs to the orphan `ci-status` branch (job-scoped; matrix jobs stay
     # read-only).
     permissions:
       contents: write
@@ -133,16 +158,13 @@ jobs:
         run: |
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-combined-summary.py" \
             "$OUTPUT_ROOT" \
-            "pytorch=qwen2_5_7b_instruct,phi4_mini,qwen1_5_moe_a2_7b_chat,qwen2_5_vl_7b_instruct,sd_3_5_large,bge_large_en_v1_5" \
-            "sglang=llama,phi4_mini" >> "$GITHUB_STEP_SUMMARY" || true
+            "pytorch=${{ needs.setup.outputs.pyt }}" \
+            "sglang=${{ needs.setup.outputs.sgl }}" >> "$GITHUB_STEP_SUMMARY" || true
 
-      # Publish the README scoreboard badges (rocm-libraries-style): one
-      # shields-endpoint JSON per (framework, model), pushed to the orphan
-      # `ci-status` branch so the README badges auto-update without committing to
-      # source history. Skipped on pull_request (PR results are transient and
-      # fork PRs get a read-only token); the scoreboard reflects the nightly
-      # full sweep + dispatch runs. Existing badges are preserved (a partial
-      # dispatch run only overwrites the models it ran).
+      # Publish the README scoreboard badges. Only the models that ran this time
+      # are emitted; the publish step bases on the existing ci-status tree, so a
+      # partial (rep) run leaves the other models' badges untouched. Skipped on
+      # pull_request (transient + fork PRs get a read-only token).
       - name: Publish status badges to ci-status branch
         if: github.event_name != 'pull_request'
         env:
@@ -152,14 +174,12 @@ jobs:
           BADGES="$RUNNER_TEMP/badges"; rm -rf "$BADGES"; mkdir -p "$BADGES"
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/emit-status-badges.py" \
             "$OUTPUT_ROOT" "$BADGES" \
-            "pytorch=qwen2_5_7b_instruct,phi4_mini,qwen1_5_moe_a2_7b_chat,qwen2_5_vl_7b_instruct,sd_3_5_large,bge_large_en_v1_5" \
-            "sglang=llama,phi4_mini"
+            "pytorch=${{ needs.setup.outputs.pyt }}" \
+            "sglang=${{ needs.setup.outputs.sgl }}"
 
           REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           WT="$RUNNER_TEMP/ci-status"; rm -rf "$WT"; mkdir -p "$WT"
           cd "$WT"; git init -q; git remote add origin "$REMOTE"
-          # Base on the existing ci-status tree if present (preserve other
-          # models' badges); otherwise start an orphan branch.
           if git fetch -q --depth 1 origin ci-status 2>/dev/null; then
             git checkout -q -b ci-status FETCH_HEAD
           else
