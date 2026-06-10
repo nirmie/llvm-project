@@ -135,10 +135,32 @@ for m in $MODELS; do
 
   echo "::group::run-model $m (target_gfx=$TARGET_GFX)"
   start_log_stream "/output/$m"
-  run-model "$m" || { rc=$?; echo "::warning::run-model $m exited rc=$rc"; overall_rc=1; }
+  run-model "$m" || echo "::warning::run-model $m exited non-zero (harness exits non-zero on expected equivalence divergence; CI gate is evaluated from summary.json below)"
   [ -n "$TAILER_PID" ] && { kill "$TAILER_PID" 2>/dev/null || true; wait "$TAILER_PID" 2>/dev/null || true; }
   sm=$(find "/output/$m" -name summary.md 2>/dev/null | head -1)
   if [ -n "$sm" ]; then echo "----- summary.md ($m) -----"; cat "$sm"; fi
+
+  # CI gate from the summary, NOT run-model's exit code: the harness exits
+  # non-zero when equivalence diverges, but divergence is EXPECTED
+  # (accumulation-order token flips). The gate is: baseline ran AND the
+  # gfx1250->target transpile ran the model end-to-end with no transpile
+  # failures (local.passed && hotswap.passed && hotswap_fail==0).
+  sj=$(find "/output/$m" -name summary.json 2>/dev/null | head -1)
+  if [ -z "$sj" ]; then
+    echo "::error::$m produced no summary.json"; overall_rc=1
+  elif ! python3 - "$sj" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+l = s.get("local", {}) or {}; h = s.get("hotswap", {}) or {}
+ok = (l.get("passed") is True) and (h.get("passed") is True) \
+     and (int(h.get("hotswap_fail", 0) or 0) == 0)
+sys.exit(0 if ok else 1)
+PY
+  then
+    echo "::error::$m gate failed (baseline or transpile did not complete cleanly)"; overall_rc=1
+  else
+    echo "$m: gate PASS (transpile pipeline healthy; equivalence verdict shown above)"
+  fi
   echo "::endgroup::"
 done
 

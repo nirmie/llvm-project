@@ -1,9 +1,11 @@
 name: PyTorch HotSwap E2E
 
-# Manual for now: the e2e needs a contended gfx950/gfx942 GPU allocation and
-# a warm translation cache, so we don't want it firing on every PR yet. Once
-# it's reliably green we can add a `schedule:` or gate it on a label.
+# Short per-PR model suite: one representative per model-support-plan group
+# we have weights for (martin-luecke/rocm-systems#70) -- Group 1 dense LLM
+# (phi4_mini) + Group 4 diffusion (sd_3_5_large). Fires on every PR; also
+# workflow_dispatch for ad-hoc runs of a custom model list / ISA.
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       models:
@@ -76,7 +78,7 @@ jobs:
             git clone "$HARNESS_REPO" "$CO"
           fi
           git -C "$CO" fetch --all --prune
-          git -C "$CO" checkout "${{ inputs.harness_ref }}"
+          git -C "$CO" checkout "${{ inputs.harness_ref || 'users/nirmie/pytorch-model-agnostic-debug' }}"
           git -C "$CO" pull --ff-only || true   # no-op for detached sha
           echo "harness at $(git -C "$CO" rev-parse --short HEAD) ($(git -C "$CO" rev-parse --abbrev-ref HEAD))"
 
@@ -84,11 +86,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Inputs are empty on pull_request; fall back to the short PR suite.
+          MODELS_IN="${{ inputs.models || 'phi4_mini sd_3_5_large' }}"
+          TARGET_GFX="${{ inputs.target_gfx || 'gfx950' }}"
+          TIMEOUT_IN="${{ inputs.timeout_seconds || '3600' }}"
+          INJECT_COMGR="${{ inputs.inject_pr_comgr || 'false' }}"
+
           # GRES/constraint from the requested ISA.
-          case "${{ inputs.target_gfx }}" in
+          case "$TARGET_GFX" in
             gfx950) GPU_SEL=(--constraint=GFX950 --gres=gpu:1) ;;
             gfx942) GPU_SEL=(--gres=gpu:gfx942-mi300x:1) ;;
-            *) echo "unknown target_gfx ${{ inputs.target_gfx }}" >&2; exit 1 ;;
+            *) echo "unknown target_gfx $TARGET_GFX" >&2; exit 1 ;;
           esac
 
           # Translate runner-side /root paths to the compute node's real NFS
@@ -104,9 +112,9 @@ jobs:
 
           # Export run vars in the shell; srun --export=ALL inherits them.
           # (Inline --export=ALL,VAR=/path with slashes is unreliable.)
-          export MODELS="${{ inputs.models }}"
-          export TARGET_GFX="${{ inputs.target_gfx }}"
-          export PYTORCH_TIMEOUT_SECONDS="${{ inputs.timeout_seconds }}"
+          export MODELS="$MODELS_IN"
+          export TARGET_GFX
+          export PYTORCH_TIMEOUT_SECONDS="$TIMEOUT_IN"
           export CACHE_DIR=/cache
 
           # Build the bind-mount list (single whitespace-free string).
@@ -120,7 +128,7 @@ jobs:
           # Optional: inject the comgr freshly built by the lit job from this
           # commit. Requires the lit build to publish libamd_comgr.so.3 + the
           # LLVM tools to $COMGR_BUILD_DIR on shared NFS (follow-up; see README).
-          if [ "${{ inputs.inject_pr_comgr }}" = "true" ]; then
+          if [ "$INJECT_COMGR" = "true" ]; then
             BD="${COMGR_BUILD_DIR/#\/root/$COMPUTE_HOME}"
             COMGR_SO="$(ls "$BD"/lib/libamd_comgr.so.3* 2>/dev/null | head -1 || true)"
             if [ -z "$COMGR_SO" ]; then
@@ -152,4 +160,4 @@ jobs:
         if: always()
         run: |
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-e2e-summary.py" \
-            "$OUTPUT_ROOT" ${{ inputs.models }} >> "$GITHUB_STEP_SUMMARY" || true
+            "$OUTPUT_ROOT" ${{ inputs.models || 'phi4_mini sd_3_5_large' }} >> "$GITHUB_STEP_SUMMARY" || true
