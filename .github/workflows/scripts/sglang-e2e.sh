@@ -49,6 +49,14 @@ for p in $SGLANG_PROFILES; do
   mkdir -p "$SGLANG_SCRATCH_ROOT"
   echo "::group::run-sglang-model $p (target_gfx=$TARGET_GFX)"
   run-sglang-model "$p" || echo "::warning::run-sglang-model $p exited non-zero (gate evaluated from summary.json)"
+  # The baked /opt/sglang-repro/run_sglang_e2e.sh HARDCODES its scratch to
+  # /opt/sglang-repro/scratch (it overwrites SGLANG_SCRATCH_ROOT), which lives in
+  # the ephemeral container -- the gate + host renderer can't see it. Copy the
+  # produced run into the bind-mounted /output/$p so summary.{json,md} are
+  # captured. (Proper fix: make the baked script honor SGLANG_SCRATCH_ROOT; image rebuild.)
+  if [ -d /opt/sglang-repro/scratch ]; then
+    cp -r --no-preserve=mode /opt/sglang-repro/scratch/. "/output/$p/" 2>/dev/null || true
+  fi
   # Gate = the transpile pipeline ran end-to-end (a verdict was produced).
   # `diverged` is the EXPECTED gfx1250->gfx950 accumulation effect, reported not
   # failed (matches the pytorch gate). Fail only on no summary or no verdict.
