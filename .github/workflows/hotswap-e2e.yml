@@ -112,9 +112,12 @@ jobs:
           mkdir -p "$OUTPUT_COMPUTE/${{ matrix.model }}"
 
           TARGET_GFX="${{ inputs.target_gfx || 'gfx950' }}"
+          # MARKHAM constraint is REQUIRED: only Markham nodes mount the Markham
+          # NFS (/home, /cluster, /projects). Austin GFX950 nodes (smci355-ccs-aus-*,
+          # mi355x) mount none of it, so srun fails to load the image/weights.
           case "$TARGET_GFX" in
-            gfx950) GPU_SEL=(--constraint=GFX950 --gres=gpu:1) ;;
-            gfx942) GPU_SEL=(--gres=gpu:gfx942-mi300x:1) ;;
+            gfx950) GPU_SEL=("--constraint=GFX950&MARKHAM" --gres=gpu:1) ;;
+            gfx942) GPU_SEL=("--constraint=MARKHAM" --gres=gpu:gfx942-mi300x:1) ;;
           esac
           export GITHUB_WORKSPACE="${GITHUB_WORKSPACE/#\/root/$COMPUTE_HOME}"
           HARNESS_COMPUTE="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"

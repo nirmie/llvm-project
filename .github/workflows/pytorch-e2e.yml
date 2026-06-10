@@ -98,10 +98,12 @@ jobs:
           TIMEOUT_IN="${{ inputs.timeout_seconds || '3600' }}"
           INJECT_COMGR="${{ inputs.inject_pr_comgr || 'false' }}"
 
-          # GRES/constraint from the requested ISA.
+          # GRES/constraint from the requested ISA. MARKHAM is REQUIRED: only
+          # Markham nodes mount the Markham NFS (/home, /cluster, /projects);
+          # Austin GFX950 nodes mount none of it and srun can't load the image.
           case "$TARGET_GFX" in
-            gfx950) GPU_SEL=(--constraint=GFX950 --gres=gpu:1) ;;
-            gfx942) GPU_SEL=(--gres=gpu:gfx942-mi300x:1) ;;
+            gfx950) GPU_SEL=("--constraint=GFX950&MARKHAM" --gres=gpu:1) ;;
+            gfx942) GPU_SEL=("--constraint=MARKHAM" --gres=gpu:gfx942-mi300x:1) ;;
             *) echo "unknown target_gfx $TARGET_GFX" >&2; exit 1 ;;
           esac
 
