@@ -40,7 +40,10 @@ env:
   COMPUTE_HOME: /home/AMD/nisenthi
   # Single image: run-model (cp312/torch2.12) + run-sglang-model (cp310/torch2.9.1)
   # share one sqsh. Replaces the separate pytorch-runner / sglang-runner images.
-  IMAGE: /home/AMD/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_hotswap-model-runner_latest.sqsh
+  # MUST live on /cluster (visible from any compute node): GFX950 GPU nodes do
+  # not reliably mount /home, and pyxis reads the image before triggering
+  # automounts, so a /home image path fails with "No such file or directory".
+  IMAGE: /cluster/images/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_hotswap-model-runner_latest.sqsh
   MODELS_ROOT: /projects/hotswap-ci/models
   HARNESS_REPO: https://github.com/harsh-amd/rocm-hotswap-testing.git
   HARNESS_CHECKOUT: /cluster/hotswap-ci/rocm-hotswap-testing
