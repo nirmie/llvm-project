@@ -16,7 +16,7 @@ on:
       models:
         description: "Space-separated model config stems under data/pytorch/models/"
         type: string
-        default: "phi4_mini qwen2_5_7b_instruct qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5"
+        default: "qwen2_5_7b_instruct phi4_mini qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5"
       target_gfx:
         description: "GPU ISA to transpile gfx1250 kernels to"
         type: choice
@@ -92,7 +92,7 @@ jobs:
           set -euo pipefail
 
           # Inputs are empty on pull_request; fall back to the short PR suite.
-          MODELS_IN="${{ inputs.models || 'phi4_mini qwen2_5_7b_instruct qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5' }}"
+          MODELS_IN="${{ inputs.models || 'qwen2_5_7b_instruct phi4_mini qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5' }}"
           TARGET_GFX="${{ inputs.target_gfx || 'gfx950' }}"
           TIMEOUT_IN="${{ inputs.timeout_seconds || '3600' }}"
           INJECT_COMGR="${{ inputs.inject_pr_comgr || 'false' }}"
@@ -165,4 +165,4 @@ jobs:
         if: always()
         run: |
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-e2e-summary.py" \
-            "$OUTPUT_ROOT" ${{ inputs.models || 'phi4_mini qwen2_5_7b_instruct qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5' }} >> "$GITHUB_STEP_SUMMARY" || true
+            "$OUTPUT_ROOT" ${{ inputs.models || 'qwen2_5_7b_instruct phi4_mini qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5' }} >> "$GITHUB_STEP_SUMMARY" || true
