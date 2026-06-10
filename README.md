@@ -3,7 +3,13 @@
 
 ## HotSwap model CI status
 
-Live end-to-end status of the HotSwap transpiler (gfx1250 -> gfx950/gfx942),
+[![pytest gate](https://github.com/nirmie/llvm-project/actions/workflows/pytest-gate.yml/badge.svg?branch=hotswap)](https://github.com/nirmie/llvm-project/actions/workflows/pytest-gate.yml)
+[![lit / PR CI](https://github.com/nirmie/llvm-project/actions/workflows/hotswap-pr.yml/badge.svg?branch=hotswap)](https://github.com/nirmie/llvm-project/actions/workflows/hotswap-pr.yml)
+[![model e2e](https://github.com/nirmie/llvm-project/actions/workflows/hotswap-e2e.yml/badge.svg?branch=hotswap)](https://github.com/nirmie/llvm-project/actions/workflows/hotswap-e2e.yml)
+
+The three CI tiers above (Tier 1 harness pytest, Tier 2 comgr build + lit,
+Tier 3 per-model GPU e2e). Below: per-model end-to-end status of the HotSwap
+transpiler (gfx1250 -> gfx950/gfx942),
 one row per model, one column per framework. Badges are dynamic: the
 [`Hotswap E2E (combined)`](.github/workflows/hotswap-e2e.yml) workflow publishes
 a status JSON per `(framework, model)` to the orphan
