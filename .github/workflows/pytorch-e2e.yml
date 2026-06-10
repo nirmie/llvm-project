@@ -162,6 +162,22 @@ jobs:
             --export=ALL \
             bash "$GITHUB_WORKSPACE/.github/workflows/scripts/pytorch-e2e.sh"
 
+      - name: Release SLURM allocation (cleanup)
+        if: always()
+        run: |
+          # On cancel-in-progress the runner kills this step's shell and orphans
+          # the srun on the GPU node, holding the allocation until --time
+          # expires. scancel this run's uniquely-named job so the GPU frees
+          # immediately on success, failure, or cancellation.
+          JN="pytorch-e2e-${{ github.run_id }}"
+          LEFT=$(squeue --noheader --name="$JN" -o "%i %T" 2>/dev/null || true)
+          if [ -n "$LEFT" ]; then
+            echo "releasing lingering SLURM allocation for $JN:"; echo "$LEFT"
+            scancel --name="$JN" 2>/dev/null || true
+          else
+            echo "no lingering SLURM allocation for $JN"
+          fi
+
       - name: Summarize E2E results
         if: always()
         run: |

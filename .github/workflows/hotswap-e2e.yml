@@ -137,6 +137,22 @@ jobs:
             --container-mounts="$MOUNTS" --export=ALL \
             bash "$GITHUB_WORKSPACE/.github/workflows/scripts/$SCRIPT"
 
+      - name: Release SLURM allocation (cleanup)
+        if: always()
+        run: |
+          # On cancel-in-progress the runner kills this step's shell and orphans
+          # the srun on the GPU node, holding the (costly) allocation until
+          # --time expires. scancel this model's uniquely-named job so the GPU
+          # frees immediately on success, failure, or cancellation.
+          JN="hotswap-e2e-${{ github.run_id }}-${{ matrix.model }}"
+          LEFT=$(squeue --noheader --name="$JN" -o "%i %T" 2>/dev/null || true)
+          if [ -n "$LEFT" ]; then
+            echo "releasing lingering SLURM allocation for $JN:"; echo "$LEFT"
+            scancel --name="$JN" 2>/dev/null || true
+          else
+            echo "no lingering SLURM allocation for $JN"
+          fi
+
       - name: Summary row (continuous)
         if: always()
         run: |
