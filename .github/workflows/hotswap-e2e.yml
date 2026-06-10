@@ -122,6 +122,11 @@ jobs:
     needs: models
     if: always()
     runs-on: [self-hosted, linux, rocm, alola, hotswap]
+    # contents: write so the status-publish step can push the per-model badge
+    # JSONs to the orphan `ci-status` branch (job-scoped; the matrix jobs stay
+    # read-only).
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Render consolidated PyTorch + SGLang tables
@@ -130,3 +135,42 @@ jobs:
             "$OUTPUT_ROOT" \
             "pytorch=qwen2_5_7b_instruct,phi4_mini,qwen1_5_moe_a2_7b_chat,qwen2_5_vl_7b_instruct,sd_3_5_large,bge_large_en_v1_5" \
             "sglang=llama,phi4_mini" >> "$GITHUB_STEP_SUMMARY" || true
+
+      # Publish the README scoreboard badges (rocm-libraries-style): one
+      # shields-endpoint JSON per (framework, model), pushed to the orphan
+      # `ci-status` branch so the README badges auto-update without committing to
+      # source history. Skipped on pull_request (PR results are transient and
+      # fork PRs get a read-only token); the scoreboard reflects the nightly
+      # full sweep + dispatch runs. Existing badges are preserved (a partial
+      # dispatch run only overwrites the models it ran).
+      - name: Publish status badges to ci-status branch
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BADGES="$RUNNER_TEMP/badges"; rm -rf "$BADGES"; mkdir -p "$BADGES"
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/emit-status-badges.py" \
+            "$OUTPUT_ROOT" "$BADGES" \
+            "pytorch=qwen2_5_7b_instruct,phi4_mini,qwen1_5_moe_a2_7b_chat,qwen2_5_vl_7b_instruct,sd_3_5_large,bge_large_en_v1_5" \
+            "sglang=llama,phi4_mini"
+
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          WT="$RUNNER_TEMP/ci-status"; rm -rf "$WT"; mkdir -p "$WT"
+          cd "$WT"; git init -q; git remote add origin "$REMOTE"
+          # Base on the existing ci-status tree if present (preserve other
+          # models' badges); otherwise start an orphan branch.
+          if git fetch -q --depth 1 origin ci-status 2>/dev/null; then
+            git checkout -q -b ci-status FETCH_HEAD
+          else
+            git checkout -q --orphan ci-status
+          fi
+          cp -r "$BADGES/." .
+          git add -A
+          if git -c user.email=hotswap-ci@amd.com -c user.name="hotswap-ci" \
+               commit -q -m "ci-status: run ${GITHUB_RUN_ID} ($(date -u +%FT%TZ))"; then
+            git push -q origin HEAD:ci-status
+            echo "published $(find "$BADGES" -name '*.json' | wc -l) badges to ci-status"
+          else
+            echo "no status change"
+          fi
