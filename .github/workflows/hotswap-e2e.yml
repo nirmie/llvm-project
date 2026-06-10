@@ -93,7 +93,15 @@ jobs:
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     name: ${{ matrix.fw }}-${{ matrix.model }}
     steps:
+      # Sparse + shallow: the runner only needs .github/workflows/scripts/* (the
+      # srun driver scripts + renderers), NOT the 100k-file LLVM tree. A full
+      # checkout writes the whole working tree to NFS home (~7 files/2min) and
+      # pointlessly loads the shared login node. This keeps the login-node step
+      # tiny; all heavy work runs on compute nodes via srun.
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+          fetch-depth: 1
 
       - name: Prepare pinned harness checkout
         run: |
@@ -175,7 +183,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Sparse + shallow: the runner only needs .github/workflows/scripts/* (the
+      # srun driver scripts + renderers), NOT the 100k-file LLVM tree. A full
+      # checkout writes the whole working tree to NFS home (~7 files/2min) and
+      # pointlessly loads the shared login node. This keeps the login-node step
+      # tiny; all heavy work runs on compute nodes via srun.
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+          fetch-depth: 1
       - name: Render consolidated PyTorch + SGLang tables
         run: |
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-combined-summary.py" \
