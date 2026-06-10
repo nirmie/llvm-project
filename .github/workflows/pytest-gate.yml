@@ -1,0 +1,87 @@
+name: Harness pytest gate
+
+# Fast CPU gate: the rocm-hotswap-testing harness unit/component tests
+# (config schema, _build_branch_env LOCAL-vs-HOTSWAP, equivalence/KL verdict
+# math, the intercept + gfx_override shims). No GPU, no model weights -- the
+# harness conftest auto-skips GPU/COMGR/FFM tests, so this runs in seconds on a
+# CPU node and catches harness regressions before the heavy lit + GPU e2e tiers.
+#
+# Tier 1 of 3:  pytest (harness logic, CPU)  ->  lit (transpiler IR, CPU build)
+#               ->  hotswap-e2e (per-model GPU e2e, two tables).
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pytest-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: [self-hosted, linux, rocm, alola, hotswap]
+    env:
+      COMPUTE_HOME: /home/AMD/nisenthi
+      # pytorch-runner already has the cp312 venv (torch) + the harness baked;
+      # the CPU pytest subset needs no GPU and no SGLang stack.
+      CONTAINER_IMAGE: /home/AMD/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_pytorch-runner_latest.sqsh
+      HARNESS_REPO: https://github.com/harsh-amd/rocm-hotswap-testing.git
+      HARNESS_CHECKOUT: /cluster/hotswap-ci/rocm-hotswap-testing
+      VENV: /home/hotswap/rocm-hotswap-testing/venvs/hotswap/gfx950/bin/python
+      PYTEST_LOG: /root/ci/persist/pytest-output.log
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare pinned harness checkout
+        run: |
+          set -euo pipefail
+          CO="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"
+          [ -d "$CO/.git" ] || git clone "$HARNESS_REPO" "$CO"
+          git -C "$CO" fetch --all --prune
+          git -C "$CO" checkout users/nirmie/pytorch-model-agnostic-debug
+          git -C "$CO" pull --ff-only || true
+          echo "harness at $(git -C "$CO" rev-parse --short HEAD)"
+
+      - name: pytest (srun -> defq CPU node)
+        run: |
+          set -euo pipefail
+          LOG="${PYTEST_LOG/#\/root/$COMPUTE_HOME}"; mkdir -p "$(dirname "$LOG")"
+          srun \
+            --partition=defq --constraint=CPUONLY --time=0:30:00 \
+            --nodes=1 --cpus-per-task=16 --mem=32G \
+            --job-name=pytest-gate-${{ github.run_id }} \
+            --container-image="$CONTAINER_IMAGE" \
+            --container-writable --container-remap-root \
+            --container-mounts=/cluster:/cluster \
+            --export=ALL \
+            bash -lc '
+              set -euo pipefail
+              cd "'"$HARNESS_CHECKOUT"'"
+              # pytest may not be in the baked venv; install ephemerally.
+              "'"$VENV"'" -m pip install -q pytest 2>/dev/null || true
+              "'"$VENV"'" -m pytest tests/ -q --no-header -p no:cacheprovider
+            ' 2>&1 | tee "$LOG"
+
+      - name: Summarize pytest results
+        if: always()
+        run: |
+          set -euo pipefail
+          LOG="${PYTEST_LOG/#\/root/$COMPUTE_HOME}"
+          {
+            echo "## Harness pytest gate"
+            echo
+            if [ -f "$LOG" ]; then
+              echo '```'
+              grep -E "passed|failed|skipped|error" "$LOG" | tail -5 || echo "(no result line)"
+              echo '```'
+              if grep -qE "[0-9]+ failed" "$LOG"; then
+                echo "### Failures"; echo '```'
+                grep -E "^FAILED|^ERROR" "$LOG" | head -40; echo '```'
+              fi
+            else
+              echo "no pytest log (srun failed before pytest ran)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
