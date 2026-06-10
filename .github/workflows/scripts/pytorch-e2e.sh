@@ -121,9 +121,21 @@ start_log_stream() {
 overall_rc=0
 for m in $MODELS; do
   cfg="$CFG/$m.json"
+  mkdir -p "/output/$m"
+
+  # A model with no config (a group whose workload module doesn't exist yet)
+  # or whose weights aren't staged is reported as PENDING, not failed -- the
+  # suite lists one representative per model-support-plan group so the summary
+  # shows the whole landscape, including groups we can't run yet.
   if [ ! -f "$cfg" ]; then
-    echo "::error::no model config $cfg" >&2
-    overall_rc=1
+    echo "::notice::$m pending -- no config (workload/group not wired yet)"
+    echo "no config" > "/output/$m/PENDING"
+    continue
+  fi
+  mp=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('default_model_path',''))" "$cfg" 2>/dev/null)
+  if [ -z "$mp" ] || [ ! -e "$mp" ]; then
+    echo "::notice::$m pending -- weights not staged ($mp)"
+    echo "no weights: ${mp:-<unset>}" > "/output/$m/PENDING"
     continue
   fi
 

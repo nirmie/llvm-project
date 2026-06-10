@@ -1,9 +1,14 @@
 name: PyTorch HotSwap E2E
 
 # Short per-PR model suite: one representative per model-support-plan group
-# we have weights for (martin-luecke/rocm-systems#70) -- Group 1 dense LLM
-# (phi4_mini) + Group 4 diffusion (sd_3_5_large). Fires on every PR; also
-# workflow_dispatch for ad-hoc runs of a custom model list / ISA.
+# (martin-luecke/rocm-systems#70). Models with staged weights run; the rest
+# show as PENDING in the summary so every group is visible:
+#   G1 dense LLM   phi4_mini (transpiles 54 kernels), qwen2_5_7b_instruct
+#   G2 MoE         qwen1_5_moe_a2_7b_chat        (weights pending)
+#   G3 VLM         qwen2_5_vl_7b_instruct        (weights pending)
+#   G4 diffusion   sd_3_5_large
+#   G5 encoder     bge_large_en_v1_5             (boilerplate; new workload)
+# Fires on every PR; workflow_dispatch allows a custom model list / ISA.
 on:
   pull_request:
   workflow_dispatch:
@@ -11,7 +16,7 @@ on:
       models:
         description: "Space-separated model config stems under data/pytorch/models/"
         type: string
-        default: "phi4_mini sd_3_5_large"
+        default: "phi4_mini qwen2_5_7b_instruct qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5"
       target_gfx:
         description: "GPU ISA to transpile gfx1250 kernels to"
         type: choice
@@ -87,7 +92,7 @@ jobs:
           set -euo pipefail
 
           # Inputs are empty on pull_request; fall back to the short PR suite.
-          MODELS_IN="${{ inputs.models || 'phi4_mini sd_3_5_large' }}"
+          MODELS_IN="${{ inputs.models || 'phi4_mini qwen2_5_7b_instruct qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5' }}"
           TARGET_GFX="${{ inputs.target_gfx || 'gfx950' }}"
           TIMEOUT_IN="${{ inputs.timeout_seconds || '3600' }}"
           INJECT_COMGR="${{ inputs.inject_pr_comgr || 'false' }}"
@@ -160,4 +165,4 @@ jobs:
         if: always()
         run: |
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-e2e-summary.py" \
-            "$OUTPUT_ROOT" ${{ inputs.models || 'phi4_mini sd_3_5_large' }} >> "$GITHUB_STEP_SUMMARY" || true
+            "$OUTPUT_ROOT" ${{ inputs.models || 'phi4_mini qwen2_5_7b_instruct qwen1_5_moe_a2_7b_chat qwen2_5_vl_7b_instruct sd_3_5_large bge_large_en_v1_5' }} >> "$GITHUB_STEP_SUMMARY" || true

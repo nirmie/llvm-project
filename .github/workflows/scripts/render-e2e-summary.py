@@ -55,8 +55,16 @@ def main() -> int:
     for m in models:
         sj = newest_summary(root, m)
         if not sj:
-            out.append(f"| {m} | — | — | — | — | :x: no summary.json |")
-            any_fail = True
+            # A model the run-script skipped (no config / no weights) leaves a
+            # PENDING marker; show it as a known gap, not a failure, so the
+            # summary covers every model-support-plan group.
+            pend = os.path.join(root, m, "PENDING")
+            if os.path.isfile(pend):
+                reason = open(pend).read().strip() or "pending"
+                out.append(f"| {m} | — | — | — | — | :hourglass: pending ({reason}) |")
+            else:
+                out.append(f"| {m} | — | — | — | — | :x: no summary.json |")
+                any_fail = True
             continue
         s = json.load(open(sj))
         local = s.get("local", {}) or {}
