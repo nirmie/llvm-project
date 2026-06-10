@@ -96,6 +96,25 @@ jobs:
             bash "$GITHUB_WORKSPACE/.github/workflows/scripts/hotswap-build.sh" \
             2>&1 | tee "$LIT_LOG"
 
+      - name: Release SLURM allocation (cleanup)
+        if: always()
+        run: |
+          # A plain `srun` frees its allocation when it returns -- but on
+          # cancel-in-progress (a newer push supersedes this run) the runner
+          # kills this step's shell and the srun is orphaned on the compute
+          # node, holding the allocation until --time expires. Cancel any job
+          # from THIS run by its unique run-id-scoped name so the node frees
+          # immediately. `always()` runs on success, failure, AND cancellation.
+          JN="hotswap-pr-${{ github.run_id }}"
+          LEFT=$(squeue --noheader --name="$JN" -o "%i %T" 2>/dev/null || true)
+          if [ -n "$LEFT" ]; then
+            echo "releasing lingering SLURM allocation for $JN:"
+            echo "$LEFT"
+            scancel --name="$JN" 2>/dev/null || true
+          else
+            echo "no lingering SLURM allocation for $JN"
+          fi
+
       - name: Summarize lit results
         if: always()
         run: |
