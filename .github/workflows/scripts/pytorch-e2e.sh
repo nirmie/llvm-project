@@ -80,11 +80,19 @@ if [ -n "${COMGR_TOOLS_DIR:-}" ]; then
   echo "injected transpiler tools dir: $COMGR_TOOLS_DIR"
 fi
 
-# NOTE: do NOT re-enable the renamed-aside Tensile gfx1250 fallback libs
-# (*.disabled-for-phi4-test). The transpiler intentionally skips their
-# scratch_store_b32/s_load_b64 kernels; re-enabling forces it to try lifting
-# them -> "no kernel image is available". The local working setup keeps them
-# disabled, so we match that.
+# Re-enable the renamed-aside Tensile gfx1250 fallback libs
+# (*.disabled-for-phi4-test / *.disabled-by-freeze). On the Alola GPUs the
+# transpiled (hotswap) leg dispatches qwen/phi4 GEMMs THROUGH this fallback, and
+# with it disabled rocBLAS has no kernel -> hipblasSgemm INTERNAL_ERROR. The
+# BAKED branch comgr lifts those kernels cleanly (0 raises, verified), so
+# re-enabling is safe with it (do NOT re-enable when overriding with a comgr
+# that can't lift them). Container is writable -> ephemeral per run.
+ROCBLAS_LIB="$REPO/deps/TheRock-build/dist/rocm/lib/rocblas/library"
+if [ -d "$ROCBLAS_LIB" ]; then
+  find "$ROCBLAS_LIB" -maxdepth 1 -name '*.disabled-*' 2>/dev/null | while read -r d; do
+    mv -f "$d" "${d%.disabled-*}" && echo "re-enabled Tensile lib: $(basename "${d%.disabled-*}")"
+  done
+fi
 
 # The GPU is renumbered to index 0 inside a --gres=gpu:1 allocation
 # (ROCR_VISIBLE_DEVICES=0); the harness otherwise inherits the physical
