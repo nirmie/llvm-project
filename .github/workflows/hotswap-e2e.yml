@@ -47,7 +47,7 @@ env:
   MODELS_ROOT: /projects/hotswap-ci/models
   HARNESS_REPO: https://github.com/harsh-amd/rocm-hotswap-testing.git
   HARNESS_CHECKOUT: /cluster/hotswap-ci/rocm-hotswap-testing
-  HARNESS_REF: users/nirmie/sglang-model-agnostic-debug
+  HARNESS_REF: users/nirmie/hotswap-ci-all-platforms
   CI_CONFIGS: /cluster/hotswap-ci/model-configs
   CACHE_HOST: /home/AMD/nisenthi/hotswap-cache-shared
   OUTPUT_ROOT: /root/ci/hotswap-e2e/${{ github.run_id }}
