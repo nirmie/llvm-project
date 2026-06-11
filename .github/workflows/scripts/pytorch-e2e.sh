@@ -80,18 +80,21 @@ if [ -n "${COMGR_TOOLS_DIR:-}" ]; then
   echo "injected transpiler tools dir: $COMGR_TOOLS_DIR"
 fi
 
-# Re-enable the renamed-aside Tensile gfx1250 fallback libs
-# (*.disabled-for-phi4-test / *.disabled-by-freeze). On the Alola GPUs the
-# transpiled (hotswap) leg dispatches qwen/phi4 GEMMs THROUGH this fallback, and
-# with it disabled rocBLAS has no kernel -> hipblasSgemm INTERNAL_ERROR. The
-# BAKED branch comgr lifts those kernels cleanly (0 raises, verified), so
-# re-enabling is safe with it (do NOT re-enable when overriding with a comgr
-# that can't lift them). Container is writable -> ephemeral per run.
+# Leave the renamed-aside Tensile gfx1250 fallback libs
+# (*.disabled-for-phi4-test) DISABLED -- exactly as the conductor's local
+# run-model does. With the gfx1250 device override active, rocBLAS will pick a
+# *.hsaco_fallback_gfx1250 Tensile kernel if one is present and try to load it
+# for the override device; that load fails -> hipblasSgemm INTERNAL_ERROR on the
+# qwen/phi4 RoPE GEMM. Disabled, rocBLAS instead routes the GEMM through the
+# source-gemm path, which the baked branch comgr lifts cleanly (-> the expected
+# `diverged` result). Re-enabling these was added, reverted as a regression, and
+# wrongly re-added (b57952ce); the conductor never re-enables them and works, so
+# CI must not either. The image already ships them disabled, so this is a no-op
+# guard that just refuses to flip them back on.
 ROCBLAS_LIB="$REPO/deps/TheRock-build/dist/rocm/lib/rocblas/library"
 if [ -d "$ROCBLAS_LIB" ]; then
-  find "$ROCBLAS_LIB" -maxdepth 1 -name '*.disabled-*' 2>/dev/null | while read -r d; do
-    mv -f "$d" "${d%.disabled-*}" && echo "re-enabled Tensile lib: $(basename "${d%.disabled-*}")"
-  done
+  still=$(find "$ROCBLAS_LIB" -maxdepth 1 -name '*.disabled-*' 2>/dev/null | wc -l)
+  echo "kept $still Tensile gfx1250 fallback lib(s) disabled (matches local run-model)"
 fi
 
 # The GPU is renumbered to index 0 inside a --gres=gpu:1 allocation
