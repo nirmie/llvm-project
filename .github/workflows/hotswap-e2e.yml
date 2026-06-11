@@ -150,7 +150,7 @@ jobs:
                 --container-mounts="$BASE_MOUNTS$COMGR_MOUNT" --export=ALL \
                 bash "$GITHUB_WORKSPACE/.github/workflows/scripts/$script"
             ) > "$OUTPUT_COMPUTE/$model/srun.log" 2>&1 &
-            pids+=("$!|$fw/$model")
+            pids+=("$!|$fw|$model")
             echo "launched $fw/$model (pid $!)"
           }
 
@@ -159,11 +159,31 @@ jobs:
 
           echo "waiting for ${#pids[@]} model job(s) (SLURM is scheduling them)..."
           rc=0
+          verdicts=()
           for entry in "${pids[@]}"; do
-            pid="${entry%%|*}"; name="${entry#*|}"
-            if wait "$pid"; then echo "PASS $name"; else echo "FAIL $name"; rc=1; fi
+            pid="${entry%%|*}"; rest="${entry#*|}"; fw="${rest%%|*}"; model="${rest#*|}"
+            if wait "$pid"; then v=PASS; else v=FAIL; rc=1; fi
+            verdicts+=("$v|$fw|$model")
+            echo "$v $fw/$model"
           done
           echo "all model jobs finished (rc=$rc)"
+
+          # Replay each model's full srun log in its OWN collapsible GitHub group
+          # so the parallel SLURM runs show as separate boxes on the run page (the
+          # old per-model view) instead of one interleaved blob. srun.log is the
+          # already-curated high-signal stream (raw HIP/rocBLAS trace stays in the
+          # per-branch run.log). Inner ::group::/::endgroup:: from the per-model
+          # scripts are stripped to avoid broken nesting; ::notice::/::warning::/
+          # ::error:: annotations are preserved.
+          echo "----- per-model logs (collapsible) -----"
+          for v in "${verdicts[@]}"; do
+            verdict="${v%%|*}"; rest="${v#*|}"; fw="${rest%%|*}"; model="${rest#*|}"
+            log="$OUTPUT_COMPUTE/$model/srun.log"
+            echo "::group::[$verdict] $fw / $model"
+            if [ -s "$log" ]; then grep -avE '^::(group|endgroup)::' "$log"; else echo "(no log captured)"; fi
+            echo "::endgroup::"
+          done
+
           exit $rc
 
       - name: Release SLURM allocations (cleanup)
