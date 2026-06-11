@@ -59,10 +59,12 @@ env:
   # (users/nirmie/hotswap-gfx11-12-13-alias). Long-term (M7) the lit tier builds
   # comgr from the branch (normally hotswap/main) and publishes it here. Set
   # empty to fall back to the image's baked comgr.
+  # Override dir holds BOTH the branch comgr (lib/) AND its matching LLVM tools
+  # (bin/) -- the transpiler shells out to llc/lld/llvm-mc, and mixing the
+  # branch comgr with the image's OLD baked tools produced a bad GEMM kernel
+  # (hipblasSgemm INTERNAL_ERROR). Mount the whole dir and use comgr+tools from
+  # the SAME build, mirroring how the archived pytorch-e2e.yml did it.
   COMGR_OVERRIDE_DIR: /cluster/hotswap-ci/comgr-override
-  # In-image LLVM tools the transpiler shells out to (llc/lld/llvm-mc). PR #101
-  # only changed comgr .cpp, so the image's baked tools stay compatible.
-  COMGR_TOOLS_IN_IMAGE: /home/hotswap/rocm-hotswap-testing/deps/llvm-hotswap-artifacts/bin
 
 jobs:
   # Pick the matrix by event: rep subset on PR (and dispatch sweep=rep), the
@@ -157,10 +159,10 @@ jobs:
           # harness at it. pytorch-e2e.sh seds PYTORCH_COMGR_RUNTIME to
           # COMGR_RUNTIME and exports HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR from
           # COMGR_TOOLS_DIR. (sglang-e2e.sh doesn't consume these yet -- M7.)
-          if [ -n "${COMGR_OVERRIDE_DIR:-}" ] && [ -e "$COMGR_OVERRIDE_DIR/libamd_comgr.so.3.3.0" ]; then
+          if [ -n "${COMGR_OVERRIDE_DIR:-}" ] && [ -e "$COMGR_OVERRIDE_DIR/lib/libamd_comgr.so.3.3.0" ]; then
             MOUNTS="$MOUNTS,$COMGR_OVERRIDE_DIR:/comgr-override:ro"
-            export COMGR_RUNTIME=/comgr-override/libamd_comgr.so.3.3.0
-            export COMGR_TOOLS_DIR="$COMGR_TOOLS_IN_IMAGE"
+            export COMGR_RUNTIME=/comgr-override/lib/libamd_comgr.so.3.3.0
+            export COMGR_TOOLS_DIR=/comgr-override/bin
             echo "comgr-under-test: $COMGR_RUNTIME (tools $COMGR_TOOLS_DIR)"
           fi
 

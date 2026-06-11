@@ -80,6 +80,19 @@ if [ -n "${COMGR_TOOLS_DIR:-}" ]; then
   echo "injected transpiler tools dir: $COMGR_TOOLS_DIR"
 fi
 
+# Re-enable any Tensile gfx1250 fallback libraries that were renamed aside
+# (.disabled-for-phi4-test / .disabled-by-freeze). Those were a workaround for an
+# OLD comgr that refused to lift a scratch-store kernel; the current transpiler
+# handles it, and leaving them disabled makes models that dispatch through them
+# (e.g. qwen2.5-7b) fail with "no kernel image is available for execution on the
+# device". The container is writable, so this rename is ephemeral.
+ROCBLAS_LIB="$REPO/deps/TheRock-build/dist/rocm/lib/rocblas/library"
+if [ -d "$ROCBLAS_LIB" ]; then
+  find "$ROCBLAS_LIB" -maxdepth 1 -name '*.disabled-*' 2>/dev/null | while read -r d; do
+    mv -f "$d" "${d%.disabled-*}" && echo "re-enabled Tensile lib: $(basename "${d%.disabled-*}")"
+  done
+fi
+
 # The GPU is renumbered to index 0 inside a --gres=gpu:1 allocation
 # (ROCR_VISIBLE_DEVICES=0); the harness otherwise inherits the physical
 # index and hits hipErrorNoDevice.
