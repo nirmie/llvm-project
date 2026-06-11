@@ -168,7 +168,7 @@ jobs:
             echo "comgr-under-test: $COMGR_RUNTIME (tools $COMGR_TOOLS_DIR)"
           fi
 
-          srun --partition=defq "${GPU_SEL[@]}" --time=2:00:00 --nodes=1 \
+          srun --partition=defq "${GPU_SEL[@]}" --time=1:00:00 --nodes=1 \
             --cpus-per-task=16 --mem=128G \
             --job-name=hotswap-e2e-${{ github.run_id }}-${{ matrix.model }} \
             --chdir="$GITHUB_WORKSPACE" --container-image="$IMAGE" \
