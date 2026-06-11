@@ -59,12 +59,14 @@ env:
   # (users/nirmie/hotswap-gfx11-12-13-alias). Long-term (M7) the lit tier builds
   # comgr from the branch (normally hotswap/main) and publishes it here. Set
   # empty to fall back to the image's baked comgr.
-  # Override dir holds BOTH the branch comgr (lib/) AND its matching LLVM tools
-  # (bin/) -- the transpiler shells out to llc/lld/llvm-mc, and mixing the
-  # branch comgr with the image's OLD baked tools produced a bad GEMM kernel
-  # (hipblasSgemm INTERNAL_ERROR). Mount the whole dir and use comgr+tools from
-  # the SAME build, mirroring how the archived pytorch-e2e.yml did it.
-  COMGR_OVERRIDE_DIR: /cluster/hotswap-ci/comgr-override
+  # comgr-under-test override. EMPTY = use the image's BAKED comgr, which is
+  # already built from the branch (verified: strings show
+  # users/nirmie/hotswap-gfx11-12-13-alias) and produces the expected result
+  # (qwen 54/54 transpiled, equivalence=diverged). A stale/broken external build
+  # staged here previously raised `unsupported: s_load_b64` -> "no kernel image",
+  # so only point this at a KNOWN-GOOD freshly-built branch comgr (M7). Leave
+  # empty to run the baked branch comgr.
+  COMGR_OVERRIDE_DIR: ""
 
 jobs:
   # Pick the matrix by event: rep subset on PR (and dispatch sweep=rep), the
