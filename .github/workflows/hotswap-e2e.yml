@@ -1,16 +1,19 @@
 name: Hotswap E2E (combined)
 
-# Combined PyTorch + SGLang model E2E. One workflow, ONE image
-# (hotswap-model-runner: run-model for pytorch + run-sglang-model for sglang),
-# rendered as TWO separate tables.
+# Combined PyTorch + SGLang model E2E. One image (hotswap-model-runner:
+# run-model for pytorch + run-sglang-model for sglang).
 #
-# PARALLEL model scheduling: a single `e2e` job submits one `srun` per model in
-# the BACKGROUND and lets SLURM schedule them across the Markham mi350x nodes,
-# then `wait`s for all. This is one GH-runner pickup (robust against the single
-# self-hosted runner's broker flakiness) while still running models concurrently.
-# A crash in one model (OOM/segfault/--time) is contained to its srun; the others
-# keep going. After all finish it renders the two tables AND publishes the
-# per-model status badges to the orphan `ci-status` branch (README scoreboard).
+# PER-MODEL JOBS: each (framework, model) pair is its own GitHub job named
+# `<fw>-<model>` (e.g. pytorch-qwen2_5_7b_instruct, sglang-llama). Each job runs
+# ONE `srun` in the FOREGROUND so its log STREAMS LIVE to the run page (vs the
+# old single-job approach that only showed logs after everything finished). A
+# crash in one model is contained (`fail-fast: false`). An `aggregate` job then
+# renders the two tables + publishes the badge scoreboard.
+#
+# Throughput note: with one self-hosted runner the per-model jobs serialize
+# (one foreground srun at a time); additional runner instances let them run
+# concurrently. The setup job does the harness checkout ONCE; per-model jobs
+# only read it (ro mount), so concurrent jobs don't race on the checkout.
 #
 # Triggers:
 #   pull_request      -> representative subset (fast PR signal)
@@ -51,20 +54,18 @@ env:
   CI_CONFIGS: /cluster/hotswap-ci/model-configs
   CACHE_HOST: /home/AMD/nisenthi/hotswap-cache-shared
   OUTPUT_ROOT: /root/ci/hotswap-e2e/${{ github.run_id }}
-  # comgr-under-test override. EMPTY = use the image's BAKED comgr (already built
-  # from the branch users/nirmie/hotswap-gfx11-12-13-alias). Only point this at a
-  # KNOWN-GOOD freshly-built branch comgr+tools dir (lib/ + bin/); a stale build
-  # raises `unsupported: s_load_b64` -> "no kernel image".
+  # comgr-under-test override. EMPTY = use the image's BAKED branch comgr.
   COMGR_OVERRIDE_DIR: ""
 
 jobs:
-  # Pick the model lists by event: rep subset on PR (and dispatch sweep=rep), the
-  # full set on schedule (and dispatch sweep=full).
+  # Pick model lists by event, emit the per-(fw,model) job matrix, and refresh
+  # the pinned harness checkout ONCE (per-model jobs only read it).
   setup:
     runs-on: [self-hosted, linux, rocm, alola, hotswap]
     outputs:
       pyt: ${{ steps.pick.outputs.pyt }}
       sgl: ${{ steps.pick.outputs.sgl }}
+      matrix: ${{ steps.pick.outputs.matrix }}
     steps:
       - id: pick
         run: |
@@ -82,23 +83,14 @@ jobs:
           esac
           echo "pyt=$PYT" >> "$GITHUB_OUTPUT"
           echo "sgl=$SGL" >> "$GITHUB_OUTPUT"
+          # Build the {fw,model} matrix JSON for the per-model jobs.
+          items=""
+          for m in $(echo "$PYT" | tr ',' ' '); do [ -n "$m" ] && items="$items{\"fw\":\"pytorch\",\"model\":\"$m\"},"; done
+          for m in $(echo "$SGL" | tr ',' ' '); do [ -n "$m" ] && items="$items{\"fw\":\"sglang\",\"model\":\"$m\"},"; done
+          echo "matrix=[${items%,}]" >> "$GITHUB_OUTPUT"
           echo "event=${{ github.event_name }} pyt=$PYT sgl=$SGL"
 
-  e2e:
-    needs: setup
-    runs-on: [self-hosted, linux, rocm, alola, hotswap]
-    # contents: write so the badge-publish step can push to the orphan ci-status branch.
-    permissions:
-      contents: write
-    steps:
-      # Sparse + shallow: only need .github/workflows/scripts/*, not the 100k-file
-      # LLVM tree (a full checkout crawls on NFS home).
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github
-          fetch-depth: 1
-
-      - name: Prepare pinned harness checkout
+      - name: Prepare pinned harness checkout (once; per-model jobs read it ro)
         run: |
           set -euo pipefail
           CO="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"
@@ -108,16 +100,31 @@ jobs:
           git -C "$CO" pull --ff-only || true
           echo "harness at $(git -C "$CO" rev-parse --short HEAD)"
 
-      - name: Run all models in parallel (one srun each; SLURM schedules)
+  # One job per (framework, model). Foreground srun -> live-streaming log.
+  e2e:
+    needs: setup
+    runs-on: [self-hosted, linux, rocm, alola, hotswap]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix) }}
+    name: ${{ matrix.fw }}-${{ matrix.model }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+          fetch-depth: 1
+
+      - name: Run ${{ matrix.fw }} / ${{ matrix.model }} (srun, live)
         run: |
           set -uo pipefail
           OUTPUT_COMPUTE="${OUTPUT_ROOT/#\/root/$COMPUTE_HOME}"
           export GITHUB_WORKSPACE="${GITHUB_WORKSPACE/#\/root/$COMPUTE_HOME}"
           HARNESS_COMPUTE="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"
+          fw="${{ matrix.fw }}"; model="${{ matrix.model }}"
 
           TARGET_GFX="${{ inputs.target_gfx || 'gfx950' }}"
-          # MARKHAM REQUIRED: only Markham nodes mount the Markham NFS; Austin
-          # GFX950 nodes (mi355x) mount none of it.
+          # MARKHAM REQUIRED: only Markham nodes mount the Markham NFS.
           case "$TARGET_GFX" in
             gfx950) GPU_SEL=("--constraint=GFX950&MARKHAM" --gres=gpu:1) ;;
             gfx942) GPU_SEL=("--constraint=MARKHAM" --gres=gpu:gfx942-mi300x:1) ;;
@@ -128,77 +135,53 @@ jobs:
           COMGR_MOUNT=""
           if [ -n "${COMGR_OVERRIDE_DIR:-}" ] && [ -e "$COMGR_OVERRIDE_DIR/lib/libamd_comgr.so.3.3.0" ]; then
             COMGR_MOUNT=",$COMGR_OVERRIDE_DIR:/comgr-override:ro"
+            export COMGR_RUNTIME=/comgr-override/lib/libamd_comgr.so.3.3.0 COMGR_TOOLS_DIR=/comgr-override/bin
           fi
 
-          pids=()
-          launch() {
-            local fw="$1" model="$2"
-            mkdir -p "$OUTPUT_COMPUTE/$model"
-            (
-              export PYTORCH_TIMEOUT_SECONDS=3600 CACHE_DIR=/cache
-              local script
-              if [ "$fw" = pytorch ]; then script=pytorch-e2e.sh; export MODELS="$model"
-              else script=sglang-e2e.sh; export SGLANG_PROFILES="$model"; fi
-              if [ -n "$COMGR_MOUNT" ]; then
-                export COMGR_RUNTIME=/comgr-override/lib/libamd_comgr.so.3.3.0 COMGR_TOOLS_DIR=/comgr-override/bin
-              fi
-              srun --partition=defq "${GPU_SEL[@]}" --time=1:00:00 --nodes=1 \
-                --cpus-per-task=16 --mem=128G \
-                --job-name="hotswap-e2e-${{ github.run_id }}-$model" \
-                --chdir="$GITHUB_WORKSPACE" --container-image="$IMAGE" \
-                --container-writable --container-remap-root \
-                --container-mounts="$BASE_MOUNTS$COMGR_MOUNT" --export=ALL \
-                bash "$GITHUB_WORKSPACE/.github/workflows/scripts/$script"
-            ) > "$OUTPUT_COMPUTE/$model/srun.log" 2>&1 &
-            pids+=("$!|$fw|$model")
-            echo "launched $fw/$model (pid $!)"
-          }
+          mkdir -p "$OUTPUT_COMPUTE/$model"
+          export PYTORCH_TIMEOUT_SECONDS=3600 CACHE_DIR=/cache
+          if [ "$fw" = pytorch ]; then script=pytorch-e2e.sh; export MODELS="$model";
+          else script=sglang-e2e.sh; export SGLANG_PROFILES="$model"; fi
 
-          for m in $(echo "${{ needs.setup.outputs.pyt }}" | tr ',' ' '); do [ -n "$m" ] && launch pytorch "$m"; done
-          for m in $(echo "${{ needs.setup.outputs.sgl }}" | tr ',' ' '); do [ -n "$m" ] && launch sglang "$m"; done
+          # Foreground: srun stdout streams live to this job's GitHub log. The
+          # in-container driver gates from summary.json and sets the exit code,
+          # so this job goes red/green per model.
+          srun --partition=defq "${GPU_SEL[@]}" --time=1:00:00 --nodes=1 \
+            --cpus-per-task=16 --mem=128G \
+            --job-name="hotswap-e2e-${{ github.run_id }}-$fw-$model" \
+            --chdir="$GITHUB_WORKSPACE" --container-image="$IMAGE" \
+            --container-writable --container-remap-root \
+            --container-mounts="$BASE_MOUNTS$COMGR_MOUNT" --export=ALL \
+            bash "$GITHUB_WORKSPACE/.github/workflows/scripts/$script"
 
-          echo "waiting for ${#pids[@]} model job(s) (SLURM is scheduling them)..."
-          rc=0
-          verdicts=()
-          for entry in "${pids[@]}"; do
-            pid="${entry%%|*}"; rest="${entry#*|}"; fw="${rest%%|*}"; model="${rest#*|}"
-            if wait "$pid"; then v=PASS; else v=FAIL; rc=1; fi
-            verdicts+=("$v|$fw|$model")
-            echo "$v $fw/$model"
-          done
-          echo "all model jobs finished (rc=$rc)"
-
-          # Replay each model's full srun log in its OWN collapsible GitHub group
-          # so the parallel SLURM runs show as separate boxes on the run page (the
-          # old per-model view) instead of one interleaved blob. srun.log is the
-          # already-curated high-signal stream (raw HIP/rocBLAS trace stays in the
-          # per-branch run.log). Inner ::group::/::endgroup:: from the per-model
-          # scripts are stripped to avoid broken nesting; ::notice::/::warning::/
-          # ::error:: annotations are preserved.
-          echo "----- per-model logs (collapsible) -----"
-          for v in "${verdicts[@]}"; do
-            verdict="${v%%|*}"; rest="${v#*|}"; fw="${rest%%|*}"; model="${rest#*|}"
-            log="$OUTPUT_COMPUTE/$model/srun.log"
-            echo "::group::[$verdict] $fw / $model"
-            if [ -s "$log" ]; then grep -avE '^::(group|endgroup)::' "$log"; else echo "(no log captured)"; fi
-            echo "::endgroup::"
-          done
-
-          exit $rc
-
-      - name: Release SLURM allocations (cleanup)
+      - name: Release this job's SLURM allocation (cleanup)
         if: always()
         run: |
-          # Free any srun from THIS run (cancel-in-progress orphans them otherwise).
-          PFX="hotswap-e2e-${{ github.run_id }}-"
-          IDS=$(squeue --noheader -u "$(id -un)" -o "%i|%j" 2>/dev/null | awk -F'|' -v p="$PFX" 'index($2,p)==1{print $1}')
-          if [ -n "$IDS" ]; then echo "scancel: $IDS"; scancel $IDS 2>/dev/null || true; else echo "no lingering allocations"; fi
+          JN="hotswap-e2e-${{ github.run_id }}-${{ matrix.fw }}-${{ matrix.model }}"
+          IDS=$(squeue --noheader -u "$(id -un)" -o "%i|%j" 2>/dev/null | awk -F'|' -v j="$JN" '$2==j{print $1}')
+          if [ -n "$IDS" ]; then echo "scancel: $IDS"; scancel $IDS 2>/dev/null || true; else echo "no lingering allocation for $JN"; fi
+
+  # Render the two tables + publish the badge scoreboard once all models finish.
+  aggregate:
+    needs: [setup, e2e]
+    if: always()
+    runs-on: [self-hosted, linux, rocm, alola, hotswap]
+    permissions:
+      contents: write   # badge-publish pushes to the orphan ci-status branch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+          fetch-depth: 1
 
       - name: Render consolidated PyTorch + SGLang tables
         if: always()
         run: |
+          # Read summaries from the COMPUTE path (OUTPUT_ROOT is a /root path the
+          # host runner can't see; the models wrote to $COMPUTE_HOME via the mount).
+          OUTPUT_COMPUTE="${OUTPUT_ROOT/#\/root/$COMPUTE_HOME}"
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-combined-summary.py" \
-            "$OUTPUT_ROOT" \
+            "$OUTPUT_COMPUTE" \
             "pytorch=${{ needs.setup.outputs.pyt }}" \
             "sglang=${{ needs.setup.outputs.sgl }}" >> "$GITHUB_STEP_SUMMARY" || true
 
@@ -208,9 +191,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          OUTPUT_COMPUTE="${OUTPUT_ROOT/#\/root/$COMPUTE_HOME}"
           BADGES="$RUNNER_TEMP/badges"; rm -rf "$BADGES"; mkdir -p "$BADGES"
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/emit-status-badges.py" \
-            "$OUTPUT_ROOT" "$BADGES" \
+            "$OUTPUT_COMPUTE" "$BADGES" \
             "pytorch=${{ needs.setup.outputs.pyt }}" \
             "sglang=${{ needs.setup.outputs.sgl }}"
 
@@ -231,3 +215,10 @@ jobs:
           else
             echo "no status change"
           fi
+
+      - name: Release any lingering SLURM allocations (safety)
+        if: always()
+        run: |
+          PFX="hotswap-e2e-${{ github.run_id }}-"
+          IDS=$(squeue --noheader -u "$(id -un)" -o "%i|%j" 2>/dev/null | awk -F'|' -v p="$PFX" 'index($2,p)==1{print $1}')
+          if [ -n "$IDS" ]; then echo "scancel: $IDS"; scancel $IDS 2>/dev/null || true; else echo "none"; fi

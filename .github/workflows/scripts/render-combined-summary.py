@@ -21,8 +21,15 @@ import os
 import sys
 
 
-def newest_summary(root, model):
+def newest_summary(root, model, fw=None):
     hits = glob.glob(os.path.join(root, model, "**", "summary.json"), recursive=True)
+    # phi4_mini etc. appear in BOTH frameworks under the same <model> dir; the
+    # per-framework run dirs are prefixed pytorch_* / sglang_*, so filter by the
+    # framework prefix to avoid a pytorch row picking up an sglang summary.
+    if fw:
+        pref = os.sep + fw + "_"
+        scoped = [h for h in hits if pref in h]
+        hits = scoped or hits
     return max(hits, key=os.path.getmtime) if hits else None
 
 
@@ -36,7 +43,7 @@ def equiv_cell(status):
 
 
 def row_pytorch(root, m):
-    sj = newest_summary(root, m)
+    sj = newest_summary(root, m, "pytorch")
     if not sj:
         return pending_or_missing(root, m), False
     s = json.load(open(sj))
@@ -59,7 +66,7 @@ def row_pytorch(root, m):
 
 
 def row_sglang(root, m):
-    sj = newest_summary(root, m)
+    sj = newest_summary(root, m, "sglang")
     if not sj:
         return pending_or_missing(root, m), False
     s = json.load(open(sj))
