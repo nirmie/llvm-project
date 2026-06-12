@@ -18,15 +18,21 @@ every nightly + dispatch run, so they update without committing to source
 history. Per-model failure detail (transpile proof, equivalence verdict +
 divergence counts, cache hits) lives on each run's **Summary** page.
 
-| Model | Group | PyTorch e2e | SGLang e2e |
-|-------|-------|-------------|------------|
-| qwen2.5-7b-instruct | G1 dense LLM | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/qwen2_5_7b_instruct.json) | n/a |
-| phi4-mini | G1 dense LLM | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/phi4_mini.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/sglang/phi4_mini.json) |
-| llama-3.1-8b-instruct | G1 dense LLM | n/a | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/sglang/llama.json) |
-| qwen1.5-MoE-A2.7B | G2 MoE | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/qwen1_5_moe_a2_7b_chat.json) | n/a |
-| qwen2.5-vl-7b-instruct | G3 VLM | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/qwen2_5_vl_7b_instruct.json) | n/a |
-| stable-diffusion-3.5-large | G4 diffusion | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/sd_3_5_large.json) | n/a |
-| bge-large-en-v1.5 | G5 encoder | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/bge_large_en_v1_5.json) | n/a |
+The **gfx1250** column is the *true-gfx1250* stack (`workflow_dispatch` with
+`stack=gfx1250`): a separate image whose torch/rocBLAS/HIP are genuinely
+compiled for gfx1250, run hotswap-only through the comgr adapter. Its badge
+reports transpile coverage — **transpiled** (every code object lifted) /
+**gaps** (hit transpiler ISA gaps; expected while coverage grows) / **fail**.
+
+| Model | Group | PyTorch e2e | gfx1250 e2e | SGLang e2e |
+|-------|-------|-------------|-------------|------------|
+| qwen2.5-7b-instruct | G1 dense LLM | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/qwen2_5_7b_instruct.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch-gfx1250/qwen2_5_7b_instruct.json) | n/a |
+| phi4-mini | G1 dense LLM | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/phi4_mini.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch-gfx1250/phi4_mini.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/sglang/phi4_mini.json) |
+| llama-3.1-8b-instruct | G1 dense LLM | n/a | n/a | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/sglang/llama.json) |
+| qwen1.5-MoE-A2.7B | G2 MoE | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/qwen1_5_moe_a2_7b_chat.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch-gfx1250/qwen1_5_moe_a2_7b_chat.json) | n/a |
+| qwen2.5-vl-7b-instruct | G3 VLM | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/qwen2_5_vl_7b_instruct.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch-gfx1250/qwen2_5_vl_7b_instruct.json) | n/a |
+| stable-diffusion-3.5-large | G4 diffusion | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/sd_3_5_large.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch-gfx1250/sd_3_5_large.json) | n/a |
+| bge-large-en-v1.5 | G5 encoder | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch/bge_large_en_v1_5.json) | ![](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nirmie/llvm-project/ci-status/pytorch-gfx1250/bge_large_en_v1_5.json) | n/a |
 
 Legend: **pass** = transpiled + equivalent &middot; **diverged** = transpiled,
 accumulation-order token flips (expected, not a failure) &middot; **fail** =
