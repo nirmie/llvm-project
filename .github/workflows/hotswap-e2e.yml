@@ -205,10 +205,18 @@ jobs:
           # Read summaries from the COMPUTE path (OUTPUT_ROOT is a /root path the
           # host runner can't see; models wrote to $COMPUTE_HOME via the mount).
           OUTPUT_COMPUTE="${OUTPUT_ROOT/#\/root/$COMPUTE_HOME}"
+          # Render to BOTH the job summary AND the step log (tee), so the tables
+          # are visible even if the summary panel has an issue; capture stderr so
+          # a render crash is surfaced as a warning instead of silently blanking
+          # the summary.
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-combined-summary.py" \
             "$OUTPUT_COMPUTE" \
             "pytorch=${{ needs.setup.outputs.pyt }}" \
-            "sglang=${{ needs.setup.outputs.sgl }}" >> "$GITHUB_STEP_SUMMARY" || true
+            "sglang=${{ needs.setup.outputs.sgl }}" \
+            2>"$RUNNER_TEMP/render.err" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -s "$RUNNER_TEMP/render.err" ]; then
+            echo "::warning::summary renderer wrote to stderr:"; cat "$RUNNER_TEMP/render.err"
+          fi
 
       - name: Publish status badges to ci-status branch
         if: ${{ always() && github.event_name != 'pull_request' }}

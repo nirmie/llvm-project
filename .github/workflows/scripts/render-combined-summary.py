@@ -18,7 +18,35 @@ gap: weights/workload/image not ready), not a failure.
 import glob
 import json
 import os
+import re
 import sys
+
+_NOISE = re.compile(r"^:[0-9]+:|^[+]+ |transpiler: (Kernel|Starting disassembly)|ShaderName|kernarg_segment_size")
+
+
+def model_failed(root, fw, model):
+    """True if the model was attempted and did NOT pass (crash/no-summary or gate
+    fail). A PENDING marker (intentional gap) is not a failure. diverged = pass."""
+    sj = newest_summary(root, model, fw)
+    if not sj:
+        return not os.path.isfile(os.path.join(root, model, "PENDING"))
+    s = json.load(open(sj))
+    if fw == "pytorch":
+        l = s.get("local", {}) or {}; h = s.get("hotswap", {}) or {}
+        return not (l.get("passed") is True and h.get("passed") is True
+                    and int(h.get("hotswap_fail", 0) or 0) == 0)
+    st = (s.get("equivalence", {}) or {}).get("overall_status")
+    return st not in ("equivalent", "numerically_close", "distributionally_equivalent", "diverged")
+
+
+def log_excerpt(root, model, n=30):
+    """Return (excerpt, alola_path) for a model's srun.log: the last n high-signal
+    lines (noise filtered). alola_path is the real path on the compute host."""
+    log = os.path.join(root, model, "srun.log")
+    if not os.path.isfile(log):
+        return None, log
+    lines = [l.rstrip() for l in open(log, errors="replace") if not _NOISE.search(l)]
+    return "\n".join(lines[-n:]), log
 
 
 def newest_summary(root, model, fw=None):
@@ -55,7 +83,8 @@ def row_pytorch(root, m):
     eqs = eq.get("overall_status")
     ecell = equiv_cell(eqs)
     if eqs == "diverged":
-        ecell += f"<br>Δlogprob {eq.get('overall_max_top_logprob_diff', 0):.2f}"
+        dl = eq.get("overall_max_top_logprob_diff") or 0  # may be present-but-None
+        ecell += f"<br>Δlogprob {float(dl):.2f}"
     res = ":white_check_mark: pass" if gate else ":x: fail"
     name = s.get("display_name", m)
     lcell = (":white_check_mark:" if local.get("passed") else ":x:") + \
@@ -144,7 +173,29 @@ def main():
     print("> `diverged` equivalence is expected (accumulation-order token flips) and is "
           "reported, not failed. PyTorch gate = baseline + transpile ran end-to-end; "
           "SGLang gate = equivalence checker verdict.")
-    return 1 if overall_fail else 0
+
+    # Failed-model logs: for each non-passing model, a collapsible excerpt of its
+    # srun.log + the full path on the Alola compute host (for deep debugging).
+    failed = [(fw, m) for spec in specs
+              for fw, _, csv in [spec.partition("=")]
+              for m in csv.split(",") if m and model_failed(root, fw, m)]
+    if failed:
+        print("\n### Failed model logs\n")
+        for fw, m in failed:
+            excerpt, logpath = log_excerpt(root, m)
+            print(f"<details><summary>:x: <b>{fw}/{m}</b></summary>\n")
+            print(f"Alola log: `{logpath}`\n")
+            if excerpt:
+                print("```")
+                print(excerpt)
+                print("```")
+            else:
+                print("_(no srun.log captured)_")
+            print("\n</details>\n")
+    # Always 0: this is a renderer, not a gate. Per-model pass/fail is in the
+    # table + badges; a non-zero here would only mask render crashes.
+    _ = overall_fail
+    return 0
 
 
 if __name__ == "__main__":
