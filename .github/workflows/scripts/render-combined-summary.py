@@ -95,7 +95,9 @@ def pending_or_missing(root, m):
     if os.path.isfile(pend):
         reason = (open(pend).read().strip() or "pending")
         return f"PENDING::{reason}"
-    return "MISSING"
+    # No summary AND no PENDING marker = the model was attempted and crashed
+    # before writing summary.json -> a failure, not "missing".
+    return "FAIL"
 
 
 def render_table(root, framework, models):
@@ -116,8 +118,8 @@ def render_table(root, framework, models):
         if isinstance(row, str) and row.startswith("PENDING::"):
             reason = row.split("::", 1)[1]
             out.append(f"| {m} |" + " — |" * (ncols - 2) + f" :hourglass: pending ({reason}) |")
-        elif row == "MISSING":
-            out.append(f"| {m} |" + " — |" * (ncols - 2) + " :x: no summary.json |")
+        elif row == "FAIL":
+            out.append(f"| {m} |" + " — |" * (ncols - 2) + " :x: fail (no summary.json) |")
             any_fail = True
         else:
             out.append(row)

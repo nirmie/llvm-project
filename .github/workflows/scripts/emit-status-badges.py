@@ -38,20 +38,31 @@ COLOR = {
 CLEAN = ("equivalent", "numerically_close", "distributionally_equivalent")
 
 
-def newest_summary(root, model):
+def newest_summary(root, model, fw=None):
     hits = glob.glob(os.path.join(root, model, "**", "summary.json"), recursive=True)
+    # phi4_mini etc. live in BOTH frameworks under the same <model> dir; the
+    # per-framework run dirs are prefixed pytorch_* / sglang_*, so filter by the
+    # framework so the pytorch badge doesn't pick up the sglang summary (which
+    # lacks local/hotswap keys -> spurious "fail").
+    if fw:
+        pref = os.sep + fw + "_"
+        scoped = [h for h in hits if pref in h]
+        hits = scoped or hits
     return max(hits, key=os.path.getmtime) if hits else None
 
 
 def pending_state(root, model):
-    """No summary.json: distinguish a known gap (PENDING marker) from missing."""
+    """No summary.json: a PENDING marker = a known/intentional gap (weights or
+    workload not ready) -> grey 'pending'. Otherwise the model WAS attempted and
+    crashed before writing a summary -> red 'fail' (not 'missing', which wrongly
+    implies it was never run)."""
     if os.path.isfile(os.path.join(root, model, "PENDING")):
         return "pending"
-    return "missing"
+    return "fail"
 
 
 def classify_pytorch(root, model):
-    sj = newest_summary(root, model)
+    sj = newest_summary(root, model, "pytorch")
     if not sj:
         return pending_state(root, model)
     s = json.load(open(sj))
@@ -66,7 +77,7 @@ def classify_pytorch(root, model):
 
 
 def classify_sglang(root, model):
-    sj = newest_summary(root, model)
+    sj = newest_summary(root, model, "sglang")
     if not sj:
         return pending_state(root, model)
     s = json.load(open(sj))
