@@ -45,18 +45,23 @@ rocminfo 2>/dev/null | grep -E "Name:\s+gfx" | head -1 || true
 # their own location at runtime, so no host->container path rewrite is needed
 # (the only host-pathed file, deps/pytorch-env.config.sh, is NOT overlaid).
 if [ -d /harness ]; then
-  # Only the lightweight code dirs (scripts ~360K, runtime ~390K). NOT data/
-  # (~1.5G of fixtures) -- the model configs we need come from /ci-configs
-  # below, and the baked image already carries the rest of data/.
-  # --preserve=mode keeps exec bits without chown/xattr (which fail with
-  # "operation not supported" across the read-only bind-mount / NFS).
+  # Lightweight code dirs (scripts ~360K, runtime ~390K). NOT data/'s ~1.5G of
+  # fixtures. --preserve=mode keeps exec bits without chown/xattr (which fail
+  # with "operation not supported" across the read-only bind-mount / NFS).
   for d in scripts runtime; do
     [ -d "/harness/$d" ] && cp -r --preserve=mode "/harness/$d/." "$REPO/$d/"
   done
   [ -f /harness/Makefile ] && cp --preserve=mode /harness/Makefile "$REPO/Makefile"
+  # Model CONFIGS only (small JSON, not the heavy data/ fixtures) so the harness
+  # BRANCH is the source of truth for which models/workloads run -- a new config
+  # added to the branch takes effect without also editing /ci-configs. The
+  # /ci-configs overlay still applies AFTER this for intentional per-CI overrides.
+  if [ -d /harness/data/pytorch/models ]; then
+    cp /harness/data/pytorch/models/*.json "$CFG"/ 2>/dev/null || true
+  fi
 fi
-# Back-compat / standalone: configs-only overlay (e.g. the conductor docker
-# test mounts just the model configs at /ci-configs).
+# Per-CI override overlay (wins over the harness branch configs above), e.g. the
+# conductor docker test mounts just the model configs at /ci-configs.
 if [ -d /ci-configs ]; then
   cp -v /ci-configs/*.json "$CFG"/ 2>/dev/null || true
   cp -v /ci-configs/*.prompts.json "$CFG"/ 2>/dev/null || true

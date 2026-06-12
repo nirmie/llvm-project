@@ -68,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
           REP_PYT="qwen2_5_7b_instruct,phi4_mini"; REP_SGL="llama"
-          FULL_PYT="qwen2_5_7b_instruct,phi4_mini,qwen1_5_moe_a2_7b_chat,qwen2_5_vl_7b_instruct,sd_3_5_large,bge_large_en_v1_5"
+          FULL_PYT="qwen2_5_7b_instruct,phi4_mini,qwen1_5_moe_a2_7b_chat,qwen2_5_vl_7b_instruct,sd_3_5_large,bge_large_en_v1_5,bge_m3,bge_reranker_large,whisper_small"
           FULL_SGL="llama,phi4_mini"
           case "${{ github.event_name }}" in
             pull_request) PYT="$REP_PYT"; SGL="$REP_SGL" ;;
