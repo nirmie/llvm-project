@@ -30,7 +30,9 @@ import sys
 
 COLOR = {
     "pass": "brightgreen",
+    "transpiled": "brightgreen",
     "diverged": "yellow",
+    "gaps": "yellow",
     "fail": "red",
     "pending": "lightgrey",
     "missing": "red",
@@ -45,10 +47,30 @@ def newest_summary(root, model, fw=None):
     # framework so the pytorch badge doesn't pick up the sglang summary (which
     # lacks local/hotswap keys -> spurious "fail").
     if fw:
-        pref = os.sep + fw + "_"
+        # gfx1250 runs share the pytorch_* run-dir prefix (the framework is a
+        # dashboard label, not a run-dir prefix); map it back for discovery.
+        search_fw = "pytorch" if fw == "pytorch-gfx1250" else fw
+        pref = os.sep + search_fw + "_"
         scoped = [h for h in hits if pref in h]
         hits = scoped or hits
     return max(hits, key=os.path.getmtime) if hits else None
+
+
+def classify_gfx1250(root, model):
+    sj = newest_summary(root, model, "pytorch-gfx1250")
+    if not sj:
+        return pending_state(root, model)
+    s = json.load(open(sj))
+    h = s.get("hotswap", {}) or {}
+    t = h.get("tool_transpile", {}) or {}
+    att = int(t.get("co_transpile", 0) or 0)
+    fail = int(t.get("transpile_failed", 0) or 0)
+    ok = int(t.get("transpile_ok", 0) or 0)
+    if att and fail == 0 and ok > 0 and h.get("passed") is True:
+        return "transpiled"
+    if t.get("unsupported_opcodes"):
+        return "gaps"
+    return "fail"
 
 
 def pending_state(root, model):
@@ -105,7 +127,11 @@ def write_badge(out_dir, framework, model, state):
 
 def main():
     root, out_dir = sys.argv[1], sys.argv[2]
-    classify = {"pytorch": classify_pytorch, "sglang": classify_sglang}
+    classify = {
+        "pytorch": classify_pytorch,
+        "pytorch-gfx1250": classify_gfx1250,
+        "sglang": classify_sglang,
+    }
     for spec in sys.argv[3:]:
         fw, _, csv = spec.partition("=")
         if fw not in classify:

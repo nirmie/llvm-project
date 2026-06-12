@@ -31,6 +31,13 @@ def model_failed(root, fw, model):
     if not sj:
         return not os.path.isfile(os.path.join(root, model, "PENDING"))
     s = json.load(open(sj))
+    if fw == "pytorch-gfx1250":
+        h = s.get("hotswap", {}) or {}
+        t = h.get("tool_transpile", {}) or {}
+        clean = (int(t.get("co_transpile", 0) or 0) > 0
+                 and int(t.get("transpile_failed", 0) or 0) == 0
+                 and h.get("passed") is True)
+        return not clean
     if fw == "pytorch":
         l = s.get("local", {}) or {}; h = s.get("hotswap", {}) or {}
         return not (l.get("passed") is True and h.get("passed") is True
@@ -49,16 +56,52 @@ def log_excerpt(root, model, n=30):
     return "\n".join(lines[-n:]), log
 
 
+def _search_fw(fw):
+    # The gfx1250 stack writes run dirs with the same `pytorch_*` output prefix
+    # as the stock pytorch stack (the framework label is a dashboard distinction,
+    # not a run-dir prefix). Map it back to pytorch for summary discovery.
+    return "pytorch" if fw == "pytorch-gfx1250" else fw
+
+
 def newest_summary(root, model, fw=None):
     hits = glob.glob(os.path.join(root, model, "**", "summary.json"), recursive=True)
     # phi4_mini etc. appear in BOTH frameworks under the same <model> dir; the
     # per-framework run dirs are prefixed pytorch_* / sglang_*, so filter by the
     # framework prefix to avoid a pytorch row picking up an sglang summary.
     if fw:
-        pref = os.sep + fw + "_"
+        pref = os.sep + _search_fw(fw) + "_"
         scoped = [h for h in hits if pref in h]
         hits = scoped or hits
     return max(hits, key=os.path.getmtime) if hits else None
+
+
+def row_gfx1250(root, m):
+    """True-gfx1250 row: report comgr transpile coverage + opcode gaps. There is
+    no equivalence verdict (no native baseline in a gfx1250-only image); the
+    'result' is whether every transpiled code object lifted (clean) or some hit
+    transpiler ISA gaps (reported, not an orchestration failure)."""
+    sj = newest_summary(root, m, "pytorch-gfx1250")
+    if not sj:
+        return pending_or_missing(root, m), False
+    s = json.load(open(sj))
+    h = s.get("hotswap", {}) or {}
+    t = h.get("tool_transpile", {}) or {}
+    ok = int(t.get("transpile_ok", 0) or 0)
+    fail = int(t.get("transpile_failed", 0) or 0)
+    att = int(t.get("co_transpile", 0) or 0)
+    native = int(t.get("co_pass", 0) or 0)
+    gaps = t.get("unsupported_opcodes", []) or []
+    if att and fail == 0 and ok > 0 and h.get("passed") is True:
+        res, gate = ":white_check_mark: clean", True
+    elif gaps:
+        res, gate = ":warning: gaps", True
+    elif att == 0:
+        res, gate = ":grey_question: no transpile", False
+    else:
+        res, gate = ":x: fail", False
+    gapcell = ", ".join(f"`{g}`" for g in gaps[:6]) + ("…" if len(gaps) > 6 else "") or "—"
+    name = s.get("display_name", m)
+    return (f"| {name} | {native}/{att} | {ok}/{fail} | {gapcell} | {res} |"), gate
 
 
 def equiv_cell(status):
@@ -131,7 +174,12 @@ def pending_or_missing(root, m):
 
 def render_table(root, framework, models):
     out = []
-    if framework == "pytorch":
+    if framework == "pytorch-gfx1250":
+        out.append(f"### True-gfx1250 transpile ({len(models)})\n")
+        out.append("| Model | Code objs (native/transpiled) | Transpile (ok/fail) | Unsupported opcodes | Result |")
+        out.append("|-------|-------------------------------|---------------------|---------------------|--------|")
+        rowfn, ncols = row_gfx1250, 5
+    elif framework == "pytorch":
         out.append(f"### PyTorch models ({len(models)})\n")
         out.append("| Model | Local | HotSwap transpile | Equivalence | Cache (hit/miss) | Result |")
         out.append("|-------|-------|-------------------|-------------|------------------|--------|")

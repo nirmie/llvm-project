@@ -36,6 +36,11 @@ on:
         type: choice
         options: [full, rep]
         default: full
+      stack:
+        description: "stock = gfx950 image (intercept+override); gfx1250 = true-gfx1250 image (comgr adapter, hotswap-only, pytorch only)"
+        type: choice
+        options: [stock, gfx1250]
+        default: stock
 
 concurrency:
   group: hotswap-e2e-${{ github.ref }}
@@ -51,6 +56,12 @@ env:
   HARNESS_REPO: https://github.com/harsh-amd/rocm-hotswap-testing.git
   HARNESS_CHECKOUT: /cluster/hotswap-ci/rocm-hotswap-testing
   HARNESS_REF: users/nirmie/hotswap-ci-all-platforms
+  # True-gfx1250 stack (workflow_dispatch stack=gfx1250): a separate image whose
+  # libraries are genuinely gfx1250, run hotswap-only via the comgr adapter, and
+  # a harness branch carrying the HOTSWAP_ONLY driver. Pytorch-only (no sglang).
+  IMAGE_GFX1250: /cluster/images/nisenthi/registry-sc-harbor.amd.com_hotswap-ci_hotswap-a0-runner_latest.sqsh
+  IMAGE_GFX1250_DOCKER: docker://registry-sc-harbor.amd.com#hotswap-ci/hotswap-a0-runner:latest
+  HARNESS_REF_GFX1250: users/nirmie/gfx1250-native-stack
   CI_CONFIGS: /cluster/hotswap-ci/model-configs
   CACHE_HOST: /home/AMD/nisenthi/hotswap-cache-shared
   OUTPUT_ROOT: /root/ci/hotswap-e2e/${{ github.run_id }}
@@ -78,9 +89,12 @@ jobs:
               else PYT="$FULL_PYT"; SGL="$FULL_SGL"; fi ;;
             *) PYT="$FULL_PYT"; SGL="$FULL_SGL" ;;
           esac
+          # The true-gfx1250 image is pytorch-only (no sglang venv); zero SGL so
+          # the e2e job launches no sglang srun for that stack.
+          if [ "${{ inputs.stack }}" = "gfx1250" ]; then SGL=""; fi
           echo "pyt=$PYT" >> "$GITHUB_OUTPUT"
           echo "sgl=$SGL" >> "$GITHUB_OUTPUT"
-          echo "event=${{ github.event_name }} pyt=$PYT sgl=$SGL"
+          echo "event=${{ github.event_name }} stack=${{ inputs.stack || 'stock' }} pyt=$PYT sgl=$SGL"
 
   e2e:
     needs: setup
@@ -96,12 +110,15 @@ jobs:
       - name: Prepare pinned harness checkout
         run: |
           set -euo pipefail
+          # The gfx1250 stack carries the HOTSWAP_ONLY driver on its own branch.
+          REF="$HARNESS_REF"
+          [ "${{ inputs.stack }}" = "gfx1250" ] && REF="$HARNESS_REF_GFX1250"
           CO="${HARNESS_CHECKOUT/#\/root/$COMPUTE_HOME}"
           [ -d "$CO/.git" ] || git clone "$HARNESS_REPO" "$CO"
           git -C "$CO" fetch --all --prune
-          git -C "$CO" checkout "$HARNESS_REF"
+          git -C "$CO" checkout "$REF"
           git -C "$CO" pull --ff-only || true
-          echo "harness at $(git -C "$CO" rev-parse --short HEAD)"
+          echo "harness ($REF) at $(git -C "$CO" rev-parse --short HEAD)"
 
       - name: Run all models in parallel (one srun each; SLURM schedules)
         run: |
@@ -116,6 +133,23 @@ jobs:
             gfx942) GPU_SEL=("--constraint=MARKHAM" --gres=gpu:gfx942-mi300x:1) ;;
           esac
           export TARGET_GFX
+
+          # Stack selection: stock (gfx950 intercept image) vs gfx1250 (the
+          # true-gfx1250 image, hotswap-only). Default stock keeps existing
+          # behavior unchanged for pull_request / schedule.
+          STACK="${{ inputs.stack || 'stock' }}"
+          PYT_SCRIPT="pytorch-e2e.sh"
+          if [ "$STACK" = "gfx1250" ]; then
+            IMAGE="$IMAGE_GFX1250"; PYT_SCRIPT="pytorch-a0-e2e.sh"
+            # Lazily enroot-import the a0 sqsh on the Alola runner if absent
+            # (idempotent; the import lands on /cluster which the GPU nodes mount).
+            if [ ! -e "$IMAGE" ]; then
+              echo "a0 sqsh missing; importing $IMAGE_GFX1250_DOCKER -> $IMAGE"
+              mkdir -p "$(dirname "$IMAGE")"
+              enroot import -o "$IMAGE" "$IMAGE_GFX1250_DOCKER"
+            fi
+          fi
+          export IMAGE PYT_SCRIPT
 
           BASE_MOUNTS="$MODELS_ROOT:$MODELS_ROOT:ro,$HARNESS_COMPUTE:/harness:ro,$CI_CONFIGS:/ci-configs:ro,$CACHE_HOST:/cache,$OUTPUT_COMPUTE:/output,$GITHUB_WORKSPACE:$GITHUB_WORKSPACE"
           COMGR_MOUNT=""
@@ -137,7 +171,7 @@ jobs:
             (
               export PYTORCH_TIMEOUT_SECONDS=3600 CACHE_DIR=/cache
               local script
-              if [ "$fw" = pytorch ]; then script=pytorch-e2e.sh; export MODELS="$model"
+              if [ "$fw" = pytorch ]; then script="$PYT_SCRIPT"; export MODELS="$model"
               else script=sglang-e2e.sh; export SGLANG_PROFILES="$model"; fi
               if [ -n "$COMGR_MOUNT" ]; then
                 export COMGR_RUNTIME=/comgr-override/lib/libamd_comgr.so.3.3.0 COMGR_TOOLS_DIR=/comgr-override/bin
@@ -209,9 +243,13 @@ jobs:
           # are visible even if the summary panel has an issue; capture stderr so
           # a render crash is surfaced as a warning instead of silently blanking
           # the summary.
+          # The gfx1250 stack renders a transpile-coverage table (different
+          # columns) under the pytorch-gfx1250 framework; stock is unchanged.
+          PYT_FW=pytorch
+          [ "${{ inputs.stack }}" = "gfx1250" ] && PYT_FW=pytorch-gfx1250
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-combined-summary.py" \
             "$OUTPUT_COMPUTE" \
-            "pytorch=${{ needs.setup.outputs.pyt }}" \
+            "$PYT_FW=${{ needs.setup.outputs.pyt }}" \
             "sglang=${{ needs.setup.outputs.sgl }}" \
             2>"$RUNNER_TEMP/render.err" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ -s "$RUNNER_TEMP/render.err" ]; then
@@ -226,9 +264,11 @@ jobs:
           set -euo pipefail
           OUTPUT_COMPUTE="${OUTPUT_ROOT/#\/root/$COMPUTE_HOME}"
           BADGES="$RUNNER_TEMP/badges"; rm -rf "$BADGES"; mkdir -p "$BADGES"
+          PYT_FW=pytorch
+          [ "${{ inputs.stack }}" = "gfx1250" ] && PYT_FW=pytorch-gfx1250
           python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/emit-status-badges.py" \
             "$OUTPUT_COMPUTE" "$BADGES" \
-            "pytorch=${{ needs.setup.outputs.pyt }}" \
+            "$PYT_FW=${{ needs.setup.outputs.pyt }}" \
             "sglang=${{ needs.setup.outputs.sgl }}"
 
           REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
