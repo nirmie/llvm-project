@@ -123,10 +123,17 @@ jobs:
             COMGR_MOUNT=",$COMGR_OVERRIDE_DIR:/comgr-override:ro"
           fi
 
-          pids=()
+          # High-signal filter for the LIVE console: drop the HIP/rocBLAS trace
+          # (`:N:` lines), bash `set -x` echoes, per-kernel transpiler spam, and
+          # shader/checkout noise. KEEP cache hit/miss, weights, inference/token
+          # generation, output, proof/equivalence/gate, NOTEs, and errors. The
+          # FULL unfiltered log is still saved to srun.log.
+          NOISE='^:[0-9]+:|^[+]+ |transpiler: (Kernel|Starting disassembly)|ShaderName|kernarg_segment_size|^Updating files|^Receiving objects|^Resolving deltas'
+
+          pids=(); tailers=()
           launch() {
             local fw="$1" model="$2"
-            mkdir -p "$OUTPUT_COMPUTE/$model"
+            mkdir -p "$OUTPUT_COMPUTE/$model"; : > "$OUTPUT_COMPUTE/$model/srun.log"
             (
               export PYTORCH_TIMEOUT_SECONDS=3600 CACHE_DIR=/cache
               local script
@@ -144,34 +151,37 @@ jobs:
                 bash "$GITHUB_WORKSPACE/.github/workflows/scripts/$script"
             ) > "$OUTPUT_COMPUTE/$model/srun.log" 2>&1 &
             pids+=("$!|$fw|$model")
-            echo "launched $fw/$model (pid $!)"
+            # Live tailer: stream this model's filtered log to the console the
+            # moment SLURM starts the srun and output begins flowing (tagged so
+            # the concurrent models stay legible interleaved).
+            ( stdbuf -oL tail -n +1 -F "$OUTPUT_COMPUTE/$model/srun.log" 2>/dev/null \
+                | grep --line-buffered -avE "$NOISE" \
+                | stdbuf -oL sed "s#^#[$fw/$model] #" ) &
+            tailers+=("$!")
+            echo "launched $fw/$model"
           }
 
           for m in $(echo "${{ needs.setup.outputs.pyt }}" | tr ',' ' '); do [ -n "$m" ] && launch pytorch "$m"; done
           for m in $(echo "${{ needs.setup.outputs.sgl }}" | tr ',' ' '); do [ -n "$m" ] && launch sglang "$m"; done
 
-          echo "waiting for ${#pids[@]} model job(s) (SLURM is scheduling them)..."
-          rc=0
-          verdicts=()
+          echo "waiting for ${#pids[@]} model job(s); live [fw/model] logs stream below as each SLURM job starts..."
+          rc=0; verdicts=()
           for entry in "${pids[@]}"; do
             pid="${entry%%|*}"; rest="${entry#*|}"; fw="${rest%%|*}"; model="${rest#*|}"
             if wait "$pid"; then v=PASS; else v=FAIL; rc=1; fi
             verdicts+=("$v|$fw|$model")
-            echo "$v $fw/$model"
+            echo "[$fw/$model] === finished: $v ==="
           done
-          echo "all model jobs finished (rc=$rc)"
+          # stop the live tailers
+          for t in "${tailers[@]}"; do kill "$t" 2>/dev/null || true; done
+          wait 2>/dev/null || true
 
-          # Replay each model's log in its own collapsible group (per-model
-          # visibility without a runner-per-model pool). Inner ::group::/::endgroup::
-          # are stripped to avoid broken nesting; annotations are preserved.
-          echo "----- per-model logs (collapsible) -----"
+          echo "----- per-model results -----"
           for v in "${verdicts[@]}"; do
             verdict="${v%%|*}"; rest="${v#*|}"; fw="${rest%%|*}"; model="${rest#*|}"
-            log="$OUTPUT_COMPUTE/$model/srun.log"
-            echo "::group::[$verdict] $fw / $model"
-            if [ -s "$log" ]; then grep -avE '^::(group|endgroup)::' "$log"; else echo "(no log captured)"; fi
-            echo "::endgroup::"
+            echo "  $verdict  $fw/$model"
           done
+          echo "all model jobs finished (rc=$rc)"
           exit $rc
 
       - name: Release SLURM allocations (cleanup)
