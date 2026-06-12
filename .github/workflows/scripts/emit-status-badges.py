@@ -111,18 +111,36 @@ def classify_sglang(root, model):
     return "fail"
 
 
-def write_badge(out_dir, framework, model, state):
+def gfx1250_badge_message(root, model, state):
+    """Badge text for the gfx1250 column. The README shows only the message, so
+    surface the actual blocking opcode(s) when the transpile hit ISA gaps --
+    e.g. 'gaps: v_cvt_f16_i16' or 'gaps: v_cvt_f16_i16 +2'. Other states render
+    as the plain state string."""
+    if state != "gaps":
+        return state
+    sj = newest_summary(root, model, "pytorch-gfx1250")
+    ops = []
+    if sj:
+        t = (json.load(open(sj)).get("hotswap", {}) or {}).get("tool_transpile", {}) or {}
+        ops = t.get("unsupported_opcodes", []) or []
+    if not ops:
+        return "gaps"
+    head = ops[0]
+    return f"gaps: {head}" + (f" +{len(ops) - 1}" if len(ops) > 1 else "")
+
+
+def write_badge(out_dir, framework, model, state, message=None):
     d = os.path.join(out_dir, framework)
     os.makedirs(d, exist_ok=True)
     badge = {
         "schemaVersion": 1,
         "label": "",
-        "message": state,
+        "message": message if message is not None else state,
         "color": COLOR.get(state, "lightgrey"),
     }
     with open(os.path.join(d, f"{model}.json"), "w") as f:
         json.dump(badge, f)
-    return state
+    return badge["message"]
 
 
 def main():
@@ -137,8 +155,13 @@ def main():
         if fw not in classify:
             continue
         for model in (m for m in csv.split(",") if m):
-            state = write_badge(out_dir, fw, model, classify[fw](root, model))
-            print(f"{fw}/{model}: {state}")
+            state = classify[fw](root, model)
+            message = (
+                gfx1250_badge_message(root, model, state)
+                if fw == "pytorch-gfx1250" else None
+            )
+            shown = write_badge(out_dir, fw, model, state, message)
+            print(f"{fw}/{model}: {shown}")
     return 0
 
 
