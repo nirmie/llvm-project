@@ -139,7 +139,13 @@ jobs:
           # behavior unchanged for pull_request / schedule.
           STACK="${{ inputs.stack || 'stock' }}"
           PYT_SCRIPT="pytorch-e2e.sh"
+          # Per-srun SLURM run wall. gfx1250 transpiles EVERY code object (and
+          # most forward-original then crash), which is far slower than the stock
+          # stack's cached/native path; 1h is not enough for the large rep models
+          # to even write summary.json before SLURM SIGKILLs the srun. Give it 3h.
+          TIME_LIMIT="1:00:00"
           if [ "$STACK" = "gfx1250" ]; then
+            TIME_LIMIT="3:00:00"
             IMAGE="$IMAGE_GFX1250"; PYT_SCRIPT="pytorch-a0-e2e.sh"
             # Lazily enroot-import the a0 sqsh on the Alola runner if absent
             # (idempotent; the import lands on /cluster which the GPU nodes mount).
@@ -149,7 +155,7 @@ jobs:
               enroot import -o "$IMAGE" "$IMAGE_GFX1250_DOCKER"
             fi
           fi
-          export IMAGE PYT_SCRIPT
+          export IMAGE PYT_SCRIPT TIME_LIMIT
 
           BASE_MOUNTS="$MODELS_ROOT:$MODELS_ROOT:ro,$HARNESS_COMPUTE:/harness:ro,$CI_CONFIGS:/ci-configs:ro,$CACHE_HOST:/cache,$OUTPUT_COMPUTE:/output,$GITHUB_WORKSPACE:$GITHUB_WORKSPACE"
           COMGR_MOUNT=""
@@ -176,7 +182,7 @@ jobs:
               if [ -n "$COMGR_MOUNT" ]; then
                 export COMGR_RUNTIME=/comgr-override/lib/libamd_comgr.so.3.3.0 COMGR_TOOLS_DIR=/comgr-override/bin
               fi
-              srun --partition=defq "${GPU_SEL[@]}" --time=1:00:00 --nodes=1 \
+              srun --partition=defq "${GPU_SEL[@]}" --time="$TIME_LIMIT" --nodes=1 \
                 --cpus-per-task=16 --mem=128G \
                 --job-name="hotswap-e2e-${{ github.run_id }}-$fw-$model" \
                 --chdir="$GITHUB_WORKSPACE" --container-image="$IMAGE" \
@@ -274,17 +280,31 @@ jobs:
           REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           WT="$RUNNER_TEMP/ci-status"; rm -rf "$WT"; mkdir -p "$WT"
           cd "$WT"; git init -q; git remote add origin "$REMOTE"
-          if git fetch -q --depth 1 origin ci-status 2>/dev/null; then
-            git checkout -q -b ci-status FETCH_HEAD
-          else
-            git checkout -q --orphan ci-status
-          fi
-          cp -r "$BADGES/." .
-          git add -A
-          if git -c user.email=hotswap-ci@amd.com -c user.name="hotswap-ci" \
-               commit -q -m "ci-status: run ${GITHUB_RUN_ID} ($(date -u +%FT%TZ))"; then
-            git push -q origin HEAD:ci-status
-            echo "published $(find "$BADGES" -name '*.json' | wc -l) badges to ci-status"
-          else
-            echo "no status change"
-          fi
+          # Re-fetch + re-apply + push under a retry loop: two runs (e.g. a
+          # nightly + a dispatch on the two runners, or back-to-back runs) can
+          # race on ci-status, and a stale-base push is rejected "fetch first".
+          # Each badge is an independent file, so re-applying THIS run's badges
+          # on top of the freshly-fetched branch is a clean merge (our models
+          # win, everyone else's badges are preserved).
+          published=0
+          for attempt in 1 2 3 4 5; do
+            git rm -rfq --ignore-unmatch . >/dev/null 2>&1 || true
+            if git fetch -q --depth 1 origin ci-status 2>/dev/null; then
+              git checkout -q -f -B ci-status FETCH_HEAD
+            else
+              git checkout -q --orphan ci-status; git rm -rfq --cached . >/dev/null 2>&1 || true
+            fi
+            cp -r "$BADGES/." .
+            git add -A
+            if ! git -c user.email=hotswap-ci@amd.com -c user.name="hotswap-ci" \
+                 commit -q -m "ci-status: run ${GITHUB_RUN_ID} ($(date -u +%FT%TZ))" 2>/dev/null; then
+              echo "no status change"; published=1; break
+            fi
+            if git push -q origin HEAD:ci-status 2>/dev/null; then
+              echo "published $(find "$BADGES" -name '*.json' | wc -l) badges to ci-status (attempt $attempt)"
+              published=1; break
+            fi
+            echo "push rejected (attempt $attempt); re-fetching ci-status and retrying"
+            sleep $((attempt * 3))
+          done
+          [ "$published" = 1 ] || { echo "::warning::failed to publish badges after retries"; }
