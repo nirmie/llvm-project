@@ -98,3 +98,37 @@ interpreted as the 8th GPU = **index 7**. Used on both machines.
 - mi350: pulled `alex_hotswap_wip:latest` (runbook image) — rocm-hotswap creds.
 - Images to be deleted after validation to free disk; re-pull later.
 
+## CI run results (commit ac79f60, run on self-hosted runners)
+
+### gfx942 (shark300): GREEN
+Full workflow green: model compare step + equivalence gate both pass.
+`equivalence_passed: true` (`numerically_close`). Matches the manual run.
+
+CI-wrapper bug found + fixed along the way: the gate step's
+`find "$SCRATCH_HOST" -name summary.json` exits non-zero (permission-denied on
+a root-owned, container-written subdir). Under GitHub's default
+`bash -eo pipefail`, that failed the step even though summary.json was found
+and the verdict was PASS. Fix: run the gate step with `shell: bash
+--noprofile --norc {0}` (no `-e`) and `|| true` on the find. The equivalence
+parsing also moved to `.github/workflows/scripts/gate-equivalence.py` (an
+unindented python heredoc had been terminating the YAML block scalar).
+
+### gfx950 (mi350): BLOCKED — SGLang baseline segfaults on MI350X
+Not a CI or HotSwap problem: the **local (non-HotSwap) baseline** SGLang run
+crashes during engine init:
+```
+triton .../compiler.py: kpack is deprecated starting from gfx950 ... kpack=2 -> 1
+Fatal Python error: Segmentation fault
+  File ".../sglang/srt/layers/utils/multi_platform.py", line 95 in forward_hip
+  ... hip::hipLaunchKernel ...
+RuntimeError: Rank 0 scheduler died during initialization (exit code: -11)  # SIGSEGV
+```
+The runbook is explicitly the *validated, fully-passing path on gfx942*.
+gfx950 (MI350X) is "bring-up" per `docs/sglang-runner.md`; this image's
+SGLang/Triton stack segfaults on gfx950 at HIP kernel launch, before HotSwap
+is even exercised. Needs a gfx950-compatible SGLang/Triton stack (different
+image / upstream fix) — out of scope for the CI wrapper.
+
+No manual edits to the image were needed on either machine, so nothing was
+committed/pushed to the harbor `hotswap` namespace.
+
