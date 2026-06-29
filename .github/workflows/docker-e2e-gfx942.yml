@@ -9,6 +9,8 @@ name: Docker E2E gfx942 (SGLang HotSwap)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [nisenthi/docker-ci]
   schedule:
     - cron: "23 7 * * *"   # nightly
 
