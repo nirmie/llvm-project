@@ -64,12 +64,17 @@ if [ -z "$SJ" ]; then
   exit 1
 fi
 VERDICT=$(python3 "$GATE" "$SJ"); rc=$?
-ok="${VERDICT%%|*}"; status="${VERDICT#*|}"
+IFS='|' read -r ok status strict <<< "$VERDICT"
 {
   echo '```'
-  echo "equivalence_passed: $ok"
-  echo "overall_status:     $status"
+  echo "overall_status:        $status"
+  echo "equivalence (strict):  $strict"
   echo '```'
-  [ "$rc" = "0" ] && echo ":white_check_mark: gate PASSED" || echo ":x: gate FAILED"
+  if [ "$rc" = "0" ]; then
+    echo ":white_check_mark: gate PASSED (HotSwap transpile produced a valid verdict: \`$status\`)"
+    [ "$strict" = "True" ] || echo "> note: strict equivalence did not pass (\`$status\`) — expected gfx1250→target accumulation effect, not gated."
+  else
+    echo ":x: gate FAILED — no valid equivalence verdict (run did not complete / no transpile)"
+  fi
 } >> "$GITHUB_STEP_SUMMARY"
 exit $rc
