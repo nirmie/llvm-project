@@ -8,9 +8,8 @@ name: Docker E2E gfx942 (SGLang HotSwap)
 # One matrix leg per model; a leg SKIPS (not fails) if its weights aren't staged.
 
 on:
+  pull_request:
   workflow_dispatch:
-  push:
-    branches: [nisenthi/docker-ci]
   schedule:
     - cron: "23 7 * * *"   # nightly
 
