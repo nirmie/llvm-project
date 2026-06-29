@@ -56,13 +56,43 @@ docker run --rm \
       SGLANG_TARGET_GFX='"$TARGET_GFX"' \
       SGLANG_SOURCE_TARGET=gfx1250:32
   ' 2>&1 | tee "$SCRATCH/run.log"
+docker_rc=${PIPESTATUS[0]}
+
+# Dump every per-run model log (local/hotswap x run1/run2) to the workflow
+# console, each in its own collapsible group, so a failing run's FULL detail is
+# visible on the Actions page (not just "run1 failed with exit code 1").
+dump_failing_logs() {
+  echo "::error::$PROFILE ($TARGET_GFX) FAILED — full per-run logs below"
+  # The harness writes detailed logs at <run_dir>/{local,hotswap}/{run1,run2}/run.log
+  local logs
+  logs=$(find "$SCRATCH" -name run.log -path '*/run*/*' 2>/dev/null | sort)
+  [ -z "$logs" ] && logs=$(find "$SCRATCH" -name run.log 2>/dev/null | sort)
+  if [ -z "$logs" ]; then
+    echo "::warning::no per-run run.log files found under $SCRATCH"
+    return
+  fi
+  local f rel
+  for f in $logs; do
+    rel="${f#$SCRATCH/}"
+    echo "::group::run.log — $rel"
+    cat "$f" 2>/dev/null || echo "(could not read $f)"
+    echo "::endgroup::"
+  done
+}
 
 hdr
 SJ=$(find "$SCRATCH" -name summary.json 2>/dev/null | sort | tail -1 || true)
-if [ -z "$SJ" ]; then
-  echo ":x: no summary.json (run failed before completion)" >> "$GITHUB_STEP_SUMMARY"
+
+# Failure if the harness exited non-zero or produced no summary.
+if [ "$docker_rc" != "0" ] || [ -z "$SJ" ]; then
+  {
+    echo ":x: run FAILED (exit=$docker_rc, summary=$( [ -n "$SJ" ] && echo present || echo missing ))"
+    echo "Full per-run logs are in the step output (collapsible \`run.log\` groups)."
+  } >> "$GITHUB_STEP_SUMMARY"
+  dump_failing_logs
   exit 1
 fi
+
 VERDICT=$(python3 "$GATE" "$SJ"); rc=$?
 IFS='|' read -r ok status strict <<< "$VERDICT"
 {
@@ -74,7 +104,10 @@ IFS='|' read -r ok status strict <<< "$VERDICT"
     echo ":white_check_mark: gate PASSED (HotSwap transpile produced a valid verdict: \`$status\`)"
     [ "$strict" = "True" ] || echo "> note: strict equivalence did not pass (\`$status\`) — expected gfx1250→target accumulation effect, not gated."
   else
-    echo ":x: gate FAILED — no valid equivalence verdict (run did not complete / no transpile)"
+    echo ":x: gate FAILED — no valid equivalence verdict"
   fi
 } >> "$GITHUB_STEP_SUMMARY"
+
+# On gate failure, also surface the full per-run logs.
+[ "$rc" = "0" ] || dump_failing_logs
 exit $rc
