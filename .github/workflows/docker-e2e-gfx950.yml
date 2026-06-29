@@ -24,7 +24,10 @@ permissions:
   contents: read
 
 env:
-  IMAGE: registry-sc-harbor.amd.com/rocm-hotswap/alex_hotswap_wip:latest
+  # gfx950-fixed image: alex_hotswap_wip with sgl-kernel rebuilt for gfx950
+  # (stock image's common_ops.so was gfx942-only -> segfault on MI350X).
+  # Committed from the fix and pushed to the user's harbor namespace.
+  IMAGE: registry-sc-harbor.amd.com/hotswap/alex_hotswap_wip_gfx950:latest
   WEIGHTS_HOST: /mnt/gfx_apps/models
   SCRATCH_BASE: /home/nisenthi/hotswap-ci-persist/e2e-gfx950
   GPU: "7"
