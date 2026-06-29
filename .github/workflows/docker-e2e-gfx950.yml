@@ -1,0 +1,56 @@
+name: Docker E2E gfx950 (SGLang HotSwap)
+
+# Runs the issue #70 supported models (that have a harness profile) through the
+# SGLang HotSwap compare on a gfx950 (MI350X) runner. Weights are read directly
+# from the gfx_apps NFS already mounted on mi350. Separate from the gfx942
+# workflow on purpose.
+#
+# NOTE: gfx950 currently requires an sgl-kernel built for gfx950 (the stock
+# image's sgl_kernel/common_ops.so contains only gfx942 code objects, so SGLang
+# segfaults at engine init on MI350X). Until that image fix lands these legs
+# will fail at init; the workflow structure is correct and will pass once the
+# gfx950-enabled sgl-kernel is baked in.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "47 7 * * *"   # nightly (offset from gfx942)
+
+concurrency:
+  group: docker-e2e-gfx950
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # gfx950-fixed image: alex_hotswap_wip with sgl-kernel rebuilt for gfx950
+  # (stock image's common_ops.so was gfx942-only -> segfault on MI350X).
+  # Committed from the fix and pushed to the user's harbor namespace.
+  IMAGE: registry-sc-harbor.amd.com/hotswap/alex_hotswap_wip_gfx950:latest
+  WEIGHTS_HOST: /mnt/gfx_apps/models
+  SCRATCH_BASE: /home/nisenthi/hotswap-ci-persist/e2e-gfx950
+  GPU: "7"
+  TARGET_GFX: gfx950
+
+jobs:
+  models:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { profile: qwen3_0_6b,   subpath: Qwen/Qwen3-0.6B }
+          - { profile: qwen3_5_4b,   subpath: Qwen/Qwen3.5-4B }
+          - { profile: llama,        subpath: meta-llama/Llama-3.1-8B-Instruct }
+          - { profile: gemma2_9b_it, subpath: google/gemma-2-9b-it }
+          - { profile: gemma3_4b_it, subpath: google/gemma-3-4b-it }
+    name: ${{ matrix.profile }} (gfx950)
+    runs-on: [self-hosted, linux, rocm, docker, gfx950]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+      - name: Run ${{ matrix.profile }}
+        shell: bash --noprofile --norc {0}
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/scripts/run-sglang-model.sh" "${{ matrix.profile }}" "${{ matrix.subpath }}"
