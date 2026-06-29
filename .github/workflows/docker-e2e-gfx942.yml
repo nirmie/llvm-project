@@ -2,9 +2,10 @@ name: Docker E2E gfx942 (SGLang HotSwap)
 
 # Runs the issue #70 supported models (that have a harness profile + staged
 # weights) through the SGLang HotSwap compare on a gfx942 (MI300X) runner.
-# One matrix leg per model; a leg SKIPS (not fails) if its weights aren't
-# staged on the host. Weights live under WEIGHTS_HOST on shark300; stream more
-# models there to extend coverage. Separate from the gfx950 workflow on purpose.
+# shark300 has NO gfx_apps NFS mount, so weights must be staged manually under
+# WEIGHTS_HOST -> we keep this matrix to SMALL models only. The full model set
+# runs on the gfx950 workflow (mi350), which reads weights from the NFS mount.
+# One matrix leg per model; a leg SKIPS (not fails) if its weights aren't staged.
 
 on:
   workflow_dispatch:
@@ -30,11 +31,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # SMALL models only (shark300 has no NFS; weights staged manually).
+        # Larger supported models (llama-8B, gemma-2-9b, ...) run on gfx950.
         include:
           - { profile: qwen3_0_6b,   subpath: Qwen3-0.6B }
           - { profile: qwen3_5_4b,   subpath: Qwen3.5-4B }
-          - { profile: llama,        subpath: Llama-3.1-8B-Instruct }
-          - { profile: gemma2_9b_it, subpath: gemma-2-9b-it }
           - { profile: gemma3_4b_it, subpath: gemma-3-4b-it }
     name: ${{ matrix.profile }} (gfx942)
     runs-on: [self-hosted, linux, rocm, docker, gfx942]
