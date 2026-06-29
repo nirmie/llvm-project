@@ -1,0 +1,71 @@
+name: Docker Harness pytest gate
+
+# Docker-based variant of pytest-gate.yml for standalone runners (no SLURM).
+# Fast CPU gate: runs the rocm-hotswap-testing harness unit/component tests
+# (no GPU, no weights -- conftest auto-skips GPU/COMGR/FFM). Clones the harness
+# on the runner host (gh-authed) and runs pytest in a lightweight container.
+
+on:
+  pull_request:
+  push:
+    branches: [nisenthi/docker-ci]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-pytest-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: python:3.12-slim
+  HARNESS_REPO: harsh-amd/rocm-hotswap-testing
+  HARNESS_REF: main
+  HARNESS_CHECKOUT: /home/nisenthi/hotswap-ci-persist/rocm-hotswap-testing
+
+jobs:
+  pytest:
+    runs-on: [self-hosted, linux, docker, cpu]
+    steps:
+      - name: Prepare harness checkout (gh-authed)
+        run: |
+          set -euo pipefail
+          CO="$HARNESS_CHECKOUT"
+          if [ ! -d "$CO/.git" ]; then
+            gh repo clone "$HARNESS_REPO" "$CO"
+          fi
+          git -C "$CO" fetch --all --prune
+          git -C "$CO" checkout "$HARNESS_REF"
+          git -C "$CO" pull --ff-only || true
+          echo "harness at $(git -C "$CO" rev-parse --short HEAD)"
+
+      - name: pytest (docker run)
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$HARNESS_CHECKOUT":/harness \
+            -w /harness \
+            "$IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              pip install -q pytest
+              pytest tests/ -q --no-header -p no:cacheprovider
+            ' 2>&1 | tee "$RUNNER_TEMP/pytest-output.log"
+
+      - name: Summarize pytest results
+        if: always()
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/pytest-output.log"
+          {
+            echo "## Harness pytest gate"
+            echo
+            if [ -f "$LOG" ]; then
+              echo '```'
+              grep -E "passed|failed|skipped|error" "$LOG" | tail -5 || echo "(no result line)"
+              echo '```'
+            else
+              echo "no pytest log (container failed before pytest ran)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

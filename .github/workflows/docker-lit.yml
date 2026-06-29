@@ -1,0 +1,73 @@
+name: Docker Lit (check-comgr)
+
+# Docker-based variant of hotswap-pr.yml for standalone runners (no SLURM).
+# Builds LLVM + comgr (hotswap transpile ON) and runs the Comgr lit suite
+# inside a rocm/pytorch container. CPU-only: targets any runner with the
+# `cpu` label (e.g. splinter). Persistent build/ccache dirs on the host make
+# incremental rebuilds fast.
+
+on:
+  pull_request:
+  push:
+    branches: [nisenthi/docker-ci]
+  workflow_dispatch:
+    inputs:
+      force_clean:
+        description: "Wipe persistent build dir before configuring"
+        type: boolean
+        default: false
+
+concurrency:
+  group: docker-lit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: rocm/pytorch:latest
+  PERSIST: /home/nisenthi/hotswap-ci-persist
+
+jobs:
+  lit:
+    runs-on: [self-hosted, linux, docker, cpu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Force clean persistent build dir (manual trigger only)
+        if: ${{ inputs.force_clean == true }}
+        run: rm -rf "$PERSIST/build"/*
+
+      - name: Build + lit (docker run)
+        run: |
+          set -euo pipefail
+          mkdir -p "$PERSIST/build" "$PERSIST/ccache"
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE":/src \
+            -v "$PERSIST/build":/persist/build \
+            -v "$PERSIST/ccache":/persist/ccache \
+            -e GITHUB_WORKSPACE=/src \
+            -e BUILD_DIR=/persist/build \
+            -e CCACHE_DIR=/persist/ccache \
+            "$IMAGE" \
+            bash /src/.github/workflows/scripts/docker-hotswap-build.sh \
+            2>&1 | tee "$RUNNER_TEMP/lit-output.log"
+
+      - name: Summarize lit results
+        if: always()
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/lit-output.log"
+          if [ ! -f "$LOG" ]; then
+            echo "no lit log (build failed before lit ran)" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          NOCOLOR=$(mktemp)
+          sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$LOG" > "$NOCOLOR"
+          {
+            echo "## Lit test summary (check-comgr)"
+            echo
+            echo '```'
+            grep -E "Total Discovered|^  Passed|^  Failed|^  Unsupported|^  Expectedly|^  Unresolved|Testing Time" \
+              "$NOCOLOR" | tail -10 || echo "(no summary block found)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
