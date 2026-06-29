@@ -132,3 +132,50 @@ image / upstream fix) — out of scope for the CI wrapper.
 No manual edits to the image were needed on either machine, so nothing was
 committed/pushed to the harbor `hotswap` namespace.
 
+---
+
+# Per-GPU CI over issue #70 supported models
+
+Per request, the e2e CI is split by GPU into two workflows, each iterating the
+[martin-luecke/rocm-systems#70](https://github.com/martin-luecke/rocm-systems/issues/70)
+"Model support plan" entries that (a) have a harness SGLang profile in the image
+and (b) have weights available. The image profiles are: `qwen3_0_6b`,
+`qwen3_5_4b`, `llama`, `gemma2_9b_it`, `gemma3_4b_it`, `gemma4_e2b_it`,
+`phi4_mini`, `gpt_oss`, `custom` (note: the docs mention `mistral_7b` /
+`deepseek_v2_lite` / `qwen3_30b_a3b`, but this image predates them).
+
+Matrix (5 models — all Group-1 "works"-tagged with profile + weights):
+
+| issue | model | profile |
+|---|---|---|
+| #72 | Qwen/Qwen3-0.6B | qwen3_0_6b |
+| #73 | Qwen/Qwen3.5-4B | qwen3_5_4b |
+| #74 | meta-llama/Llama-3.1-8B-Instruct | llama |
+| #80 | google/gemma-2-9b-it | gemma2_9b_it |
+| #81 | google/gemma-3-4b-it | gemma3_4b_it |
+
+Workflows (`.github/workflows/`):
+- `docker-e2e-gfx942.yml` — runs-on gfx942 (shark300). Weights under
+  `~/hotswap-data/<name>` (staged: gemma-3-4b-it + llama local copy; qwen3_0_6b,
+  qwen3_5_4b, gemma-2-9b-it streamed from mi350).
+- `docker-e2e-gfx950.yml` — runs-on gfx950 (mi350). Weights read directly from
+  `/mnt/gfx_apps/models/<org>/<name>` (gfx_apps NFS).
+- Shared `scripts/run-sglang-model.sh` — one model: SKIP if weights absent, else
+  `make sglang-hotswap-e2e-compare` in the image, then gate on `summary.json`.
+- One matrix leg per model (= one status per model per GPU). Triggers:
+  `workflow_dispatch` + nightly. Single runner per host ⇒ legs run serially
+  (no GPU-7 contention).
+
+Confirmed passing on gfx942: `llama` (Llama-3.1-8B) and `gemma3_4b_it`.
+
+## gfx950 blocker root cause (sgl-kernel missing gfx950)
+
+Diagnosed: torch and triton work on gfx950; the segfault is in **sgl-kernel** —
+`sgl_kernel/common_ops*.so` embeds ONLY `gfx942` code objects (no gfx950, via
+`roc-obj-ls`), so `hipLaunchKernel` finds no device binary on MI350X and
+segfaults (first op: `gelu_tanh_and_mul`). Fix: rebuild/replace sgl-kernel with
+gfx950 in its arch list (`GPU_ARCHS="gfx942;gfx950"`) or install a gfx950 wheel;
+stopgap is forcing the native torch activation path. Until baked into the
+gfx950 image, the gfx950 workflow legs fail at init (structure is correct and
+will pass once the gfx950 sgl-kernel lands).
+
