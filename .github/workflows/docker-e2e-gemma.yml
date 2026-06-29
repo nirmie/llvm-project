@@ -78,16 +78,22 @@ jobs:
 
       - name: Evaluate gate + summarize
         if: always()
+        # Custom shell WITHOUT -e: `find` over the root-owned (container-written)
+        # scratch dir exits non-zero on a permission-denied subdir, which under
+        # GitHub's default `bash -eo pipefail` would fail the step even though
+        # summary.json was found. We manage errors explicitly here.
+        shell: bash --noprofile --norc {0}
         run: |
           set -uo pipefail
+          GATE="$GITHUB_WORKSPACE/.github/workflows/scripts/gate-equivalence.py"
+          SJ=$(find "$SCRATCH_HOST" -name summary.json 2>/dev/null | sort | tail -1 || true)
           echo "## gemma3_4b_it SGLang HotSwap (${{ matrix.gfx }})" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
-          SJ=$(find "$SCRATCH_HOST" -name summary.json 2>/dev/null | sort | tail -1)
           if [ -z "$SJ" ]; then
             echo ":x: no summary.json produced (run failed before completion)" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          VERDICT=$(python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/gate-equivalence.py" "$SJ"); rc=$?
+          VERDICT=$(python3 "$GATE" "$SJ"); rc=$?
           ok="${VERDICT%%|*}"; status="${VERDICT#*|}"
           {
             echo "summary: \`$SJ\`"
