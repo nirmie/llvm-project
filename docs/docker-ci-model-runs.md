@@ -179,3 +179,25 @@ stopgap is forcing the native torch activation path. Until baked into the
 gfx950 image, the gfx950 workflow legs fail at init (structure is correct and
 will pass once the gfx950 sgl-kernel lands).
 
+
+---
+
+# gfx950 extended with issue #70 group representatives
+
+The gfx950 workflow also runs the issue #70 group representatives on gfx_apps
+that this image's SGLang text harness can run:
+
+| issue | model | profile | gfx950 result |
+|---|---|---|---|
+| #71 (G1, dense) | Qwen/Qwen2.5-7B-Instruct | custom | PASS (numerically_close) |
+| #83 (G2, MoE)  | Qwen/Qwen1.5-MoE-A2.7B-Chat | custom | runs+translates; verdict diverged (1/3 prompt) |
+
+Neither has a dedicated profile, so they use SGLANG_PROFILE=custom + a generic
+smoke prompts file (data/sglang/qwen3_5_4b/prompts/smoke.json). run-sglang-model.sh
+now takes NAME PROFILE SUBPATH [PROMPTS] and keys scratch by NAME.
+
+NOT runnable in this image (no VLM/diffusion harness targets): #95 Qwen2.5-VL,
+#96 FLUX.1-schnell, #120 Wan2.2-TI2V-5B.
+
+Both e2e workflows are on the hotswap default branch (pull_request +
+workflow_dispatch + nightly).
