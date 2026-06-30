@@ -201,3 +201,28 @@ NOT runnable in this image (no VLM/diffusion harness targets): #95 Qwen2.5-VL,
 
 Both e2e workflows are on the hotswap default branch (pull_request +
 workflow_dispatch + nightly).
+
+---
+
+# Independent PyTorch CI (PR#10 image): docker-e2e-pytorch-gfx950.yml
+
+Separate workflow on gfx950 using the PR#10 image
+(registry-sc-harbor.amd.com/hotswap/hotswap-pr10-gfx950) and the PyTorch hotswap
+path. Gate = pipeline health (local + hotswap branches complete, 0 failed
+translations); numerical equivalence surfaced but not gated. Stock-Alex SGLang
+workflows kept as the small sample.
+
+Working gfx_apps models (included): whisper_small (equiv PASS), flux_1_dev,
+flux_1_schnell (translate end-to-end; equivalence drifts).
+
+Tested but NOT yet included (fail in the hotswap translation branch on gfx950):
+- sd3_5_large, wan2_2_ti2v_5b: transpiler gaps (v_div_scale_f32, s_set_pc_i64) -> HIP 209
+- cogvideox_5b: runtime SIGABRT during compiled forward
+- phi4_mini, parakeet_tdt_1_1b: intercept symbol-binding abort (no real hipModule*)
+- mamba2_2_7b: transpiler refusal (cross-wave-lane-id-leak)
+- falcon_mamba_7b: hotswap translated 77+ kernels but timed out (900s)
+- stripedhyena_nous_7b: transformers offline+remote-code load bug (not gfx950)
+
+Deps: the 3 working models need no extra deps (diffusers/accelerate already in
+the image). mamba_ssm + causal-conv1d install via --no-build-isolation but mamba
+still blocked at transpile. nemo (parakeet) downgrades transformers — do not bake.
