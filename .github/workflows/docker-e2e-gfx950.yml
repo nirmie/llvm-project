@@ -5,11 +5,9 @@ name: Docker E2E gfx950 (SGLang HotSwap)
 # from the gfx_apps NFS already mounted on mi350. Separate from the gfx942
 # workflow on purpose.
 #
-# NOTE: gfx950 currently requires an sgl-kernel built for gfx950 (the stock
-# image's sgl_kernel/common_ops.so contains only gfx942 code objects, so SGLang
-# segfaults at engine init on MI350X). Until that image fix lands these legs
-# will fail at init; the workflow structure is correct and will pass once the
-# gfx950-enabled sgl-kernel is baked in.
+# Uses the gfx950-fixed image (sgl-kernel rebuilt for gfx950 + sglang teardown
+# patch). Validated: 4/5 dedicated-profile models pass; both #70 representatives
+# run (Qwen2.5-7B passes, Qwen1.5-MoE runs+translates but its verdict diverges).
 
 on:
   pull_request:
@@ -40,17 +38,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { profile: qwen3_0_6b,   subpath: Qwen/Qwen3-0.6B }
-          - { profile: qwen3_5_4b,   subpath: Qwen/Qwen3.5-4B }
-          - { profile: llama,        subpath: meta-llama/Llama-3.1-8B-Instruct }
-          - { profile: gemma2_9b_it, subpath: google/gemma-2-9b-it }
-          - { profile: gemma3_4b_it, subpath: google/gemma-3-4b-it }
-    name: ${{ matrix.profile }} (gfx950)
+          # Models with a dedicated harness profile:
+          - { name: qwen3_0_6b,   profile: qwen3_0_6b,   subpath: Qwen/Qwen3-0.6B }
+          - { name: qwen3_5_4b,   profile: qwen3_5_4b,   subpath: Qwen/Qwen3.5-4B }
+          - { name: llama_3_1_8b, profile: llama,        subpath: meta-llama/Llama-3.1-8B-Instruct }
+          - { name: gemma2_9b_it, profile: gemma2_9b_it, subpath: google/gemma-2-9b-it }
+          - { name: gemma3_4b_it, profile: gemma3_4b_it, subpath: google/gemma-3-4b-it }
+          # issue #70 group representatives on gfx_apps (custom profile + generic
+          # smoke prompts): #71 dense LLM, #83 MoE LLM. (#95 Qwen2.5-VL and
+          # #96/#120 FLUX/Wan diffusion need VLM/diffusion runners not present in
+          # this image's harness.)
+          - { name: qwen2_5_7b,  profile: custom, subpath: Qwen/Qwen2.5-7B-Instruct,    prompts: /workspace/rocm-hotswap-testing/data/sglang/qwen3_5_4b/prompts/smoke.json }
+          - { name: qwen1_5_moe, profile: custom, subpath: Qwen/Qwen1.5-MoE-A2.7B-Chat, prompts: /workspace/rocm-hotswap-testing/data/sglang/qwen3_5_4b/prompts/smoke.json }
+    name: ${{ matrix.name }} (gfx950)
     runs-on: [self-hosted, linux, rocm, docker, gfx950]
     steps:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: .github
-      - name: Run ${{ matrix.profile }}
+      - name: Run ${{ matrix.name }}
         shell: bash --noprofile --norc {0}
-        run: bash "$GITHUB_WORKSPACE/.github/workflows/scripts/run-sglang-model.sh" "${{ matrix.profile }}" "${{ matrix.subpath }}"
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/scripts/run-sglang-model.sh" "${{ matrix.name }}" "${{ matrix.profile }}" "${{ matrix.subpath }}" "${{ matrix.prompts }}"

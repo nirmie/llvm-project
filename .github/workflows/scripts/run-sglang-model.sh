@@ -3,8 +3,10 @@
 # then evaluate the equivalence gate. Shared by docker-e2e-gfx942.yml and
 # docker-e2e-gfx950.yml. Runs on the self-hosted runner HOST (not in a container).
 #
-# Args:   $1 PROFILE   harness sglang profile (e.g. gemma3_4b_it)
-#         $2 SUBPATH    model dir under $WEIGHTS_HOST (e.g. google/gemma-3-4b-it)
+# Args:   $1 NAME      leg name (e.g. qwen2_5_7b) — used for job + scratch dir
+#         $2 PROFILE   harness sglang profile (named, or `custom`)
+#         $3 SUBPATH   model dir under $WEIGHTS_HOST (e.g. google/gemma-3-4b-it)
+#         $4 PROMPTS   (optional) prompts file for the `custom` profile (in-image path)
 # Env:    IMAGE         docker image with the harness + hotswap stack
 #         WEIGHTS_HOST  host dir mounted at /data (model is /data/$SUBPATH)
 #         SCRATCH_BASE  host dir for per-model scratch
@@ -17,12 +19,15 @@
 # dir exits non-zero on permission-denied subpaths).
 set -uo pipefail
 
-PROFILE="$1"; SUBPATH="$2"
+NAME="$1"; PROFILE="$2"; SUBPATH="$3"; PROMPTS="${4:-}"
 HOSTPATH="$WEIGHTS_HOST/$SUBPATH"
-SCRATCH="$SCRATCH_BASE/$PROFILE"
+SCRATCH="$SCRATCH_BASE/$NAME"
 GATE="$GITHUB_WORKSPACE/.github/workflows/scripts/gate-equivalence.py"
+# `custom` profile carries no built-in prompts; pass the supplied file.
+PROMPTS_ARG=""
+[ -n "$PROMPTS" ] && PROMPTS_ARG="SGLANG_PROMPTS=$PROMPTS"
 
-hdr() { echo "## $PROFILE ($TARGET_GFX)" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"; }
+hdr() { echo "## $NAME ($TARGET_GFX, profile=$PROFILE)" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"; }
 
 if [ ! -e "$HOSTPATH" ]; then
   hdr
@@ -49,6 +54,7 @@ docker run --rm \
       SGLANG_MODEL_PATH=/data/'"$SUBPATH"' \
       SGLANG_PYTHON=/workspace/venv/bin/python \
       SGLANG_PROFILE='"$PROFILE"' \
+      '"$PROMPTS_ARG"' \
       SGLANG_LIBHSA_RUNTIME=/workspace/rocm-systems/projects/rocr-runtime/build/rocr/lib/libhsa-runtime64.so \
       SGLANG_INTERCEPT_LIB=/workspace/rocm-hotswap-testing/build/libhotswap_intercept.so \
       SGLANG_SCRATCH_ROOT=/scratch \
