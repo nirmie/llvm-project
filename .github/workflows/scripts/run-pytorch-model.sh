@@ -72,9 +72,13 @@ dump_failing_logs() {
 
 hdr
 SJ=$(find "$SCRATCH" -name summary.json 2>/dev/null | sort | tail -1 || true)
-if [ "$docker_rc" != "0" ] || [ -z "$SJ" ]; then
+# The pytorch harness exits non-zero on expected equivalence divergence, but
+# still writes summary.json. So the gate is evaluated from summary.json, NOT the
+# make exit code; only treat a MISSING summary as a hard failure (crashed before
+# completion).
+if [ -z "$SJ" ]; then
   {
-    echo ":x: run FAILED (exit=$docker_rc, summary=$( [ -n "$SJ" ] && echo present || echo missing ))"
+    echo ":x: run FAILED — no summary.json (make exit=$docker_rc; crashed before writing)"
     echo "Full per-run logs are in the step output (collapsible \`run.log\` groups)."
   } >> "$GITHUB_STEP_SUMMARY"
   dump_failing_logs
