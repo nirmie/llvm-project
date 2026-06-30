@@ -1,0 +1,54 @@
+name: Docker E2E pytorch gfx950 (PR#10 HotSwap)
+
+# Independent PyTorch-path HotSwap e2e on a gfx950 (MI350X) runner, using the
+# PR#10 image (rocm-hotswap-testing PR#10: pytorch runner + generative/VLM/audio
+# workloads). Runs the gfx_apps models that validated as working end-to-end
+# through the gfx1250->gfx950 hotswap translation. Separate from the stock-Alex
+# SGLang workflows (docker-e2e-gfx950 / -gfx942), which remain as the small
+# SGLang sample.
+#
+# Gate = pytorch pipeline health (local + hotswap branches complete, 0 failed
+# translations); numerical equivalence is surfaced but not gated.
+#
+# Validated working on gfx950 (PR#10 path): whisper_small (equivalence PASS),
+# flux_1_dev + flux_1_schnell (translate end-to-end, equivalence drifts).
+# Many other PR#10 models on gfx_apps currently fail in the hotswap translation
+# branch (gfx950 transpiler gaps / runtime aborts) — tracked, not yet included.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "11 8 * * *"   # nightly (offset from the sglang workflows)
+
+concurrency:
+  group: docker-e2e-pytorch-gfx950
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: registry-sc-harbor.amd.com/hotswap/hotswap-pr10-gfx950:latest
+  WEIGHTS_HOST: /mnt/gfx_apps/models
+  SCRATCH_BASE: /home/nisenthi/hotswap-ci-persist/e2e-pytorch-gfx950
+  GPU: "7"
+
+jobs:
+  models:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: whisper_small,  subpath: openai/whisper-small }
+          - { name: flux_1_dev,     subpath: black-forest-labs/FLUX.1-dev }
+          - { name: flux_1_schnell, subpath: black-forest-labs/FLUX.1-schnell }
+    name: ${{ matrix.name }} (pytorch gfx950)
+    runs-on: [self-hosted, linux, rocm, docker, gfx950]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+      - name: Run ${{ matrix.name }}
+        shell: bash --noprofile --norc {0}
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/scripts/run-pytorch-model.sh" "${{ matrix.name }}" "${{ matrix.subpath }}"
