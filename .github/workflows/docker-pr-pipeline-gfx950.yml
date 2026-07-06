@@ -1,0 +1,112 @@
+name: Docker PR pipeline gfx950 (build -> lit -> model)
+
+# End-to-end PR gate on gfx950 (MI350X) that actually tests the PR's transpiler:
+#   1) build-lit image: rebuild libamd_comgr.so from THIS PR's llvm-project
+#      checkout, run the check-comgr lit gate, export the built comgr.
+#   2) model-run image: run a representative model (whisper_small) against the
+#      PR-built comgr (mounted over the image's comgr).
+# Jobs are ordered (model needs build_lit) and both run on the mi350 runner, so
+# the built comgr is handed off via a host persist dir.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docker-pr-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BUILD_LIT_IMAGE: registry-sc-harbor.amd.com/hotswap-ci/hotswap-pr10-gfx950-build-lit:latest
+  MODEL_IMAGE: registry-sc-harbor.amd.com/hotswap-ci/hotswap-pr10-gfx950-model-run:latest
+  COMGR_OUT: /home/nisenthi/hotswap-ci-persist/pr-comgr/${{ github.run_id }}
+  GPU: "7"
+
+jobs:
+  build_lit:
+    name: build + lit (PR comgr)
+    runs-on: [self-hosted, linux, rocm, docker, gfx950]
+    steps:
+      - uses: actions/checkout@v4          # full checkout: need amd/comgr + amd/device-libs sources
+      - name: Rebuild comgr from PR + check-comgr lit gate
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -uo pipefail
+          mkdir -p "$COMGR_OUT"
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE":/pr:ro \
+            -v "$COMGR_OUT":/out \
+            "$BUILD_LIT_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              export PATH=/opt/rocm/llvm/bin:$PATH
+              echo "=== rebuild comgr from PR ==="
+              /workspace/rebuild-comgr.sh /pr
+              echo "=== lit gate: check-comgr ==="
+              ninja -C /workspace/llvm-acc/build check-comgr 2>&1 | tee /tmp/lit.log || true
+              cp -a /workspace/llvm-acc/build/lib/libamd_comgr.so.3.3.0 /out/
+              # emit lit pass/fail tallies for the summary
+              grep -E "Passed|Failed|Unsupported|Testing Time" /tmp/lit.log | tail -8 > /out/lit-summary.txt || true
+            ' 2>&1 | tee "$RUNNER_TEMP/buildlit.log"
+          {
+            echo "## build + lit (PR comgr, gfx950)"
+            echo '```'
+            cat "$COMGR_OUT/lit-summary.txt" 2>/dev/null || echo "(no lit summary captured)"
+            echo '```'
+            if [ -f "$COMGR_OUT/libamd_comgr.so.3.3.0" ]; then
+              echo ":white_check_mark: comgr built from PR + lit ran ($(du -h "$COMGR_OUT/libamd_comgr.so.3.3.0" | cut -f1))"
+            else
+              echo ":x: comgr artifact missing (build failed)"; exit 1
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  model:
+    name: model suite (whisper vs PR comgr)
+    needs: build_lit
+    runs-on: [self-hosted, linux, rocm, docker, gfx950]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+      - name: Run whisper_small against PR-built comgr
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -uo pipefail
+          SC=/home/nisenthi/hotswap-ci-persist/pr-pipeline-model/${{ github.run_id }}
+          rm -rf "$SC"; mkdir -p "$SC"
+          PRLIB="$COMGR_OUT/libamd_comgr.so.3.3.0"
+          [ -f "$PRLIB" ] || { echo "::error::PR comgr not found at $PRLIB"; exit 1; }
+          docker run --rm \
+            --device=/dev/kfd --device=/dev/dri --group-add 44 --group-add 109 \
+            --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            --security-opt label=disable --network=host \
+            -v /mnt/gfx_apps/models:/models:ro \
+            -v "$SC":/scratch \
+            -v "$PRLIB":/workspace/llvm-acc/build/lib/libamd_comgr.so.3.3.0:ro \
+            "$MODEL_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              cd /workspace/rocm-hotswap-testing
+              export LD_LIBRARY_PATH=/workspace/llvm-acc/build/lib:$LD_LIBRARY_PATH
+              make pytorch-hotswap-model-e2e \
+                PYTORCH_MODEL_CONFIG=data/pytorch/models/whisper_small.json \
+                PYTORCH_MODEL_PATH=/models/openai/whisper-small \
+                PYTORCH_PYTHON=/workspace/venv/bin/python \
+                PYTORCH_LIBHSA_RUNTIME=/workspace/rocm-systems/projects/rocr-runtime/build/rocr/lib/libhsa-runtime64.so \
+                PYTORCH_INTERCEPT_LIB=/workspace/rocm-hotswap-testing/build/libhotswap_intercept.so \
+                PYTORCH_COMGR_RUNTIME=/workspace/llvm-acc/build/lib/libamd_comgr.so.3 \
+                PYTORCH_GFX_OVERRIDE_LIB=/workspace/rocm-hotswap-testing/build/libhip_device_gfx_override.so \
+                PYTORCH_ROCBLAS_TENSILE_LIBPATH=/workspace/rocm-hotswap-testing/data/kernels/gfx1250_b0/tensile \
+                PYTORCH_SCRATCH_ROOT=/scratch PYTORCH_GPU='"$GPU"' PYTORCH_TARGET_GFX=gfx950
+            ' 2>&1 | tee "$RUNNER_TEMP/model.log"
+          SJ=$(find "$SC" -name summary.json 2>/dev/null | sort | tail -1 || true)
+          {
+            echo "## model suite: whisper_small vs PR comgr (gfx950)"
+            if [ -z "$SJ" ]; then echo ":x: no summary.json"; exit 1; fi
+            python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/gate-pytorch.py" "$SJ" || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          SJ2=$(find "$SC" -name summary.json 2>/dev/null | sort | tail -1 || true)
+          [ -n "$SJ2" ] && python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/gate-pytorch.py" "$SJ2"
