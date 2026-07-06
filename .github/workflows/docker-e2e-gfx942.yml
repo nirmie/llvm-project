@@ -1,4 +1,4 @@
-name: Docker E2E gfx942 (SGLang HotSwap)
+name: SGLang E2E gfx942
 
 # Runs the issue #70 supported models (that have a harness profile + staged
 # weights) through the SGLang HotSwap compare on a gfx942 (MI300X) runner.
@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: registry-sc-harbor.amd.com/rocm-hotswap/alex_wip:latest
+  IMAGE: registry-sc-harbor.amd.com/rocm-hotswap/alex_hotswap_wip:latest
   WEIGHTS_HOST: /home/nisenthi/hotswap-data
   SCRATCH_BASE: /home/nisenthi/hotswap-ci-persist/e2e-gfx942
   GPU: "7"
@@ -38,7 +38,7 @@ jobs:
           - { name: qwen3_0_6b,   profile: qwen3_0_6b,   subpath: Qwen3-0.6B }
           - { name: qwen3_5_4b,   profile: qwen3_5_4b,   subpath: Qwen3.5-4B }
           - { name: gemma3_4b_it, profile: gemma3_4b_it, subpath: gemma-3-4b-it }
-    name: ${{ matrix.name }} (gfx942)
+    name: ${{ matrix.name }}
     runs-on: [self-hosted, linux, rocm, docker, gfx942]
     steps:
       - uses: actions/checkout@v4

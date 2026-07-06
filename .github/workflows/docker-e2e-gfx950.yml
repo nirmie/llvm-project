@@ -1,4 +1,4 @@
-name: Docker E2E gfx950 (SGLang HotSwap)
+name: SGLang E2E gfx950
 
 # Runs the issue #70 supported models (that have a harness profile) through the
 # SGLang HotSwap compare on a gfx950 (MI350X) runner. Weights are read directly
@@ -50,7 +50,7 @@ jobs:
           # this image's harness.)
           - { name: qwen2_5_7b,  profile: custom, subpath: Qwen/Qwen2.5-7B-Instruct,    prompts: /workspace/rocm-hotswap-testing/data/sglang/qwen3_5_4b/prompts/smoke.json }
           - { name: qwen1_5_moe, profile: custom, subpath: Qwen/Qwen1.5-MoE-A2.7B-Chat, prompts: /workspace/rocm-hotswap-testing/data/sglang/qwen3_5_4b/prompts/smoke.json }
-    name: ${{ matrix.name }} (gfx950)
+    name: ${{ matrix.name }}
     runs-on: [self-hosted, linux, rocm, docker, gfx950]
     steps:
       - uses: actions/checkout@v4
