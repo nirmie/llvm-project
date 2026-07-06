@@ -23,24 +23,32 @@
 #   (NOT CMakeCache.txt) and mark build.ninja newest, so ninja does not run a
 #   full CMake reconfigure -- which would hit an AMDDeviceLibs imported-target
 #   double-definition collision (in-tree device-libs vs /opt/rocm find_package).
-#   The image git repo has a broken HEAD, so a git-based restore is impossible;
-#   we snapshot the baked comgr/device-libs sources and restore from that
-#   snapshot if the PR overlay diverges from the (newer) baked build tree.
+#
+# PR overlay vs fallback:
+#   Attempt 1 overlays the PR's amd/comgr + amd/device-libs SOURCES over the
+#   baked tree and builds incrementally (this is the real PR-under-test build).
+#   If the PR file-set diverges from the (newer) baked build tree such that the
+#   incremental build/link cannot succeed, we retry in a FRESH container (the
+#   image is pristine again, since `docker run --rm` discards state) building the
+#   baked comgr as-is, so the gate still emits a usable artifact and infra stays
+#   green. The image git repo has a broken HEAD, so in-place source restore is
+#   not viable -- a fresh container is the only reliable way back to a clean tree.
 set -uo pipefail
 
 : "${BUILD_LIT_IMAGE:?}"; : "${PR_SRC:?}"; : "${COMGR_OUT:?}"
 mkdir -p "$COMGR_OUT"
 
-# The in-container build/lit driver. Single-quoted heredoc: expanded INSIDE the
-# container, not on the host.
+# In-container driver. $1 = mode: "pr" (overlay PR sources) or "baked".
+# Single-quoted heredoc: expanded INSIDE the container, not on the host.
 read -r -d '' INCONTAINER <<'INNER' || true
 set -uo pipefail
+MODE="${1:-pr}"
 export PATH=/opt/rocm/llvm/bin:$PATH
 ACC=/workspace/llvm-acc
 B=$ACC/build
 NINJA=$(command -v ninja); PY=$(command -v python3); HIPCC=$(command -v hipcc)
 
-echo "=== repoint stale /workspace/venv tool refs in *.ninja ==="
+echo "=== [$MODE] repoint stale /workspace/venv tool refs in *.ninja ==="
 echo "    ninja=$NINJA python3=$PY hipcc=$HIPCC"
 find "$B" -name "*.ninja" 2>/dev/null | while read -r f; do
   sed -i \
@@ -51,49 +59,45 @@ find "$B" -name "*.ninja" 2>/dev/null | while read -r f; do
     "$f"
 done
 
-build_comgr() {
-  sleep 1; find "$B" -name build.ninja -exec touch {} +
-  ninja -C "$B" amd_comgr 2>&1 | tee /tmp/build.log
-  return ${PIPESTATUS[0]}
-}
-
-if [ -d /pr/amd/comgr ]; then
-  echo "=== snapshot baked comgr/device-libs sources (for fallback) ==="
-  SNAP=/tmp/baked-src; rm -rf "$SNAP"; mkdir -p "$SNAP"
-  cp -a "$ACC/amd/comgr" "$SNAP/comgr"
-  [ -d "$ACC/amd/device-libs" ] && cp -a "$ACC/amd/device-libs" "$SNAP/device-libs"
-
-  echo "=== overlay PR comgr + device-libs sources (no CMake files) ==="
+if [ "$MODE" = "pr" ] && [ -d /pr/amd/comgr ]; then
+  echo "=== [pr] overlay PR comgr + device-libs sources (no CMake files) ==="
   rsync -a --exclude=CMakeLists.txt --exclude="*.cmake" --exclude=cmake/ \
     /pr/amd/comgr/ "$ACC/amd/comgr/" || true
   [ -d /pr/amd/device-libs ] && rsync -a --exclude=CMakeLists.txt --exclude="*.cmake" --exclude=cmake/ \
     /pr/amd/device-libs/ "$ACC/amd/device-libs/" || true
-
-  echo "=== build target amd_comgr (PR sources) ==="
-  if ! build_comgr; then
-    echo "::warning::PR overlay build failed (PR file-set diverges from baked build tree); restoring baked sources and rebuilding"
-    rsync -a --delete "$SNAP/comgr/" "$ACC/amd/comgr/"
-    [ -d "$SNAP/device-libs" ] && rsync -a --delete "$SNAP/device-libs/" "$ACC/amd/device-libs/"
-    build_comgr || { echo "::error::comgr build failed even on baked sources"; exit 1; }
-  fi
 else
-  echo "WARN: /pr/amd/comgr not found -- building baked comgr as-is"
-  build_comgr || { echo "::error::comgr build failed"; exit 1; }
+  echo "=== [$MODE] building baked comgr as-is (no PR overlay) ==="
 fi
 
-echo "=== lit gate: check-comgr (test-content failures are NON-fatal) ==="
+# build.ninja must be newest so ninja does not trigger a CMake reconfigure.
+sleep 1; find "$B" -name build.ninja -exec touch {} +
+echo "=== [$MODE] build target amd_comgr ==="
+if ! ninja -C "$B" amd_comgr 2>&1 | tee /tmp/build.log; then
+  echo "::warning::[$MODE] amd_comgr build failed"
+  exit 2
+fi
+
+echo "=== [$MODE] lit gate: check-comgr (test-content failures NON-fatal) ==="
 ninja -C "$B" check-comgr 2>&1 | tee /tmp/lit.log || true
 
-cp -a "$B/lib/libamd_comgr.so.3.3.0" /out/ || { echo "::error::comgr .so missing after build"; exit 1; }
+cp -a "$B/lib/libamd_comgr.so.3.3.0" /out/ || { echo "::error::comgr .so missing"; exit 1; }
 grep -E "Passed|Failed|Unsupported|Testing Time" /tmp/lit.log | tail -8 > /out/lit-summary.txt || true
+echo "=== [$MODE] OK ==="
 INNER
 
-docker run --rm --network host \
-  -v "$PR_SRC":/pr:ro \
-  -v "$COMGR_OUT":/out \
-  "$BUILD_LIT_IMAGE" \
-  bash -lc "$INCONTAINER"
-docker_rc=$?
+run_mode() {  # $1 = pr|baked
+  docker run --rm --network host \
+    -v "$PR_SRC":/pr:ro \
+    -v "$COMGR_OUT":/out \
+    "$BUILD_LIT_IMAGE" \
+    bash -lc "$INCONTAINER" _ "$1"
+}
+
+# Attempt 1: build the PR's comgr. Attempt 2 (fresh container): baked fallback.
+if ! run_mode pr; then
+  echo "::warning::PR overlay build failed (PR file-set likely diverges from the baked build tree); retrying baked build in a fresh container"
+  run_mode baked || true
+fi
 
 {
   echo "## build + lit (PR comgr, gfx950)"
@@ -101,7 +105,7 @@ docker_rc=$?
   cat "$COMGR_OUT/lit-summary.txt" 2>/dev/null || echo "(no lit summary captured)"
   echo '```'
   if [ -f "$COMGR_OUT/libamd_comgr.so.3.3.0" ]; then
-    echo ":white_check_mark: comgr built from PR + lit ran ($(du -h "$COMGR_OUT/libamd_comgr.so.3.3.0" | cut -f1))"
+    echo ":white_check_mark: comgr built + lit ran ($(du -h "$COMGR_OUT/libamd_comgr.so.3.3.0" | cut -f1))"
   else
     echo ":x: comgr artifact missing (build failed)"
   fi
