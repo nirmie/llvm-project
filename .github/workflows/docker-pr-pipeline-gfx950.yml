@@ -1,4 +1,4 @@
-name: Docker PR pipeline gfx950 (build -> lit -> model)
+name: Build + Lit gfx950
 
 # End-to-end PR gate on gfx950 (MI350X) that actually tests the PR's transpiler:
 #   1) build-lit image: rebuild libamd_comgr.so from THIS PR's llvm-project
@@ -27,7 +27,7 @@ env:
 
 jobs:
   build_lit:
-    name: build + lit (PR comgr)
+    name: build + lit
     runs-on: [self-hosted, linux, rocm, docker, gfx950]
     steps:
       - uses: actions/checkout@v4          # full checkout: need amd/comgr + amd/device-libs sources
@@ -62,9 +62,25 @@ jobs:
               echo ":x: comgr artifact missing (build failed)"; exit 1
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Stage comgr + lit summary for artifact
+        shell: bash --noprofile --norc {0}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/artifact"
+          cp -a "$COMGR_OUT/libamd_comgr.so.3.3.0" "$RUNNER_TEMP/artifact/" 2>/dev/null || true
+          cp -a "$COMGR_OUT/lit-summary.txt"        "$RUNNER_TEMP/artifact/" 2>/dev/null || true
+      - name: Upload PR-built comgr artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libamd_comgr-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/artifact/libamd_comgr.so.3.3.0
+            ${{ runner.temp }}/artifact/lit-summary.txt
+          if-no-files-found: error
+          retention-days: 14
 
   model:
-    name: model suite (whisper vs PR comgr)
+    name: model
     needs: build_lit
     runs-on: [self-hosted, linux, rocm, docker, gfx950]
     steps:

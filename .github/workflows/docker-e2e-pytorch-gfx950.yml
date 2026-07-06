@@ -1,4 +1,4 @@
-name: Docker E2E pytorch gfx950 (PR#10 HotSwap)
+name: Pytorch E2E gfx950
 
 # Independent PyTorch-path HotSwap e2e on a gfx950 (MI350X) runner, using the
 # PR#10 image (rocm-hotswap-testing PR#10: pytorch runner + generative/VLM/audio
@@ -43,7 +43,7 @@ jobs:
           - { name: whisper_small,  subpath: openai/whisper-small }
           - { name: flux_1_dev,     subpath: black-forest-labs/FLUX.1-dev }
           - { name: flux_1_schnell, subpath: black-forest-labs/FLUX.1-schnell }
-    name: ${{ matrix.name }} (pytorch gfx950)
+    name: ${{ matrix.name }}
     runs-on: [self-hosted, linux, rocm, docker, gfx950]
     steps:
       - uses: actions/checkout@v4
