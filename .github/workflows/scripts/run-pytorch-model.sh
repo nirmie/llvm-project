@@ -31,6 +31,15 @@ if [ ! -e "$HOSTPATH" ]; then
 fi
 
 rm -rf "$SCRATCH"; mkdir -p "$SCRATCH"
+# Optional: mount PR-built comgr over the image comgr (set by the gated
+# pipeline via download-artifact). Unset/missing -> use image-baked comgr.
+PR_COMGR_MNT=()
+if [ -n "${PR_COMGR:-}" ] && [ -f "$PR_COMGR" ]; then
+  echo "Using PR-built comgr: $PR_COMGR"
+  PR_COMGR_MNT=(-v "$PR_COMGR":/workspace/llvm-acc/build/lib/libamd_comgr.so.3.3.0:ro)
+else
+  echo "PR_COMGR not provided -- using image-baked comgr"
+fi
 docker run --rm \
   --device=/dev/kfd --device=/dev/dri \
   --group-add 44 --group-add 109 \
@@ -39,6 +48,7 @@ docker run --rm \
   --network=host \
   -v "$WEIGHTS_HOST":/data:ro \
   -v "$SCRATCH":/scratch \
+  "${PR_COMGR_MNT[@]}" \
   "$IMAGE" \
   bash -lc '
     set -euo pipefail
