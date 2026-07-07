@@ -98,7 +98,17 @@ jobs:
         shell: bash --noprofile --norc {0}
         env:
           PR_COMGR: ${{ runner.temp }}/pr-comgr/libamd_comgr.so.3.3.0
+          LANE: SGLang E2E gfx950
+          RESULT_JSON: ${{ runner.temp }}/model-result.json
         run: bash "$GITHUB_WORKSPACE/.github/workflows/scripts/run-sglang-model.sh" "${{ matrix.name }}" "${{ matrix.profile }}" "${{ matrix.subpath }}" "${{ matrix.prompts }}"
+      - name: Upload per-model result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-sglang-gfx950-${{ matrix.name }}
+          path: ${{ runner.temp }}/model-result.json
+          if-no-files-found: warn
+          retention-days: 14
 
   # ------------------------------------------------------------------ SGLang gfx942
   sglang_gfx942:
@@ -131,7 +141,17 @@ jobs:
         shell: bash --noprofile --norc {0}
         env:
           PR_COMGR: ${{ runner.temp }}/pr-comgr/libamd_comgr.so.3.3.0
+          LANE: SGLang E2E gfx942
+          RESULT_JSON: ${{ runner.temp }}/model-result.json
         run: bash "$GITHUB_WORKSPACE/.github/workflows/scripts/run-sglang-model.sh" "${{ matrix.name }}" "${{ matrix.profile }}" "${{ matrix.subpath }}" "${{ matrix.prompts }}"
+      - name: Upload per-model result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-sglang-gfx942-${{ matrix.name }}
+          path: ${{ runner.temp }}/model-result.json
+          if-no-files-found: warn
+          retention-days: 14
 
   # ------------------------------------------------------------------ Pytorch gfx950
   pytorch_gfx950:
@@ -163,4 +183,36 @@ jobs:
         shell: bash --noprofile --norc {0}
         env:
           PR_COMGR: ${{ runner.temp }}/pr-comgr/libamd_comgr.so.3.3.0
+          LANE: Pytorch E2E gfx950
+          RESULT_JSON: ${{ runner.temp }}/model-result.json
         run: bash "$GITHUB_WORKSPACE/.github/workflows/scripts/run-pytorch-model.sh" "${{ matrix.name }}" "${{ matrix.subpath }}"
+      - name: Upload per-model result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-pytorch-gfx950-${{ matrix.name }}
+          path: ${{ runner.temp }}/model-result.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ------------------------------------------------------------------ Consolidated summary
+  summary:
+    name: Consolidated summary
+    needs: [sglang_gfx950, sglang_gfx942, pytorch_gfx950]
+    if: always()
+    runs-on: [self-hosted, linux, docker, cpu]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+      - name: Collect per-model results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/results
+      - name: Render consolidated summary
+        shell: bash --noprofile --norc {0}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          python3 "$GITHUB_WORKSPACE/.github/workflows/scripts/render-summary.py" "$RUNNER_TEMP/results"

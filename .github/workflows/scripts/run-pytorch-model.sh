@@ -20,12 +20,28 @@ NAME="$1"; SUBPATH="$2"
 HOSTPATH="$WEIGHTS_HOST/$SUBPATH"
 SCRATCH="$SCRATCH_BASE/$NAME"
 GATE="$GITHUB_WORKSPACE/.github/workflows/scripts/gate-pytorch.py"
+# Lane label used by the consolidated summary aggregator (passed by workflow).
+LANE="${LANE:-Pytorch E2E gfx950}"
+RESULT_JSON="${RESULT_JSON:-$RUNNER_TEMP/model-result.json}"
 
-hdr() { echo "## $NAME (pytorch, gfx950)" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"; }
+# Write the machine-readable per-model result consumed by render-summary.py.
+# Args: $1 state (pass|diverged|fail|skip)  $2 detail string.
+write_result() {
+  LANE="$LANE" MODEL="$NAME" STATE="$1" DETAIL="$2" \
+    python3 - "$RESULT_JSON" <<'PY'
+import json, os, sys
+json.dump({
+    "lane":   os.environ["LANE"],
+    "model":  os.environ["MODEL"],
+    "state":  os.environ["STATE"],
+    "detail": os.environ["DETAIL"],
+}, open(sys.argv[1], "w"))
+PY
+}
 
 if [ ! -e "$HOSTPATH" ]; then
-  hdr
-  echo ":fast_forward: SKIPPED — weights not present at \`$HOSTPATH\`" >> "$GITHUB_STEP_SUMMARY"
+  write_result skip "weights not present at $HOSTPATH"
+  echo ":fast_forward: \`$NAME\` ($LANE): SKIPPED — weights absent." >> "$GITHUB_STEP_SUMMARY"
   echo "SKIPPED (no weights: $HOSTPATH)"
   exit 0
 fi
@@ -80,33 +96,34 @@ dump_failing_logs() {
   done
 }
 
-hdr
 SJ=$(find "$SCRATCH" -name summary.json 2>/dev/null | sort | tail -1 || true)
 # The pytorch harness exits non-zero on expected equivalence divergence, but
 # still writes summary.json. So the gate is evaluated from summary.json, NOT the
 # make exit code; only treat a MISSING summary as a hard failure (crashed before
 # completion).
 if [ -z "$SJ" ]; then
-  {
-    echo ":x: run FAILED — no summary.json (make exit=$docker_rc; crashed before writing)"
-    echo "Full per-run logs are in the step output (collapsible \`run.log\` groups)."
-  } >> "$GITHUB_STEP_SUMMARY"
+  write_result fail "no summary.json (make exit=$docker_rc; crashed before writing)"
+  echo ":x: \`$NAME\` ($LANE): run FAILED — no summary.json (exit=$docker_rc)." >> "$GITHUB_STEP_SUMMARY"
   dump_failing_logs
   exit 1
 fi
 
 VERDICT=$(python3 "$GATE" "$SJ"); rc=$?
-IFS='|' read -r ok rest <<< "$VERDICT"
-{
-  echo '```'
-  echo "${VERDICT//|/$'\n'}"
-  echo '```'
-  if [ "$rc" = "0" ]; then
-    echo ":white_check_mark: gate PASSED (HotSwap transpile pipeline healthy)"
-    echo "$VERDICT" | grep -q "equiv_passed=True" || echo "> note: numerical equivalence drifted (see equiv=) — not gated."
-  else
-    echo ":x: gate FAILED — native or hotswap branch did not complete cleanly"
-  fi
-} >> "$GITHUB_STEP_SUMMARY"
+# VERDICT = "<ok>|proof=..|equiv=<status>|equiv_passed=<bool>"
+eq_status=$(echo "$VERDICT" | sed -n 's/.*equiv=\([^|]*\).*/\1/p')
+eq_passed=$(echo "$VERDICT" | sed -n 's/.*equiv_passed=\([^|]*\).*/\1/p')
+# Tri-state: gate FAIL -> fail; gate PASS with divergence (equiv_passed not True
+# or status in {diverged,output_mismatch}) -> diverged (yellow); else pass.
+# numerically_close / equivalent / distributionally_equivalent = PASS.
+if [ "$rc" != "0" ]; then
+  state=fail
+elif [ "$eq_status" = "diverged" ] || [ "$eq_status" = "output_mismatch" ] || [ "$eq_passed" != "True" ]; then
+  state=diverged
+else
+  state=pass
+fi
+detail=$(echo "$VERDICT" | cut -d'|' -f2-)
+write_result "$state" "$detail"
+echo ":page_facing_up: \`$NAME\` ($LANE): $state — $detail (see consolidated summary)." >> "$GITHUB_STEP_SUMMARY"
 [ "$rc" = "0" ] || dump_failing_logs
 exit $rc
