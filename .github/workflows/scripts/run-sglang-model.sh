@@ -23,15 +23,32 @@ NAME="$1"; PROFILE="$2"; SUBPATH="$3"; PROMPTS="${4:-}"
 HOSTPATH="$WEIGHTS_HOST/$SUBPATH"
 SCRATCH="$SCRATCH_BASE/$NAME"
 GATE="$GITHUB_WORKSPACE/.github/workflows/scripts/gate-equivalence.py"
+# Lane label used by the consolidated summary aggregator. Passed in by the
+# workflow via LANE; fall back to a sensible default from TARGET_GFX.
+LANE="${LANE:-SGLang E2E ${TARGET_GFX}}"
+RESULT_JSON="${RESULT_JSON:-$RUNNER_TEMP/model-result.json}"
 # `custom` profile carries no built-in prompts; pass the supplied file.
 PROMPTS_ARG=""
 [ -n "$PROMPTS" ] && PROMPTS_ARG="SGLANG_PROMPTS=$PROMPTS"
 
-hdr() { echo "## $NAME ($TARGET_GFX, profile=$PROFILE)" >> "$GITHUB_STEP_SUMMARY"; echo >> "$GITHUB_STEP_SUMMARY"; }
+# Write the machine-readable per-model result consumed by render-summary.py.
+# Args: $1 state (pass|diverged|fail|skip)  $2 detail string.
+write_result() {
+  LANE="$LANE" MODEL="$NAME" STATE="$1" DETAIL="$2" \
+    python3 - "$RESULT_JSON" <<'PY'
+import json, os, sys
+json.dump({
+    "lane":   os.environ["LANE"],
+    "model":  os.environ["MODEL"],
+    "state":  os.environ["STATE"],
+    "detail": os.environ["DETAIL"],
+}, open(sys.argv[1], "w"))
+PY
+}
 
 if [ ! -e "$HOSTPATH" ]; then
-  hdr
-  echo ":fast_forward: SKIPPED — weights not present at \`$HOSTPATH\`" >> "$GITHUB_STEP_SUMMARY"
+  write_result skip "weights not present at $HOSTPATH"
+  echo ":fast_forward: \`$NAME\` ($LANE): SKIPPED — weights absent." >> "$GITHUB_STEP_SUMMARY"
   echo "SKIPPED (no weights: $HOSTPATH)"
   exit 0
 fi
@@ -96,33 +113,30 @@ dump_failing_logs() {
   done
 }
 
-hdr
 SJ=$(find "$SCRATCH" -name summary.json 2>/dev/null | sort | tail -1 || true)
 
 # Failure if the harness exited non-zero or produced no summary.
 if [ "$docker_rc" != "0" ] || [ -z "$SJ" ]; then
-  {
-    echo ":x: run FAILED (exit=$docker_rc, summary=$( [ -n "$SJ" ] && echo present || echo missing ))"
-    echo "Full per-run logs are in the step output (collapsible \`run.log\` groups)."
-  } >> "$GITHUB_STEP_SUMMARY"
+  write_result fail "run FAILED (exit=$docker_rc, summary=$( [ -n "$SJ" ] && echo present || echo missing ))"
+  echo ":x: \`$NAME\` ($LANE): run FAILED (exit=$docker_rc) — see logs." >> "$GITHUB_STEP_SUMMARY"
   dump_failing_logs
   exit 1
 fi
 
 VERDICT=$(python3 "$GATE" "$SJ"); rc=$?
 IFS='|' read -r ok status strict <<< "$VERDICT"
-{
-  echo '```'
-  echo "overall_status:        $status"
-  echo "equivalence (strict):  $strict"
-  echo '```'
-  if [ "$rc" = "0" ]; then
-    echo ":white_check_mark: gate PASSED (HotSwap transpile produced a valid verdict: \`$status\`)"
-    [ "$strict" = "True" ] || echo "> note: strict equivalence did not pass (\`$status\`) — expected gfx1250→target accumulation effect, not gated."
-  else
-    echo ":x: gate FAILED — no valid equivalence verdict"
-  fi
-} >> "$GITHUB_STEP_SUMMARY"
+# Tri-state: gate FAIL -> fail; gate PASS with a divergence status (or strict
+# equivalence not passing) -> diverged (yellow); otherwise -> pass (green).
+# numerically_close / equivalent / distributionally_equivalent = PASS.
+if [ "$rc" != "0" ]; then
+  state=fail
+elif [ "$status" = "diverged" ] || [ "$status" = "output_mismatch" ] || [ "$strict" != "True" ]; then
+  state=diverged
+else
+  state=pass
+fi
+write_result "$state" "overall_status=$status (strict=$strict)"
+echo ":page_facing_up: \`$NAME\` ($LANE): $state — overall_status=\`$status\`, strict=$strict (see consolidated summary)." >> "$GITHUB_STEP_SUMMARY"
 
 # On gate failure, also surface the full per-run logs.
 [ "$rc" = "0" ] || dump_failing_logs
