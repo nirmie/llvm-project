@@ -43,15 +43,28 @@ else()
 endif()
 
 function(comgr_add_amdgpu_private_include_dirs target)
-  if(DEFINED LLVM_BUILD_MAIN_SRC_DIR AND LLVM_BUILD_MAIN_SRC_DIR)
+  # HotSwap/TheRock: when comgr is configured against the LLVM *install* tree,
+  # LLVMConfig exposes neither LLVM_BUILD_MAIN_SRC_DIR nor an AMDGPU-bearing
+  # LLVM_BINARY_DIR (the install prefix has no lib/Target/AMDGPU). Allow the
+  # super-project to pass the LLVM source + build trees explicitly so the
+  # transpiler-internal tests can find SIDefines.h / AMDGPUGen*.inc. These are
+  # set alongside the transpiler's LLVM_DIR (build tree) in the superbuild.
+  set(_comgr_llvm_main_src_dir "")
+  set(_comgr_llvm_binary_dir "${LLVM_BINARY_DIR}")
+  if(DEFINED HOTSWAP_LLVM_SOURCE_DIR AND HOTSWAP_LLVM_SOURCE_DIR)
+    set(_comgr_llvm_main_src_dir "${HOTSWAP_LLVM_SOURCE_DIR}")
+  elseif(DEFINED LLVM_BUILD_MAIN_SRC_DIR AND LLVM_BUILD_MAIN_SRC_DIR)
     set(_comgr_llvm_main_src_dir "${LLVM_BUILD_MAIN_SRC_DIR}")
   elseif(DEFINED LLVM_MAIN_SRC_DIR AND LLVM_MAIN_SRC_DIR)
     set(_comgr_llvm_main_src_dir "${LLVM_MAIN_SRC_DIR}")
   else()
     message(FATAL_ERROR
       "Comgr test target ${target} requires LLVM source-tree paths for "
-      "AMDGPU target-private headers. Expected LLVM_MAIN_SRC_DIR or "
-      "LLVM_BUILD_MAIN_SRC_DIR to be set by the LLVM build.")
+      "AMDGPU target-private headers. Expected HOTSWAP_LLVM_SOURCE_DIR, "
+      "LLVM_MAIN_SRC_DIR or LLVM_BUILD_MAIN_SRC_DIR to be set.")
+  endif()
+  if(DEFINED HOTSWAP_LLVM_BINARY_DIR AND HOTSWAP_LLVM_BINARY_DIR)
+    set(_comgr_llvm_binary_dir "${HOTSWAP_LLVM_BINARY_DIR}")
   endif()
 
   # Tests that pull in transpiler internals (wave-projection.h, opcode-map.h,
@@ -61,7 +74,7 @@ function(comgr_add_amdgpu_private_include_dirs target)
   target_include_directories(${target} PRIVATE
     "${_comgr_llvm_main_src_dir}/lib/Target/AMDGPU"
     "${_comgr_llvm_main_src_dir}/lib/Target/AMDGPU/Utils"
-    "${LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+    "${_comgr_llvm_binary_dir}/lib/Target/AMDGPU")
 endfunction()
 
 # Wire up a test target against the hotswap transpiler OBJECT lib + the
