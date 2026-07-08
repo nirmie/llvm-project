@@ -40,6 +40,20 @@ namespace metadata {
 template <typename ELFT> using Elf_Note = typename ELFT::Note;
 
 namespace {
+// HotSwap: parse an ELF straight from a MemoryBufferRef (no DataObject needed).
+// Used by the transpiler's listKernelNames/extractKernelMeta.
+Expected<std::unique_ptr<ELFObjectFileBase>>
+getELFObjectFileBase(MemoryBufferRef MB) {
+  Expected<std::unique_ptr<ObjectFile>> ObjOrErr =
+      ObjectFile::createELFObjectFile(MB);
+
+  if (auto Err = ObjOrErr.takeError()) {
+    return std::move(Err);
+  }
+
+  return unique_dyn_cast<ELFObjectFileBase>(std::move(*ObjOrErr));
+}
+
 Expected<std::unique_ptr<ELFObjectFileBase>>
 getELFObjectFileBase(DataObject *DataP) {
   std::unique_ptr<MemoryBuffer> Buf =
@@ -253,6 +267,28 @@ amd_comgr_status_t getElfMetadataRoot(const ELFObjectFile<ELFT> *Obj,
 
 amd_comgr_status_t getMetadataRoot(DataObject *DataP, DataMeta *MetaP) {
   auto ObjOrErr = getELFObjectFileBase(DataP);
+  if (errorToBool(ObjOrErr.takeError())) {
+    return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
+  }
+  auto *Obj = ObjOrErr->get();
+
+  if (auto *ELF32LE = dyn_cast<ELF32LEObjectFile>(Obj)) {
+    return getElfMetadataRoot(ELF32LE, MetaP);
+  }
+  if (auto *ELF64LE = dyn_cast<ELF64LEObjectFile>(Obj)) {
+    return getElfMetadataRoot(ELF64LE, MetaP);
+  }
+  if (auto *ELF32BE = dyn_cast<ELF32BEObjectFile>(Obj)) {
+    return getElfMetadataRoot(ELF32BE, MetaP);
+  }
+  auto *ELF64BE = dyn_cast<ELF64BEObjectFile>(Obj);
+  return getElfMetadataRoot(ELF64BE, MetaP);
+}
+
+// HotSwap: parse AMDGPU metadata directly from a MemoryBufferRef, so the
+// transpiler can read kernel metadata without wrapping bytes in a DataObject.
+amd_comgr_status_t getMetadataRoot(MemoryBufferRef Buf, DataMeta *MetaP) {
+  auto ObjOrErr = getELFObjectFileBase(Buf);
   if (errorToBool(ObjOrErr.takeError())) {
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
   }

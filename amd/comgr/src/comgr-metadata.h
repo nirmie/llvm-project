@@ -11,6 +11,7 @@
 
 #include "comgr.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 
@@ -18,6 +19,8 @@ namespace COMGR {
 namespace metadata {
 
 amd_comgr_status_t getMetadataRoot(DataObject *DataP, DataMeta *MetaP);
+// HotSwap: MemoryBufferRef overload for the transpiler (no DataObject wrapper).
+amd_comgr_status_t getMetadataRoot(llvm::MemoryBufferRef MB, DataMeta *MetaP);
 
 size_t getIsaCount();
 
