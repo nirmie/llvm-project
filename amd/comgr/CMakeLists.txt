@@ -191,6 +191,11 @@ target_include_directories(amd_comgr
 # added after the curated LLVM/LLD link block below (see "hotswap transpiler
 # link edge"), not here.
 if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
+  # The cross-gen entry point (amd_comgr_hotswap_transpile[_with_options] and the
+  # amd_comgr_hotswap_rewrite_with_options ROCr shim) is only compiled when the
+  # transpiler is enabled; the raise-to-IR pipeline it calls lives in the
+  # hotswap::transpiler subproject (linked below via hotswap::transpiler).
+  target_sources(amd_comgr PRIVATE src/comgr-hotswap-transpile.cpp)
   target_compile_definitions(amd_comgr PRIVATE COMGR_ENABLE_HOTSWAP_TRANSPILE=1)
 endif()
 
