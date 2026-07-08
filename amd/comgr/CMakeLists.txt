@@ -72,7 +72,10 @@ set(SOURCES
   src/comgr-clang-command.cpp
   src/comgr-compiler.cpp
   src/comgr.cpp
-  src/comgr-device-libs.cpp
+  # src/comgr-device-libs.cpp is built as the comgr-device-libs-internal OBJECT
+  # library (added below, after include(DeviceLibs)) and linked into amd_comgr
+  # via $<TARGET_OBJECTS:...>, so the HotSwap transpiler's unit tests can pull
+  # in just those device-library helpers without linking all of amd_comgr.
   src/comgr-diagnostic-handler.cpp
   src/comgr-disassembly.cpp
   src/comgr-env.cpp
@@ -353,6 +356,36 @@ list(APPEND AMD_COMGR_PRIVATE_COMPILE_DEFINITIONS AMD_COMGR_EXPORT)
 include(bc2h)
 include(opencl_header)
 include(DeviceLibs)
+
+# Build comgr-device-libs.cpp as a standalone OBJECT library so the HotSwap
+# transpiler's unit tests can link just the embedded-device-library helpers
+# (getDeviceLibraries / getOCMLDeviceLibraryNames / ...) without pulling in the
+# whole amd_comgr link closure. Its objects are also compiled into amd_comgr
+# below, so runtime behavior is unchanged. Must come after include(DeviceLibs)
+# so the generated .inc targets exist.
+add_library(comgr-device-libs-internal OBJECT
+  src/comgr-device-libs.cpp)
+set_target_properties(comgr-device-libs-internal PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED Yes
+  CXX_EXTENSIONS No
+  POSITION_INDEPENDENT_CODE ON)
+target_compile_options(comgr-device-libs-internal
+  PRIVATE "${AMD_COMGR_PRIVATE_COMPILE_OPTIONS}")
+target_compile_definitions(comgr-device-libs-internal
+  PRIVATE "${AMD_COMGR_PRIVATE_COMPILE_DEFINITIONS}")
+target_include_directories(comgr-device-libs-internal
+  PRIVATE
+    ${LLVM_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_BINARY_DIR}/include)
+# comgr-device-libs.cpp #includes the generated device-library .inc headers, so
+# wait for the generators. libraries_sha_header pulls in every per-target
+# oclc_*.inc (its command lists them all in DEPENDS).
+add_dependencies(comgr-device-libs-internal
+  libraries_sha_header opencl-c-base.inc_target)
+target_sources(amd_comgr PRIVATE
+  $<TARGET_OBJECTS:comgr-device-libs-internal>)
 
 # Embed libc++ headers for HIPRTC std C++ support
 # Can be disabled with -DCOMGR_EMBED_LIBCXX_HEADERS=OFF to reduce library size
