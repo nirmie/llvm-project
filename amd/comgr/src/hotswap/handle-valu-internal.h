@@ -16,6 +16,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/Support/Error.h"
 
 #include <cassert>
 
@@ -32,27 +33,34 @@ namespace COMGR::hotswap {
 // Cross-lane primitives: V_READFIRSTLANE_B32, V_READLANE_B32,
 // V_WRITELANE_B32, V_MBCNT_{LO,HI}_U32_B32, V_PERMLANE{16,X16,64}_B32,
 // V_PERMLANE{16,32}_SWAP_B32. Isolated because the cross-wave
-// strategy (hotswap/docs/wave-size-translation.md §§5.3 and 7) keeps
+// strategy (hotswap/docs/wave-size-translation.md sec. sec. 5.3 and 7) keeps
 // iterating on exactly this surface.
-HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
-                                    OpResolver &Op);
+llvm::Expected<HandlerResult>
+handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op);
 
 // "Small ops": type conversions, F16 arith, 16-bit shifts / min /
 // max, byte pack, V_BFREV_B32, V_NOT_B32, F32 single-src
 // transcendentals. See `handle-valu-small-ops.cpp` for the exact list.
-HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
-                                   OpResolver &Op);
+llvm::Expected<HandlerResult>
+handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op);
 
 // Vector compares (V_CMP / V_CMPX collapsed onto two SemOps with
 // VCmpMeta side-table lookup) including cross-wave projection of the
 // ballot result back to source-EXEC width.
-HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
-                               OpResolver &Op);
+llvm::Expected<HandlerResult>
+handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op);
 
 // VOP3P packed ops (V_PK_*_F32, V_PK_MOV_B32), WMMA (V_WMMA_F32_*),
 // v_fma_mix_f32, and v_cndmask_b32.
-HandlerResult handleValuVoP3P(RaiseContext &Ctx, const DecodedInst &Di,
-                                OpResolver &Op);
+llvm::Expected<HandlerResult>
+handleValuVoP3P(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op);
+
+// Read the per-lane wave-mask condition operand (src2) shared by the
+// V_CNDMASK_B32 (VOP3P handler) and V_CNDMASK_B16 (true16 handler) lifts.
+// Handles the SGPR fresh-compare / shadow fallback, wave32 vcc_hi/exec_hi
+// scratch, and default-VCC routing; always returns a non-null per-lane `i1`.
+llvm::Value *raiseCndmaskWaveCondition(RaiseContext &Ctx, const DecodedInst &Di,
+                                       OpResolver &Op);
 
 // Emit unsigned i16 multiply-add for either `i16` or `<N x i16>` operands.
 // `A`, `B`, and `C` must have the same type; `WideTy` and `ClampMax` must be
@@ -71,8 +79,8 @@ inline llvm::Value *emitU16Mad(RaiseContext &Ctx, llvm::Value *A,
          "u16 MAD clamp constant must match the widened type");
 
   if (!Clamp) {
-    return Ctx.B.CreateAdd(Ctx.B.CreateMul(A, B, llvm::Twine(Name) + "_mul"),
-                           C, Name);
+    return Ctx.B.CreateAdd(Ctx.B.CreateMul(A, B, llvm::Twine(Name) + "_mul"), C,
+                           Name);
   }
 
   llvm::Value *WideA =
@@ -84,9 +92,8 @@ inline llvm::Value *emitU16Mad(RaiseContext &Ctx, llvm::Value *A,
   llvm::Value *Wide = Ctx.B.CreateAdd(
       Ctx.B.CreateMul(WideA, WideB, llvm::Twine(Name) + "_mul_wide"), WideC,
       llvm::Twine(Name) + "_wide");
-  llvm::Function *UminFn =
-      llvm::Intrinsic::getOrInsertDeclaration(&Ctx.M, llvm::Intrinsic::umin,
-                                              {WideTy});
+  llvm::Function *UminFn = llvm::Intrinsic::getOrInsertDeclaration(
+      &Ctx.M, llvm::Intrinsic::umin, {WideTy});
   llvm::Value *Sat =
       Ctx.B.CreateCall(UminFn, {Wide, ClampMax}, llvm::Twine(Name) + "_clamp");
   return Ctx.B.CreateTrunc(Sat, A->getType(), Name);

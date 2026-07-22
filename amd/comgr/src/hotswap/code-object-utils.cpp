@@ -95,19 +95,17 @@ llvm::Error readKernelDescriptorBytes(llvm::object::ObjectFile &Obj,
   uint64_t SymAddr = *AddrOrErr;
 
   if (SymAddr < RodataAddr || SymAddr + KdSize > RodataAddr + RodataSize)
-    return makeHotswapError("readKernelDescriptorBytes: symbol '" + KdSymName +
-                            "' at " + hexAddr(SymAddr) +
-                            " is not contained within .rodata [" +
-                            hexAddr(RodataAddr) + ", " +
-                            hexAddr(RodataAddr + RodataSize) + ")");
+    return makeHotswapError(
+        "readKernelDescriptorBytes: symbol '" + KdSymName + "' at " +
+        hexAddr(SymAddr) + " is not contained within .rodata [" +
+        hexAddr(RodataAddr) + ", " + hexAddr(RodataAddr + RodataSize) + ")");
 
   uint64_t Off = SymAddr - RodataAddr;
   if (Off + KdSize > RodataContents.size())
-    return makeHotswapError("readKernelDescriptorBytes: symbol '" + KdSymName +
-                            "' offset " + hexAddr(Off) + " + " +
-                            llvm::Twine(KdSize) +
-                            " exceeds .rodata contents size " +
-                            hexAddr(RodataContents.size()));
+    return makeHotswapError(
+        "readKernelDescriptorBytes: symbol '" + KdSymName + "' offset " +
+        hexAddr(Off) + " + " + llvm::Twine(KdSize) +
+        " exceeds .rodata contents size " + hexAddr(RodataContents.size()));
 
   llvm::ArrayRef<uint8_t> Src(RodataContents.bytes_begin() + Off, KdSize);
   llvm::copy(Src, Out.begin());
@@ -128,8 +126,8 @@ llvm::Error readKernelDescriptorBytes(llvm::object::ObjectFile &Obj,
 void populateKernelDescriptorFields(llvm::object::ObjectFile &Obj,
                                     KernelMeta &Meta) {
   KernelDescriptorBuffer KdBytes{};
-  if (llvm::Error E = readKernelDescriptorBytes(Obj, Meta.Name, KdBytes)) {
-    llvm::logAllUnhandledErrors(std::move(E), llvm::errs(), "transpiler: ");
+  if (llvm::Error Err = readKernelDescriptorBytes(Obj, Meta.Name, KdBytes)) {
+    llvm::logAllUnhandledErrors(std::move(Err), llvm::errs(), "transpiler: ");
     Meta.HasKernelDescriptor = false;
     return;
   }
@@ -190,8 +188,7 @@ void forEachKernelNode(llvm::msgpack::Document &Doc, Fn &&CB) {
   llvm::msgpack::DocNode &Root = Doc.getRoot();
   if (!Root.isMap())
     return;
-  llvm::msgpack::DocNode *Kernels =
-      findInMap(Root.getMap(), "amdhsa.kernels");
+  llvm::msgpack::DocNode *Kernels = findInMap(Root.getMap(), "amdhsa.kernels");
   if (!Kernels || !Kernels->isArray())
     return;
   for (auto &K : Kernels->getArray()) {
@@ -208,19 +205,27 @@ llvm::Expected<TextSection> extractTextSection(llvm::MemoryBufferRef ElfData) {
       llvm::object::ObjectFile::createELFObjectFile(ElfData);
   if (!ObjOrErr)
     return ObjOrErr.takeError();
+  TextSection Result;
   for (const llvm::object::SectionRef &Sec : (*ObjOrErr)->sections()) {
     llvm::Expected<llvm::StringRef> NameOrErr = Sec.getName();
     if (!NameOrErr)
       return NameOrErr.takeError();
-    if (*NameOrErr != ".text")
-      continue;
-    llvm::Expected<llvm::StringRef> ContentsOrErr = Sec.getContents();
-    if (!ContentsOrErr)
-      return ContentsOrErr.takeError();
-    TextSection Result;
-    Result.Bytes.assign(ContentsOrErr->begin(), ContentsOrErr->end());
-    return Result;
+    if (*NameOrErr == ".rodata" || *NameOrErr == ".text") {
+      llvm::Expected<llvm::StringRef> ContentsOrErr = Sec.getContents();
+      if (!ContentsOrErr)
+        return ContentsOrErr.takeError();
+      TextSection::ImageSection Image;
+      Image.Bytes.assign(ContentsOrErr->begin(), ContentsOrErr->end());
+      Image.Address = Sec.getAddress();
+      Result.ImageSections.push_back(std::move(Image));
+      if (*NameOrErr == ".text") {
+        Result.Bytes.assign(ContentsOrErr->begin(), ContentsOrErr->end());
+        Result.Address = Sec.getAddress();
+      }
+    }
   }
+  if (!Result.Bytes.empty())
+    return Result;
   return makeHotswapError("extractTextSection: .text section not found in ELF");
 }
 
@@ -254,70 +259,74 @@ llvm::Expected<KernelMeta> extractKernelMeta(llvm::MemoryBufferRef ElfData,
   MetaDoc.DocNode = MetaDoc.MetaDoc->Document.getRoot();
   if (COMGR::metadata::getMetadataRoot(ElfData, &MetaDoc) !=
       AMD_COMGR_STATUS_SUCCESS)
-    return makeHotswapError("extractKernelMeta: no AMDGPU metadata note");
+    return makeHotswapError(
+        "extractKernelMeta: no AMDGPU metadata note for kernel '" + KernelName +
+        "'");
 
   KernelMeta Meta;
   bool MatchedKernel = false;
   bool MalformedClusterDims = false;
-  forEachKernelNode(MetaDoc.MetaDoc->Document,
-                    [&](llvm::msgpack::MapDocNode &KMap) {
-    if (MatchedKernel)
-      return;
-    llvm::msgpack::DocNode *NameNode = findInMap(KMap, ".name");
-    if (!NameNode || NameNode->toString() != KernelName)
-      return;
-    MatchedKernel = true;
-    Meta.Name = NameNode->toString();
+  forEachKernelNode(
+      MetaDoc.MetaDoc->Document, [&](llvm::msgpack::MapDocNode &KMap) {
+        if (MatchedKernel)
+          return;
+        llvm::msgpack::DocNode *NameNode = findInMap(KMap, ".name");
+        if (!NameNode || NameNode->toString() != KernelName)
+          return;
+        MatchedKernel = true;
+        Meta.Name = NameNode->toString();
 
-    if (llvm::msgpack::DocNode *N = findInMap(KMap, ".kernarg_segment_size"))
-      Meta.KernargSegmentSize = nodeAsInt(*N);
-    if (llvm::msgpack::DocNode *N =
-            findInMap(KMap, ".group_segment_fixed_size"))
-      Meta.GroupSegmentFixedSize = nodeAsInt(*N);
-    if (llvm::msgpack::DocNode *N =
-            findInMap(KMap, ".private_segment_fixed_size"))
-      Meta.PrivateSegmentFixedSize = nodeAsInt(*N);
-    if (llvm::msgpack::DocNode *N = findInMap(KMap, ".max_flat_workgroup_size"))
-      Meta.MaxFlatWorkgroupSize = nodeAsInt(*N);
-    if (llvm::msgpack::DocNode *ClusterDims =
-            findInMap(KMap, ".cluster_dims")) {
-      if (!ClusterDims->isArray() || ClusterDims->getArray().size() != 3) {
-        MalformedClusterDims = true;
-      } else {
-        for (llvm::msgpack::DocNode &DimNode : ClusterDims->getArray()) {
-          std::optional<uint32_t> Dim = nodeAsUInt32(DimNode);
-          if (!Dim) {
+        if (llvm::msgpack::DocNode *N =
+                findInMap(KMap, ".kernarg_segment_size"))
+          Meta.KernargSegmentSize = nodeAsInt(*N);
+        if (llvm::msgpack::DocNode *N =
+                findInMap(KMap, ".group_segment_fixed_size"))
+          Meta.GroupSegmentFixedSize = nodeAsInt(*N);
+        if (llvm::msgpack::DocNode *N =
+                findInMap(KMap, ".private_segment_fixed_size"))
+          Meta.PrivateSegmentFixedSize = nodeAsInt(*N);
+        if (llvm::msgpack::DocNode *N =
+                findInMap(KMap, ".max_flat_workgroup_size"))
+          Meta.MaxFlatWorkgroupSize = nodeAsInt(*N);
+        if (llvm::msgpack::DocNode *ClusterDims =
+                findInMap(KMap, ".cluster_dims")) {
+          if (!ClusterDims->isArray() || ClusterDims->getArray().size() != 3) {
             MalformedClusterDims = true;
-            break;
+          } else {
+            for (llvm::msgpack::DocNode &DimNode : ClusterDims->getArray()) {
+              std::optional<uint32_t> Dim = nodeAsUInt32(DimNode);
+              if (!Dim) {
+                MalformedClusterDims = true;
+                break;
+              }
+              Meta.ClusterDims.push_back(*Dim);
+            }
+            if (!MalformedClusterDims)
+              Meta.HasClusterDims = true;
           }
-          Meta.ClusterDims.push_back(*Dim);
         }
-        if (!MalformedClusterDims)
-          Meta.HasClusterDims = true;
-      }
-    }
 
-    if (llvm::msgpack::DocNode *Args = findInMap(KMap, ".args");
-        Args && Args->isArray()) {
-      for (llvm::msgpack::DocNode &ArgNode : Args->getArray()) {
-        if (!ArgNode.isMap())
-          continue;
-        llvm::msgpack::MapDocNode &AMap = ArgNode.getMap();
-        KernelArgMeta Am;
-        if (llvm::msgpack::DocNode *N = findInMap(AMap, ".name"))
-          Am.Name = N->toString();
-        if (llvm::msgpack::DocNode *N = findInMap(AMap, ".offset"))
-          Am.Offset = nodeAsInt(*N);
-        if (llvm::msgpack::DocNode *N = findInMap(AMap, ".size"))
-          Am.Size = nodeAsInt(*N);
-        if (llvm::msgpack::DocNode *N = findInMap(AMap, ".value_kind"))
-          Am.ValueKind = N->toString();
-        if (llvm::msgpack::DocNode *N = findInMap(AMap, ".address_space"))
-          Am.AddressSpace = nodeAsInt(*N);
-        Meta.Args.push_back(Am);
-      }
-    }
-  });
+        if (llvm::msgpack::DocNode *Args = findInMap(KMap, ".args");
+            Args && Args->isArray()) {
+          for (llvm::msgpack::DocNode &ArgNode : Args->getArray()) {
+            if (!ArgNode.isMap())
+              continue;
+            llvm::msgpack::MapDocNode &AMap = ArgNode.getMap();
+            KernelArgMeta Am;
+            if (llvm::msgpack::DocNode *N = findInMap(AMap, ".name"))
+              Am.Name = N->toString();
+            if (llvm::msgpack::DocNode *N = findInMap(AMap, ".offset"))
+              Am.Offset = nodeAsInt(*N);
+            if (llvm::msgpack::DocNode *N = findInMap(AMap, ".size"))
+              Am.Size = nodeAsInt(*N);
+            if (llvm::msgpack::DocNode *N = findInMap(AMap, ".value_kind"))
+              Am.ValueKind = N->toString();
+            if (llvm::msgpack::DocNode *N = findInMap(AMap, ".address_space"))
+              Am.AddressSpace = nodeAsInt(*N);
+            Meta.Args.push_back(Am);
+          }
+        }
+      });
 
   if (!MatchedKernel)
     return makeHotswapError("extractKernelMeta: kernel '" + KernelName +
@@ -354,28 +363,32 @@ findKernelSymbolExtent(llvm::MemoryBufferRef ElfData,
     TextSec = Sec;
     TextBase = Sec.getAddress();
     if (Sec.getSize() > UINT64_MAX - TextBase)
-      return makeHotswapError(
-          "findKernelSymbolExtent: .text address range overflows");
+      return makeHotswapError("findKernelSymbolExtent: kernel '" + KernelName +
+                              "' .text address range overflows");
     TextEnd = TextBase + Sec.getSize();
     break;
   }
   if (TextBase == UINT64_MAX)
-    return makeHotswapError("findKernelSymbolExtent: no .text section in ELF");
+    return makeHotswapError("findKernelSymbolExtent: kernel '" + KernelName +
+                            "' no .text section in ELF");
 
   llvm::Expected<llvm::object::SymbolRef> SymOrErr =
       COMGR::lookupSymbolByName(**ObjOrErr, KernelName);
   if (!SymOrErr)
     return SymOrErr.takeError();
+
   llvm::Expected<llvm::object::section_iterator> SymSecOrErr =
       SymOrErr->getSection();
   if (!SymSecOrErr)
     return SymSecOrErr.takeError();
+
   if (*SymSecOrErr == (*ObjOrErr)->section_end() || **SymSecOrErr != *TextSec)
     return makeHotswapError("findKernelSymbolExtent: symbol '" + KernelName +
                             "' is not in .text");
   llvm::Expected<uint64_t> AddrOrErr = SymOrErr->getAddress();
   if (!AddrOrErr)
     return AddrOrErr.takeError();
+
   if (*AddrOrErr < TextBase || *AddrOrErr >= TextEnd)
     return makeHotswapError("findKernelSymbolExtent: symbol '" + KernelName +
                             "' address is outside .text");
@@ -431,6 +444,85 @@ findKernelSymbolExtent(llvm::MemoryBufferRef ElfData,
   }
   Extent.Size = NextAddr - *AddrOrErr;
   return Extent;
+}
+
+llvm::Expected<llvm::SmallVector<KernelSymbolExtent>>
+listTextFunctionExtents(llvm::MemoryBufferRef ElfData) {
+  llvm::Expected<std::unique_ptr<llvm::object::ObjectFile>> ObjOrErr =
+      llvm::object::ObjectFile::createELFObjectFile(ElfData);
+  if (!ObjOrErr)
+    return ObjOrErr.takeError();
+
+  uint64_t TextBase = UINT64_MAX;
+  uint64_t TextEnd = 0;
+  std::optional<llvm::object::SectionRef> TextSec;
+  for (const llvm::object::SectionRef &Sec : (*ObjOrErr)->sections()) {
+    llvm::Expected<llvm::StringRef> NameOrErr = Sec.getName();
+    if (!NameOrErr)
+      return NameOrErr.takeError();
+    if (*NameOrErr != ".text")
+      continue;
+    TextSec = Sec;
+    TextBase = Sec.getAddress();
+    TextEnd = TextBase + Sec.getSize();
+    break;
+  }
+  if (TextBase == UINT64_MAX)
+    return makeHotswapError("listTextFunctionExtents: .text section not found");
+
+  // Collect every function symbol's address in .text, then convert to
+  // text-relative extents. Zero-sized symbols are bounded by the next symbol
+  // address (or .text end) so an outlined helper without a recorded size still
+  // gets a usable extent.
+  struct FuncSym {
+    uint64_t Addr;
+    uint64_t Size;
+  };
+  llvm::SmallVector<FuncSym> Funcs;
+  for (const llvm::object::SymbolRef &Sym : (*ObjOrErr)->symbols()) {
+    llvm::Expected<llvm::object::SymbolRef::Type> TypeOrErr = Sym.getType();
+    if (!TypeOrErr)
+      return TypeOrErr.takeError();
+    if (*TypeOrErr != llvm::object::SymbolRef::ST_Function)
+      continue;
+    llvm::Expected<llvm::object::section_iterator> SecItOrErr =
+        Sym.getSection();
+    if (!SecItOrErr)
+      return SecItOrErr.takeError();
+    if (*SecItOrErr == (*ObjOrErr)->section_end() || **SecItOrErr != *TextSec)
+      continue;
+    llvm::Expected<uint64_t> AddrOrErr = Sym.getAddress();
+    if (!AddrOrErr)
+      return AddrOrErr.takeError();
+    if (*AddrOrErr < TextBase || *AddrOrErr >= TextEnd)
+      continue;
+    Funcs.push_back({*AddrOrErr, llvm::object::ELFSymbolRef(Sym).getSize()});
+  }
+
+  llvm::sort(Funcs, [](const FuncSym &A, const FuncSym &B) {
+    return A.Addr < B.Addr;
+  });
+
+  llvm::SmallVector<KernelSymbolExtent> Extents;
+  Extents.reserve(Funcs.size());
+  for (const FuncSym &F : Funcs) {
+    uint64_t Size = F.Size;
+    if (Size == 0) {
+      // No recorded size: bound the symbol by the next one with a strictly
+      // greater address (Funcs is sorted ascending), or the end of .text.
+      const FuncSym *Next =
+          llvm::upper_bound(Funcs, F.Addr, [](uint64_t Addr, const FuncSym &S) {
+            return Addr < S.Addr;
+          });
+      uint64_t NextAddr = Next == Funcs.end() ? TextEnd : Next->Addr;
+      Size = NextAddr - F.Addr;
+    }
+    KernelSymbolExtent Extent;
+    Extent.Offset = F.Addr - TextBase;
+    Extent.Size = Size;
+    Extents.push_back(Extent);
+  }
+  return Extents;
 }
 
 } // namespace COMGR::hotswap

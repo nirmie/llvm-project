@@ -8,6 +8,7 @@
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
@@ -17,17 +18,12 @@
 #include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <dlfcn.h>
 #include <chrono>
-#include <optional>
+#include <dlfcn.h>
 #include <string>
 #include <sys/stat.h>
 
 #define DEBUG_TYPE "translation-cache"
-
-#ifndef LLVM_TOOLS_DIR
-#define LLVM_TOOLS_DIR "/usr/bin"
-#endif
 
 namespace COMGR::hotswap {
 namespace {
@@ -47,7 +43,7 @@ double timingElapsed(bool CollectTimings, TimingClock::time_point start) {
   return CollectTimings ? secondsBetween(start, TimingClock::now()) : 0.0;
 }
 
-constexpr int kCacheSchemaVersion = 2;
+constexpr int kCacheSchemaVersion = 4;
 
 struct FileIdentity {
   std::string path;
@@ -56,24 +52,17 @@ struct FileIdentity {
   int64_t mtimeSec = 0;
   int64_t mtimeNsec = 0;
   std::string sha256;
-  std::string error;
 };
 
 struct KeyData {
   std::string key;
   std::string sourceSha256;
   std::string rulesSha256;
-  std::string rulesError;
   std::string buildIdentity;
   std::string deviceLibrariesIdentity;
-  std::string llcIdentity;
-  std::string llvmMcIdentity;
-  std::string lldIdentity;
   std::string elfMachineHex;
   std::string elfFlagsHex;
   std::vector<std::string> kernelNames;
-  std::string error;
-  TranslationCacheKeyBuildTimings Timings;
 };
 
 std::string hexU32(uint32_t value) {
@@ -83,32 +72,32 @@ std::string hexU32(uint32_t value) {
   return os.str();
 }
 
-bool readElfHeaderFields(llvm::MemoryBufferRef buffer, uint16_t &machine,
-                         uint32_t &flags) {
+struct ElfHeaderFields {
+  uint16_t machine = 0;
+  uint32_t flags = 0;
+};
+
+llvm::Expected<ElfHeaderFields>
+readElfHeaderFields(llvm::MemoryBufferRef buffer) {
   auto objOrErr = llvm::object::ObjectFile::createELFObjectFile(buffer);
-  if (!objOrErr) {
-    (void)llvm::toString(objOrErr.takeError());
-    return false;
-  }
+  if (!objOrErr)
+    return objOrErr.takeError();
   const auto *elf =
       llvm::dyn_cast<llvm::object::ELFObjectFileBase>(objOrErr->get());
   if (!elf)
-    return false;
-  machine = elf->getEMachine();
-  flags = elf->getPlatformFlags();
-  return true;
+    return llvm::createStringError(
+        "source code object is not a 64-bit little-endian ELF");
+  return ElfHeaderFields{elf->getEMachine(), elf->getPlatformFlags()};
 }
 
-std::string hashFile(llvm::StringRef path, std::string &error) {
+llvm::Expected<std::string> hashFile(llvm::StringRef path) {
   auto buffer = llvm::MemoryBuffer::getFile(path);
-  if (!buffer) {
-    error = buffer.getError().message();
-    return "";
-  }
+  if (!buffer)
+    return llvm::errorCodeToError(buffer.getError());
   return sha256Hex((*buffer)->getMemBufferRef());
 }
 
-FileIdentity statIdentity(llvm::StringRef path) {
+llvm::Expected<FileIdentity> statIdentity(llvm::StringRef path) {
   FileIdentity id;
   id.path = path.str();
   struct stat st;
@@ -123,7 +112,11 @@ FileIdentity statIdentity(llvm::StringRef path) {
   id.mtimeSec = static_cast<int64_t>(st.st_mtime);
   id.mtimeNsec = 0;
 #endif
-  id.sha256 = hashFile(id.path, id.error);
+  llvm::Expected<std::string> hash = hashFile(id.path);
+  if (!hash)
+    return llvm::createStringError(id.path + ": " +
+                                   llvm::toString(hash.takeError()));
+  id.sha256 = std::move(*hash);
   return id;
 }
 
@@ -131,10 +124,8 @@ std::string identityString(const FileIdentity &id) {
   std::string out;
   llvm::raw_string_ostream os(out);
   os << id.path << "|present=" << (id.present ? "1" : "0")
-     << "|size=" << id.size << "|mtime=" << id.mtimeSec << "."
-     << id.mtimeNsec << "|sha256=" << id.sha256;
-  if (!id.error.empty())
-    os << "|error=" << id.error;
+     << "|size=" << id.size << "|mtime=" << id.mtimeSec << "." << id.mtimeNsec
+     << "|sha256=" << id.sha256;
   return os.str();
 }
 
@@ -146,7 +137,10 @@ std::string loadedImageIdentity() {
     Dl_info info;
     if (::dladdr(reinterpret_cast<void *>(&loadedImageIdentity), &info) &&
         info.dli_fname) {
-      os << "|image=" << identityString(statIdentity(info.dli_fname));
+      if (auto id = statIdentity(info.dli_fname))
+        os << "|image=" << identityString(*id);
+      else
+        os << "|image=<error=" << llvm::toString(id.takeError()) << ">";
     } else {
       os << "|image=<dladdr-unavailable>";
     }
@@ -186,101 +180,60 @@ void appendKeyField(std::string &material, llvm::StringRef name, int value) {
   appendKeyField(material, name, std::to_string(value));
 }
 
-const FileIdentity &llcIdentity() {
-  static const FileIdentity identity =
-      statIdentity(std::string(LLVM_TOOLS_DIR) + "/llc");
-  return identity;
-}
-
-const FileIdentity &llvmMcIdentity() {
-  static const FileIdentity identity =
-      statIdentity(std::string(LLVM_TOOLS_DIR) + "/llvm-mc");
-  return identity;
-}
-
-const FileIdentity &lldIdentity() {
-  static const FileIdentity identity =
-      statIdentity(std::string(LLVM_TOOLS_DIR) + "/ld.lld");
-  return identity;
-}
-
-KeyData buildKeyData(const TranslationCacheRequest &request,
-                     bool CollectTimings) {
+llvm::Expected<KeyData> buildKeyData(const TranslationCacheRequest &request,
+                                     bool CollectTimings,
+                                     TranslationCacheKeyBuildTimings &Timings) {
   KeyData data;
-  if (request.SourceObject.getBufferSize() == 0) {
-    data.error = "empty source code object";
-    return data;
-  }
-  if (request.SourceGfx.empty() || request.TargetGfx.empty()) {
-    data.error = "missing source or target gfx";
-    return data;
-  }
+  if (request.SourceObject.getBufferSize() == 0)
+    return llvm::createStringError("empty source code object");
+  if (request.SourceGfx.empty() || request.TargetGfx.empty())
+    return llvm::createStringError("missing source or target gfx");
 
   auto sourceHashStart = timingStart(CollectTimings);
   data.sourceSha256 = sha256Hex(request.SourceObject);
-  data.Timings.sourceHashSeconds =
-      timingElapsed(CollectTimings, sourceHashStart);
-  uint16_t machine = 0;
-  uint32_t flags = 0;
+  Timings.sourceHashSeconds = timingElapsed(CollectTimings, sourceHashStart);
+
   auto elfHeaderStart = timingStart(CollectTimings);
-  if (readElfHeaderFields(request.SourceObject, machine, flags)) {
-    data.Timings.elfHeaderSeconds =
-        timingElapsed(CollectTimings, elfHeaderStart);
-    data.elfMachineHex = hexU32(machine);
-    data.elfFlagsHex = hexU32(flags);
-  } else {
-    data.Timings.elfHeaderSeconds =
-        timingElapsed(CollectTimings, elfHeaderStart);
-    data.error = "source code object is not a 64-bit little-endian ELF";
-    return data;
-  }
+  llvm::Expected<ElfHeaderFields> elfHeader =
+      readElfHeaderFields(request.SourceObject);
+  Timings.elfHeaderSeconds = timingElapsed(CollectTimings, elfHeaderStart);
+  if (!elfHeader)
+    return elfHeader.takeError();
+  data.elfMachineHex = hexU32(elfHeader->machine);
+  data.elfFlagsHex = hexU32(elfHeader->flags);
 
   if (!request.HotswapRulesPath.empty()) {
     auto rulesHashStart = timingStart(CollectTimings);
-    data.rulesSha256 = hashFile(request.HotswapRulesPath, data.rulesError);
-    data.Timings.rulesHashSeconds =
-        timingElapsed(CollectTimings, rulesHashStart);
-    if (!data.rulesError.empty()) {
-      data.error = "failed to hash HSA_HOTSWAP_RULES '" +
-                   request.HotswapRulesPath + "': " + data.rulesError;
-      return data;
-    }
+    llvm::Expected<std::string> rulesHash = hashFile(request.HotswapRulesPath);
+    Timings.rulesHashSeconds = timingElapsed(CollectTimings, rulesHashStart);
+    if (!rulesHash)
+      return llvm::createStringError(
+          "failed to hash HSA_HOTSWAP_RULES '" + request.HotswapRulesPath +
+          "': " + llvm::toString(rulesHash.takeError()));
+    data.rulesSha256 = std::move(*rulesHash);
   }
 
-  const std::string toolsDir = LLVM_TOOLS_DIR;
-  auto llvmToolIdentityStart = timingStart(CollectTimings);
-  const FileIdentity &llc = llcIdentity();
-  const FileIdentity &llvmMc = llvmMcIdentity();
-  const FileIdentity &lld = lldIdentity();
-  data.Timings.llvmToolIdentitySeconds =
-      timingElapsed(CollectTimings, llvmToolIdentityStart);
-  if (!llc.present || !llvmMc.present || !lld.present || !llc.error.empty() ||
-      !llvmMc.error.empty() || !lld.error.empty()) {
-    data.error = "LLVM tool identity is incomplete under " + toolsDir;
-    return data;
-  }
-  data.llcIdentity = identityString(llc);
-  data.llvmMcIdentity = identityString(llvmMc);
-  data.lldIdentity = identityString(lld);
   auto loadedImageIdentityStart = timingStart(CollectTimings);
   data.buildIdentity = loadedImageIdentity();
-  data.Timings.loadedImageIdentitySeconds =
+  Timings.loadedImageIdentitySeconds =
       timingElapsed(CollectTimings, loadedImageIdentityStart);
   data.deviceLibrariesIdentity = deviceLibrariesIdentity();
-  auto kernelNamesStart = timingStart(CollectTimings);
-  llvm::Expected<llvm::SmallVector<std::string>> NamesOrErr =
-      listKernelNames(request.SourceObject);
-  data.Timings.kernelNamesSeconds =
-      timingElapsed(CollectTimings, kernelNamesStart);
-  if (!NamesOrErr) {
-    data.error = "failed to list kernels for translation cache key: " +
-                 llvm::toString(NamesOrErr.takeError());
-    return data;
-  }
-  data.kernelNames.assign(NamesOrErr->begin(), NamesOrErr->end());
-  if (data.kernelNames.empty()) {
-    data.error = "source code object has no kernel metadata entries";
-    return data;
+  if (!request.KernelName.empty()) {
+    data.kernelNames.push_back(request.KernelName);
+  } else {
+    auto kernelNamesStart = timingStart(CollectTimings);
+    llvm::Expected<llvm::SmallVector<std::string>> NamesOrErr =
+        listKernelNames(request.SourceObject);
+    Timings.kernelNamesSeconds =
+        timingElapsed(CollectTimings, kernelNamesStart);
+    if (!NamesOrErr)
+      return llvm::createStringError(
+          "failed to list kernels for translation cache key: " +
+          llvm::toString(NamesOrErr.takeError()));
+    data.kernelNames.assign(NamesOrErr->begin(), NamesOrErr->end());
+    if (data.kernelNames.empty())
+      return llvm::createStringError(
+          "source code object has no kernel metadata entries");
   }
 
   auto materialBuildStart = timingStart(CollectTimings);
@@ -295,6 +248,7 @@ KeyData buildKeyData(const TranslationCacheRequest &request,
   appendKeyField(material, "elf_machine", data.elfMachineHex);
   appendKeyField(material, "elf_flags", data.elfFlagsHex);
   appendKeyField(material, "orig_mach", request.OrigMach);
+  appendKeyField(material, "opt_level", static_cast<int>(request.OptLevel));
   appendKeyField(material, "rules_path", request.HotswapRulesPath);
   appendKeyField(material, "rules_sha256", data.rulesSha256);
   appendKeyField(material, "strict", request.StrictMode);
@@ -303,18 +257,16 @@ KeyData buildKeyData(const TranslationCacheRequest &request,
   appendKeyField(material, "enable_wave_native", request.EnableWaveNative);
   appendKeyField(material, "assume_hip_global_offset_zero",
                  request.AssumeHipGlobalOffsetZero);
+  if (!request.KernelName.empty())
+    appendKeyField(material, "kernel_name", request.KernelName);
   appendKeyField(material, "hotswap_build_identity", data.buildIdentity);
   appendKeyField(material, "device_libraries_identity",
                  data.deviceLibrariesIdentity);
-  appendKeyField(material, "llc_identity", data.llcIdentity);
-  appendKeyField(material, "llvm_mc_identity", data.llvmMcIdentity);
-  appendKeyField(material, "lld_identity", data.lldIdentity);
-  data.Timings.materialBuildSeconds =
+  Timings.materialBuildSeconds =
       timingElapsed(CollectTimings, materialBuildStart);
   auto keyHashStart = timingStart(CollectTimings);
   data.key = sha256Hex(llvm::MemoryBufferRef(material, ""));
-  data.Timings.keyHashSeconds =
-      timingElapsed(CollectTimings, keyHashStart);
+  Timings.keyHashSeconds = timingElapsed(CollectTimings, keyHashStart);
   return data;
 }
 
@@ -347,9 +299,7 @@ std::string cacheMetadataPath(const TranslationCacheRequest &request,
   return std::string(path);
 }
 
-bool exists(llvm::StringRef path) {
-  return llvm::sys::fs::exists(path);
-}
+bool exists(llvm::StringRef path) { return llvm::sys::fs::exists(path); }
 
 std::string jsonToString(llvm::json::Value value) {
   std::string out;
@@ -359,107 +309,93 @@ std::string jsonToString(llvm::json::Value value) {
   return os.str();
 }
 
-bool writeFileAtomic(llvm::StringRef path, llvm::StringRef contents,
-                     std::string &error) {
-  llvm::SmallString<256> model(path);
-  model += ".tmp-%%%%%%";
-  llvm::SmallString<256> tmpPath;
-  int fd = -1;
-  if (auto ec = llvm::sys::fs::createUniqueFile(model, fd, tmpPath)) {
-    error = ec.message();
-    return false;
-  }
-  {
-    llvm::raw_fd_ostream os(fd, true);
+llvm::Error writeFileAtomic(llvm::StringRef path, llvm::StringRef contents) {
+  return llvm::writeToOutput(path, [&](llvm::raw_ostream &os) {
     os << contents;
-    if (os.has_error()) {
-      error = os.error().message();
-      os.clear_error();
-      llvm::sys::fs::remove(tmpPath);
-      return false;
-    }
-  }
-  if (auto ec = llvm::sys::fs::rename(tmpPath, path)) {
-    error = ec.message();
-    llvm::sys::fs::remove(tmpPath);
-    return false;
-  }
-  return true;
+    return llvm::Error::success();
+  });
 }
 
-bool writeFileAtomic(llvm::StringRef path, llvm::ArrayRef<uint8_t> data,
-                     std::string &error) {
+llvm::Error writeFileAtomic(llvm::StringRef path,
+                            llvm::ArrayRef<uint8_t> data) {
   return writeFileAtomic(
       path, llvm::StringRef(reinterpret_cast<const char *>(data.data()),
-                            data.size()),
-      error);
+                            data.size()));
 }
 
-std::optional<std::string> requireString(const llvm::json::Object &obj,
-                                         llvm::StringRef field,
-                                         std::string &Reason) {
+llvm::Expected<std::string> requireString(const llvm::json::Object &obj,
+                                          llvm::StringRef field) {
   auto value = obj.getString(field);
-  if (!value) {
-    Reason = "metadata field '" + field.str() + "' missing or not a string";
-    return std::nullopt;
-  }
+  if (!value)
+    return llvm::createStringError("metadata field '" + field +
+                                   "' missing or not a string");
   return value->str();
 }
 
-std::optional<int64_t> requireInt(const llvm::json::Object &obj,
-                                  llvm::StringRef field, std::string &Reason) {
+llvm::Expected<int64_t> requireInt(const llvm::json::Object &obj,
+                                   llvm::StringRef field) {
   auto value = obj.getInteger(field);
-  if (!value) {
-    Reason = "metadata field '" + field.str() + "' missing or not an integer";
-    return std::nullopt;
-  }
+  if (!value)
+    return llvm::createStringError("metadata field '" + field +
+                                   "' missing or not an integer");
   return *value;
 }
 
-std::optional<bool> requireBool(const llvm::json::Object &obj,
-                                llvm::StringRef field, std::string &Reason) {
+llvm::Expected<bool> requireBool(const llvm::json::Object &obj,
+                                 llvm::StringRef field) {
   auto value = obj.getBoolean(field);
-  if (!value) {
-    Reason = "metadata field '" + field.str() + "' missing or not a boolean";
-    return std::nullopt;
-  }
+  if (!value)
+    return llvm::createStringError("metadata field '" + field +
+                                   "' missing or not a boolean");
   return *value;
 }
 
-bool requireEqualString(const llvm::json::Object &obj, llvm::StringRef field,
-                        llvm::StringRef expected, std::string &Reason) {
-  auto value = requireString(obj, field, Reason);
+llvm::Error requireEqualString(const llvm::json::Object &obj,
+                               llvm::StringRef field,
+                               llvm::StringRef expected) {
+  auto value = requireString(obj, field);
   if (!value)
-    return false;
-  if (*value != expected) {
-    Reason = "metadata field '" + field.str() + "' mismatch";
-    return false;
-  }
-  return true;
+    return value.takeError();
+  if (*value != expected)
+    return llvm::createStringError("metadata field '" + field + "' mismatch");
+  return llvm::Error::success();
 }
 
-bool requireEqualInt(const llvm::json::Object &obj, llvm::StringRef field,
-                     int64_t expected, std::string &Reason) {
-  auto value = requireInt(obj, field, Reason);
-  if (!value)
-    return false;
-  if (*value != expected) {
-    Reason = "metadata field '" + field.str() + "' mismatch";
-    return false;
+llvm::Error validateKernelNameField(const llvm::json::Object &obj,
+                                    llvm::StringRef expected) {
+  const llvm::json::Value *rawValue = obj.get("kernel_name");
+  if (!rawValue) {
+    if (expected.empty())
+      return llvm::Error::success();
+    return llvm::createStringError("metadata field 'kernel_name' missing");
   }
-  return true;
+  auto value = rawValue->getAsString();
+  if (!value)
+    return llvm::createStringError(
+        "metadata field 'kernel_name' is not a string");
+  if (*value != expected)
+    return llvm::createStringError("metadata field 'kernel_name' mismatch");
+  return llvm::Error::success();
 }
 
-bool requireEqualBool(const llvm::json::Object &obj, llvm::StringRef field,
-                      bool expected, std::string &Reason) {
-  auto value = requireBool(obj, field, Reason);
+llvm::Error requireEqualInt(const llvm::json::Object &obj,
+                            llvm::StringRef field, int64_t expected) {
+  auto value = requireInt(obj, field);
   if (!value)
-    return false;
-  if (*value != expected) {
-    Reason = "metadata field '" + field.str() + "' mismatch";
-    return false;
-  }
-  return true;
+    return value.takeError();
+  if (*value != expected)
+    return llvm::createStringError("metadata field '" + field + "' mismatch");
+  return llvm::Error::success();
+}
+
+llvm::Error requireEqualBool(const llvm::json::Object &obj,
+                             llvm::StringRef field, bool expected) {
+  auto value = requireBool(obj, field);
+  if (!value)
+    return value.takeError();
+  if (*value != expected)
+    return llvm::createStringError("metadata field '" + field + "' mismatch");
+  return llvm::Error::success();
 }
 
 llvm::json::Array kernelArray(const std::vector<std::string> &kernelNames) {
@@ -469,33 +405,27 @@ llvm::json::Array kernelArray(const std::vector<std::string> &kernelNames) {
   return arr;
 }
 
-bool validateKernelArray(const llvm::json::Object &obj,
-                         const std::vector<std::string> &expected,
-                         std::string &Reason) {
+llvm::Error validateKernelArray(const llvm::json::Object &obj,
+                                const std::vector<std::string> &expected) {
   const llvm::json::Array *arr = obj.getArray("kernel_names");
-  if (!arr) {
-    Reason = "metadata field 'kernel_names' missing or not an array";
-    return false;
-  }
-  if (arr->size() != expected.size()) {
-    Reason = "metadata kernel_names size mismatch";
-    return false;
-  }
+  if (!arr)
+    return llvm::createStringError(
+        "metadata field 'kernel_names' missing or not an array");
+  if (arr->size() != expected.size())
+    return llvm::createStringError("metadata kernel_names size mismatch");
   for (size_t i = 0; i < expected.size(); ++i) {
     auto value = (*arr)[i].getAsString();
-    if (!value || *value != expected[i]) {
-      Reason = "metadata kernel_names mismatch";
-      return false;
-    }
+    if (!value || *value != expected[i])
+      return llvm::createStringError("metadata kernel_names mismatch");
   }
-  return true;
+  return llvm::Error::success();
 }
 
 llvm::json::Object metadataObject(const TranslationCacheRequest &request,
                                   const KeyData &keyData,
                                   const PipelineResult &Result,
                                   llvm::StringRef objectSha256) {
-  return llvm::json::Object{
+  llvm::json::Object Obj{
       {"schema_version", kCacheSchemaVersion},
       {"key", keyData.key},
       {"source_object_sha256", keyData.sourceSha256},
@@ -507,6 +437,7 @@ llvm::json::Object metadataObject(const TranslationCacheRequest &request,
       {"elf_machine", keyData.elfMachineHex},
       {"elf_flags", keyData.elfFlagsHex},
       {"orig_mach", request.OrigMach},
+      {"opt_level", static_cast<int64_t>(request.OptLevel)},
       {"hotswap_rules_path", request.HotswapRulesPath},
       {"hotswap_rules_sha256", keyData.rulesSha256},
       {"strict_mode", request.StrictMode},
@@ -515,9 +446,6 @@ llvm::json::Object metadataObject(const TranslationCacheRequest &request,
       {"assume_hip_global_offset_zero", request.AssumeHipGlobalOffsetZero},
       {"hotswap_build_identity", keyData.buildIdentity},
       {"device_libraries_identity", keyData.deviceLibrariesIdentity},
-      {"llc_identity", keyData.llcIdentity},
-      {"llvm_mc_identity", keyData.llvmMcIdentity},
-      {"lld_identity", keyData.lldIdentity},
       {"kernel_count", static_cast<int64_t>(keyData.kernelNames.size())},
       {"kernel_names", kernelArray(keyData.kernelNames)},
       {"cached_object_sha256", objectSha256.str()},
@@ -534,66 +462,111 @@ llvm::json::Object metadataObject(const TranslationCacheRequest &request,
        static_cast<int64_t>(Result.TargetPrivateSegmentFixedSize)},
       {"target_enable_private_segment", Result.TargetEnablePrivateSegment},
   };
+  if (!request.KernelName.empty())
+    Obj["kernel_name"] = request.KernelName;
+  return Obj;
 }
 
-bool validateMetadata(const TranslationCacheRequest &request,
-                      const KeyData &keyData, const llvm::json::Object &obj,
-                      llvm::StringRef objectSha256, size_t objectSize,
-                      PipelineResult &Result, std::string &Reason) {
-  if (!requireEqualInt(obj, "schema_version", kCacheSchemaVersion, Reason) ||
-      !requireEqualString(obj, "key", keyData.key, Reason) ||
-      !requireEqualString(obj, "source_object_sha256", keyData.sourceSha256,
-                          Reason) ||
-      !requireEqualString(obj, "source_gfx", request.SourceGfx, Reason) ||
-      !requireEqualString(obj, "target_gfx", request.TargetGfx, Reason) ||
-      !requireEqualString(obj, "source_isa", request.SourceIsa, Reason) ||
-      !requireEqualString(obj, "target_isa", request.TargetIsa, Reason) ||
-      !requireEqualString(obj, "code_isa", request.CodeIsa, Reason) ||
-      !requireEqualString(obj, "elf_machine", keyData.elfMachineHex, Reason) ||
-      !requireEqualString(obj, "elf_flags", keyData.elfFlagsHex, Reason) ||
-      !requireEqualInt(obj, "orig_mach", request.OrigMach, Reason) ||
-      !requireEqualString(obj, "hotswap_rules_path", request.HotswapRulesPath,
-                          Reason) ||
-      !requireEqualString(obj, "hotswap_rules_sha256", keyData.rulesSha256,
-                          Reason) ||
-      !requireEqualBool(obj, "strict_mode", request.StrictMode, Reason) ||
-      !requireEqualBool(obj, "enable_writelane_rewrite",
-                        request.EnableWritelaneRewrite, Reason) ||
-      !requireEqualBool(obj, "enable_wave_native", request.EnableWaveNative,
-                        Reason) ||
-      !requireEqualBool(obj, "assume_hip_global_offset_zero",
-                        request.AssumeHipGlobalOffsetZero, Reason) ||
-      !requireEqualString(obj, "hotswap_build_identity",
-                          keyData.buildIdentity, Reason) ||
-      !requireEqualString(obj, "device_libraries_identity",
-                          keyData.deviceLibrariesIdentity, Reason) ||
-      !requireEqualString(obj, "llc_identity", keyData.llcIdentity, Reason) ||
-      !requireEqualString(obj, "llvm_mc_identity", keyData.llvmMcIdentity,
-                          Reason) ||
-      !requireEqualString(obj, "lld_identity", keyData.lldIdentity, Reason) ||
-      !requireEqualInt(obj, "kernel_count",
-                       static_cast<int64_t>(keyData.kernelNames.size()),
-                       Reason) ||
-      !validateKernelArray(obj, keyData.kernelNames, Reason) ||
-      !requireEqualString(obj, "cached_object_sha256", objectSha256, Reason) ||
-      !requireEqualInt(obj, "cached_object_size",
-                       static_cast<int64_t>(objectSize), Reason))
-    return false;
+llvm::Error validateMetadata(const TranslationCacheRequest &request,
+                             const KeyData &keyData,
+                             const llvm::json::Object &obj,
+                             llvm::StringRef objectSha256, size_t objectSize,
+                             PipelineResult &Result) {
+  if (llvm::Error e =
+          requireEqualInt(obj, "schema_version", kCacheSchemaVersion))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "key", keyData.key))
+    return e;
+  if (llvm::Error e =
+          requireEqualString(obj, "source_object_sha256", keyData.sourceSha256))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "source_gfx", request.SourceGfx))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "target_gfx", request.TargetGfx))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "source_isa", request.SourceIsa))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "target_isa", request.TargetIsa))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "code_isa", request.CodeIsa))
+    return e;
+  if (llvm::Error e =
+          requireEqualString(obj, "elf_machine", keyData.elfMachineHex))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "elf_flags", keyData.elfFlagsHex))
+    return e;
+  if (llvm::Error e = requireEqualInt(obj, "orig_mach", request.OrigMach))
+    return e;
+  if (llvm::Error e = requireEqualInt(obj, "opt_level",
+                                      static_cast<int64_t>(request.OptLevel)))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "hotswap_rules_path",
+                                         request.HotswapRulesPath))
+    return e;
+  if (llvm::Error e =
+          requireEqualString(obj, "hotswap_rules_sha256", keyData.rulesSha256))
+    return e;
+  if (llvm::Error e = requireEqualBool(obj, "strict_mode", request.StrictMode))
+    return e;
+  if (llvm::Error e = requireEqualBool(obj, "enable_writelane_rewrite",
+                                       request.EnableWritelaneRewrite))
+    return e;
+  if (llvm::Error e =
+          requireEqualBool(obj, "enable_wave_native", request.EnableWaveNative))
+    return e;
+  if (llvm::Error e = requireEqualBool(obj, "assume_hip_global_offset_zero",
+                                       request.AssumeHipGlobalOffsetZero))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "hotswap_build_identity",
+                                         keyData.buildIdentity))
+    return e;
+  if (llvm::Error e = requireEqualString(obj, "device_libraries_identity",
+                                         keyData.deviceLibrariesIdentity))
+    return e;
+  if (llvm::Error e = validateKernelNameField(obj, request.KernelName))
+    return e;
+  if (llvm::Error e =
+          requireEqualInt(obj, "kernel_count",
+                          static_cast<int64_t>(keyData.kernelNames.size())))
+    return e;
+  if (llvm::Error e = validateKernelArray(obj, keyData.kernelNames))
+    return e;
+  if (llvm::Error e =
+          requireEqualString(obj, "cached_object_sha256", objectSha256))
+    return e;
+  if (llvm::Error e = requireEqualInt(obj, "cached_object_size",
+                                      static_cast<int64_t>(objectSize)))
+    return e;
 
-  auto lifted = requireInt(obj, "lifted_count", Reason);
-  auto total = requireInt(obj, "total_count", Reason);
-  auto c5Count = requireInt(obj, "c5_suppressed_count", Reason);
-  auto c5Reason = requireString(obj, "c5_suppression_reason", Reason);
-  auto usesScratch = requireBool(obj, "uses_scratch_private_segment", Reason);
-  auto sourceScratch =
-      requireInt(obj, "source_private_segment_fixed_size", Reason);
-  auto targetScratch =
-      requireInt(obj, "target_private_segment_fixed_size", Reason);
-  auto targetEnable =
-      requireBool(obj, "target_enable_private_segment", Reason);
-  if (!lifted || !total || !c5Count || !c5Reason || !usesScratch ||
-      !sourceScratch || !targetScratch || !targetEnable)
-    return false;
+  llvm::Expected<int64_t> lifted = requireInt(obj, "lifted_count");
+  if (!lifted)
+    return lifted.takeError();
+  llvm::Expected<int64_t> total = requireInt(obj, "total_count");
+  if (!total)
+    return total.takeError();
+  llvm::Expected<int64_t> c5Count = requireInt(obj, "c5_suppressed_count");
+  if (!c5Count)
+    return c5Count.takeError();
+  llvm::Expected<std::string> c5Reason =
+      requireString(obj, "c5_suppression_reason");
+  if (!c5Reason)
+    return c5Reason.takeError();
+  llvm::Expected<bool> usesScratch =
+      requireBool(obj, "uses_scratch_private_segment");
+  if (!usesScratch)
+    return usesScratch.takeError();
+  llvm::Expected<int64_t> sourceScratch =
+      requireInt(obj, "source_private_segment_fixed_size");
+  if (!sourceScratch)
+    return sourceScratch.takeError();
+  llvm::Expected<int64_t> targetScratch =
+      requireInt(obj, "target_private_segment_fixed_size");
+  if (!targetScratch)
+    return targetScratch.takeError();
+  llvm::Expected<bool> targetEnable =
+      requireBool(obj, "target_enable_private_segment");
+  if (!targetEnable)
+    return targetEnable.takeError();
 
   Result.Success = true;
   Result.LiftedCount = static_cast<int>(*lifted);
@@ -601,12 +574,10 @@ bool validateMetadata(const TranslationCacheRequest &request,
   Result.C5SuppressedCount = static_cast<int>(*c5Count);
   Result.C5SuppressionReason = *c5Reason;
   Result.UsesScratchPrivateSegment = *usesScratch;
-  Result.SourcePrivateSegmentFixedSize =
-      static_cast<uint32_t>(*sourceScratch);
-  Result.TargetPrivateSegmentFixedSize =
-      static_cast<uint32_t>(*targetScratch);
+  Result.SourcePrivateSegmentFixedSize = static_cast<uint32_t>(*sourceScratch);
+  Result.TargetPrivateSegmentFixedSize = static_cast<uint32_t>(*targetScratch);
   Result.TargetEnablePrivateSegment = *targetEnable;
-  return true;
+  return llvm::Error::success();
 }
 
 } // namespace
@@ -632,7 +603,8 @@ const char *translationCacheStatusString(TranslationCacheStatus Status) {
 }
 
 std::string sha256Hex(llvm::MemoryBufferRef buffer) {
-  llvm::ArrayRef data(buffer.getBuffer().bytes_begin(), buffer.getBuffer().bytes_end());
+  llvm::ArrayRef data(buffer.getBuffer().bytes_begin(),
+                      buffer.getBuffer().bytes_end());
   auto digest = llvm::SHA256::hash(data);
   std::string out;
   llvm::raw_string_ostream os(out);
@@ -641,8 +613,8 @@ std::string sha256Hex(llvm::MemoryBufferRef buffer) {
   return os.str();
 }
 
-TranslationCacheLookup lookupTranslationCache(
-    const TranslationCacheRequest &request) {
+TranslationCacheLookup
+lookupTranslationCache(const TranslationCacheRequest &request) {
   auto totalStart = timingStart(request.CollectTimings);
   TranslationCacheLookup lookup;
   auto finish = [&]() {
@@ -654,16 +626,17 @@ TranslationCacheLookup lookupTranslationCache(
     return finish();
 
   auto keyBuildStart = timingStart(request.CollectTimings);
-  KeyData keyData = buildKeyData(request, request.CollectTimings);
+  auto keyDataOrErr =
+      buildKeyData(request, request.CollectTimings, lookup.Timings.keyBuild);
   lookup.Timings.keyBuildSeconds =
       timingElapsed(request.CollectTimings, keyBuildStart);
-  lookup.Timings.keyBuild = keyData.Timings;
-  lookup.key = keyData.key;
-  if (!keyData.error.empty()) {
+  if (!keyDataOrErr) {
     lookup.Status = TranslationCacheStatus::Invalid;
-    lookup.Reason = keyData.error;
+    lookup.Reason = llvm::toString(keyDataOrErr.takeError());
     return finish();
   }
+  KeyData keyData = std::move(*keyDataOrErr);
+  lookup.key = keyData.key;
   lookup.MetadataPath = cacheMetadataPath(request, keyData.key);
   lookup.ObjectPath = cacheObjectPath(request, keyData.key);
 
@@ -690,8 +663,8 @@ TranslationCacheLookup lookupTranslationCache(
       timingElapsed(request.CollectTimings, objectReadStart);
   if (!objectBuffer) {
     lookup.Status = TranslationCacheStatus::Invalid;
-    lookup.Reason = "failed to read cached object: " +
-                    objectBuffer.getError().message();
+    lookup.Reason =
+        "failed to read cached object: " + objectBuffer.getError().message();
     return finish();
   }
   auto objectHashStart = timingStart(request.CollectTimings);
@@ -706,8 +679,8 @@ TranslationCacheLookup lookupTranslationCache(
       timingElapsed(request.CollectTimings, metadataReadStart);
   if (!metadataBuffer) {
     lookup.Status = TranslationCacheStatus::Invalid;
-    lookup.Reason = "failed to read cache metadata: " +
-                    metadataBuffer.getError().message();
+    lookup.Reason =
+        "failed to read cache metadata: " + metadataBuffer.getError().message();
     return finish();
   }
   auto metadataParseStart = timingStart(request.CollectTimings);
@@ -716,8 +689,8 @@ TranslationCacheLookup lookupTranslationCache(
       timingElapsed(request.CollectTimings, metadataParseStart);
   if (!parsed) {
     lookup.Status = TranslationCacheStatus::Invalid;
-    lookup.Reason = "failed to parse cache metadata: " +
-                    llvm::toString(parsed.takeError());
+    lookup.Reason =
+        "failed to parse cache metadata: " + llvm::toString(parsed.takeError());
     return finish();
   }
   const llvm::json::Object *obj = parsed->getAsObject();
@@ -727,16 +700,16 @@ TranslationCacheLookup lookupTranslationCache(
     return finish();
   }
   auto metadataValidateStart = timingStart(request.CollectTimings);
-  if (!validateMetadata(request, keyData, *obj, objectSha,
-                        objectBufRef.getBufferSize(), lookup.Result,
-                        lookup.Reason)) {
-    lookup.Timings.metadataValidateSeconds =
-        timingElapsed(request.CollectTimings, metadataValidateStart);
-    lookup.Status = TranslationCacheStatus::Invalid;
-    return finish();
-  }
+  llvm::Error validateErr =
+      validateMetadata(request, keyData, *obj, objectSha,
+                       objectBufRef.getBufferSize(), lookup.Result);
   lookup.Timings.metadataValidateSeconds =
       timingElapsed(request.CollectTimings, metadataValidateStart);
+  if (validateErr) {
+    lookup.Status = TranslationCacheStatus::Invalid;
+    lookup.Reason = llvm::toString(std::move(validateErr));
+    return finish();
+  }
 
   lookup.Result.Hsaco = std::move(*objectBuffer);
   lookup.Status = TranslationCacheStatus::Hit;
@@ -744,8 +717,9 @@ TranslationCacheLookup lookupTranslationCache(
   return finish();
 }
 
-TranslationCacheWrite writeTranslationCache(
-    const TranslationCacheRequest &request, const PipelineResult &Result) {
+TranslationCacheWrite
+writeTranslationCache(const TranslationCacheRequest &request,
+                      const PipelineResult &Result) {
   auto totalStart = timingStart(request.CollectTimings);
   TranslationCacheWrite write;
   auto finish = [&]() {
@@ -757,21 +731,21 @@ TranslationCacheWrite writeTranslationCache(
     return finish();
 
   auto keyBuildStart = timingStart(request.CollectTimings);
-  KeyData keyData = buildKeyData(request, request.CollectTimings);
+  auto keyDataOrErr =
+      buildKeyData(request, request.CollectTimings, write.Timings.keyBuild);
   write.Timings.keyBuildSeconds =
       timingElapsed(request.CollectTimings, keyBuildStart);
-  write.Timings.keyBuild = keyData.Timings;
-  write.key = keyData.key;
-  if (!keyData.error.empty()) {
+  if (!keyDataOrErr) {
     write.Status = TranslationCacheStatus::WriteFailed;
-    write.Reason = keyData.error;
+    write.Reason = llvm::toString(keyDataOrErr.takeError());
     return finish();
   }
+  KeyData keyData = std::move(*keyDataOrErr);
+  write.key = keyData.key;
   write.MetadataPath = cacheMetadataPath(request, keyData.key);
   write.ObjectPath = cacheObjectPath(request, keyData.key);
 
-  if (!Result.Success || !Result.Hsaco ||
-      Result.Hsaco->getBufferSize() == 0) {
+  if (!Result.Success || !Result.Hsaco || Result.Hsaco->getBufferSize() == 0) {
     write.Status = TranslationCacheStatus::WriteFailed;
     write.Reason = "refusing to cache unsuccessful or empty translation";
     return finish();
@@ -783,8 +757,8 @@ TranslationCacheWrite writeTranslationCache(
     write.Timings.createDirectorySeconds =
         timingElapsed(request.CollectTimings, createDirectoryStart);
     write.Status = TranslationCacheStatus::WriteFailed;
-    write.Reason = "failed to create cache directory '" + dir + "': " +
-                   ec.message();
+    write.Reason =
+        "failed to create cache directory '" + dir + "': " + ec.message();
     return finish();
   }
   write.Timings.createDirectorySeconds =
@@ -794,32 +768,32 @@ TranslationCacheWrite writeTranslationCache(
   std::string objectSha = sha256Hex(Result.Hsaco->getMemBufferRef());
   write.Timings.objectHashSeconds =
       timingElapsed(request.CollectTimings, objectHashStart);
-  std::string error;
   auto objectWriteStart = timingStart(request.CollectTimings);
-  if (!writeFileAtomic(write.ObjectPath, Result.Hsaco->getBuffer(), error)) {
+  if (auto err = writeFileAtomic(write.ObjectPath, Result.Hsaco->getBuffer())) {
     write.Timings.objectWriteSeconds =
         timingElapsed(request.CollectTimings, objectWriteStart);
     write.Status = TranslationCacheStatus::WriteFailed;
-    write.Reason = "failed to write cached object: " + error;
+    write.Reason =
+        "failed to write cached object: " + llvm::toString(std::move(err));
     return finish();
   }
   write.Timings.objectWriteSeconds =
       timingElapsed(request.CollectTimings, objectWriteStart);
 
   auto metadataBuildStart = timingStart(request.CollectTimings);
-  llvm::json::Object meta =
-      metadataObject(request, keyData, Result, objectSha);
+  llvm::json::Object meta = metadataObject(request, keyData, Result, objectSha);
   write.Timings.metadataBuildSeconds =
       timingElapsed(request.CollectTimings, metadataBuildStart);
   auto metadataWriteStart = timingStart(request.CollectTimings);
-  if (!writeFileAtomic(write.MetadataPath,
-                       jsonToString(llvm::json::Value(std::move(meta))),
-                       error)) {
+  if (auto err =
+          writeFileAtomic(write.MetadataPath,
+                          jsonToString(llvm::json::Value(std::move(meta))))) {
     write.Timings.metadataWriteSeconds =
         timingElapsed(request.CollectTimings, metadataWriteStart);
     llvm::sys::fs::remove(write.ObjectPath);
     write.Status = TranslationCacheStatus::WriteFailed;
-    write.Reason = "failed to write cache metadata: " + error;
+    write.Reason =
+        "failed to write cache metadata: " + llvm::toString(std::move(err));
     return finish();
   }
   write.Timings.metadataWriteSeconds =
@@ -830,8 +804,9 @@ TranslationCacheWrite writeTranslationCache(
   return finish();
 }
 
-std::string skippedKernelForTranslationCache(
-    llvm::ArrayRef<std::string> kernelNames, llvm::StringRef skipList) {
+std::string
+skippedKernelForTranslationCache(llvm::ArrayRef<std::string> kernelNames,
+                                 llvm::StringRef skipList) {
   if (skipList.empty())
     return "";
 

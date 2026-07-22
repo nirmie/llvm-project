@@ -17,9 +17,8 @@ struct PipelineTimings {
   double createTempDirSeconds = 0.0;
   double raiseSeconds = 0.0;
   double writeIrSeconds = 0.0;
+  double optSeconds = 0.0;
   double llcSeconds = 0.0;
-  double readAsmSeconds = 0.0;
-  double llvmMcSeconds = 0.0;
   double linkSeconds = 0.0;
   double readHsacoSeconds = 0.0;
   double collectMetadataSeconds = 0.0;
@@ -29,6 +28,8 @@ struct PipelineOptions {
   bool EnableWritelaneRewrite = true;
   bool EnableWaveNative = true;
   bool CollectTimings = false;
+  // Optimization level (0-3) for the in-process opt + llc codegen stages.
+  unsigned OptLevel = 0;
   // HIP launches handled by COMGR's HotSwap runtime have zero HSA grid-global
   // offset, so hidden_global_offset_{x,y,z} can be synthesized as zero.
   // Standalone callers keep this false and reject those source hidden args.
@@ -37,8 +38,6 @@ struct PipelineOptions {
 
 struct PipelineResult {
   std::unique_ptr<llvm::MemoryBuffer> Hsaco;
-  std::string IrText;
-  std::string AsmText;
   PipelineTimings Timings;
   std::string FailMnemonic;
   std::string FailKernel;
@@ -62,13 +61,13 @@ struct PipelineResult {
 };
 
 /// End-to-end pipeline: HSACO binary -> raise to LLVM IR -> llc -> HSACO.
-/// Raises using `sourceISA` and lowers to `targetISA`.  Single-ISA
+/// Raises using `SourceISA` and lowers to `TargetISA`.  Single-ISA
 /// callers pass the same string for both -- see the single-ISA note
 /// below for why there is no separate 3-string overload.
 ///
 ///
 /// Single-ISA convention: pass the same ISA string for both
-/// `sourceISA` and `targetISA` (e.g. `runPipeline(data, "gfx942",
+/// `SourceISA` and `TargetISA` (e.g. `runPipeline(data, "gfx942",
 /// "gfx942", "kernel", ...)`).  Earlier revisions exposed a separate
 /// 3-string overload `(data, targetISA, kernel, ...)` to elide the
 /// repetition, but that overload silently misbehaved under C++
@@ -78,7 +77,7 @@ struct PipelineResult {
 /// -> bool` is a *standard* pointer-to-bool conversion that outranks
 /// the user-defined `const char * -> std::string` conversion needed
 /// for the 4-string cross-arch overload).  The 4th literal was then
-/// bound to `EnableWritelaneRewrite` as `true` and `kernelName`
+/// bound to `EnableWritelaneRewrite` as `true` and `KernelName`
 /// silently became `"gfx942"`, which downstream surfaced as
 /// `UserSgprLayout::fromKernelMeta: kernel 'gfx942' has no parsed
 /// kernel descriptor` -- an easy-to-miss silent miscompile of the
@@ -90,11 +89,10 @@ struct PipelineResult {
 /// under standard conversions).  Callers repeat the ISA string
 /// instead; the ~5 single-ISA call sites that did this pre-fix are
 /// all updated to the two-string form.
-PipelineResult runPipeline(llvm::MemoryBufferRef codeObjectData,
-                           llvm::StringRef sourceISA,
-                           llvm::StringRef targetISA,
-                           llvm::StringRef kernelName,
-                           PipelineOptions options = {});
+PipelineResult runPipeline(llvm::MemoryBufferRef CodeObjectData,
+                           llvm::StringRef SourceISA, llvm::StringRef TargetISA,
+                           llvm::StringRef KernelName,
+                           PipelineOptions Options = {});
 
 /// Raise and lower ALL kernels in a code object, producing a single merged
 /// HSACO containing every kernel.  Returns success only if every kernel was
@@ -104,10 +102,10 @@ PipelineResult runPipeline(llvm::MemoryBufferRef codeObjectData,
 /// `EnableWritelaneRewrite` / `EnableWaveNative` plumb through to the
 /// per-kernel `raiseToIR` calls; see `raiser.hpp` for the contract and
 /// the in-tree-debug-only caveat.
-PipelineResult runPipelineAllKernels(llvm::MemoryBufferRef codeObjectData,
-                                     llvm::StringRef sourceISA,
-                                     llvm::StringRef targetISA,
-                                     PipelineOptions options = {});
+PipelineResult runPipelineAllKernels(llvm::MemoryBufferRef CodeObjectData,
+                                     llvm::StringRef SourceISA,
+                                     llvm::StringRef TargetISA,
+                                     PipelineOptions Options = {});
 
 /// Process-global "strict mode" toggle, controlled by the
 /// `HSA_HOTSWAP_STRICT` environment variable. When set to a non-empty
@@ -120,12 +118,12 @@ PipelineResult runPipelineAllKernels(llvm::MemoryBufferRef codeObjectData,
 ///     (handle-sopk.cpp): silently dropped in non-strict mode but the
 ///     kernel may rely on the FP rounding / denormal / IEEE / FTZ bits
 ///     being set.
-///   * `llvm.amdgcn.implicitarg.ptr` lifts (handle-smem.cpp): emit
-///     `gep = implicitarg_ptr + sourceImplOffset; load i32, gep` which
-///     bakes the source ISA's hidden-arg byte layout into a load against
-///     the target ISA's hidden-arg block. Any mismatch in base or
-///     layout produces wrong values for `hidden_block_count_*`,
-///     `hidden_grid_dims`, etc.
+///   * Unsupported or unproved `llvm.amdgcn.implicitarg.ptr` lifts
+///     (handle-smem.cpp): strict mode refuses dynamic source implicit-arg
+///     offsets, unmatched source hidden-arg metadata, and hidden fields without
+///     explicit source-ABI synthesis or target-ABI identity mapping. Supported
+///     fields are materialized by `source-hidden-args.cpp`, not by applying
+///     source byte offsets to the target runtime's hidden-arg block.
 ///
 /// Parsed once on first call (`std::getenv("HSA_HOTSWAP_STRICT")`); the
 /// callers (handler implementations) read the flag without round-tripping
@@ -134,9 +132,15 @@ PipelineResult runPipelineAllKernels(llvm::MemoryBufferRef codeObjectData,
 /// not, so existing GPU tests stay passing.
 bool isStrictMode();
 
+/// Process-global `HSA_HOTSWAP_DUMP_INPUT` toggle (parsed once). When set to
+/// `1`, debug dumps additionally include the raw input code object and the
+/// per-kernel source disassembly. Shared by the pipeline and the raiser so
+/// both agree on when to produce those artifacts.
+bool wantDumpInput();
+
 class ScopedStrictMode {
 public:
-  explicit ScopedStrictMode(bool enabled);
+  explicit ScopedStrictMode(bool Enabled);
   ~ScopedStrictMode();
 
   ScopedStrictMode(const ScopedStrictMode &) = delete;

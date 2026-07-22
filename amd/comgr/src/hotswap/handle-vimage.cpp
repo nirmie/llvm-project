@@ -79,13 +79,13 @@
 
 #include "handlers.h"
 
+#include "canonical-op.h"
 #include "decoded-inst.h"
 #include "isa-profile.h"
 #include "parsed-reg.h"
 #include "raise-context.h"
 #include "raise-failure.h"
 #include "reg-file.h"
-#include "canonical-op.h"
 #include "tdm-runtime.h"
 
 #include "llvm/ADT/Twine.h"
@@ -114,7 +114,8 @@ Value *marshalSgprGroup(RaiseContext &Ctx, ParsedReg Base, unsigned N,
   auto *VecTy = FixedVectorType::get(Ctx.I32Ty, N);
   Value *Vec = PoisonValue::get(VecTy);
   for (unsigned I = 0; I < N; ++I) {
-    Value *Dword = Ctx.Regs.loadSGPR32(Ctx.B, Base.BaseIdx + static_cast<int>(I));
+    Value *Dword =
+        Ctx.Regs.loadSGPR32(Ctx.B, Base.BaseIdx + static_cast<int>(I));
     Vec = Ctx.B.CreateInsertElement(Vec, Dword, I, Name);
   }
   return Vec;
@@ -150,10 +151,10 @@ struct TDMArgs {
 
 // Marshal the SGPR-bank operand list of a `tensor_{load,store}_*_d{2,4}`
 // pseudo into the six argument values both lowering paths take. On
-// success, populates `out` and returns true. On any operand-shape
-// rejection, populates `hr.Failure` and returns false.
-bool marshalTDMArgs(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op,
-                    HandlerResult &Hr, TDMArgs &Out) {
+// success, populates `out` and returns Error::success(). On any
+// operand-shape rejection, returns a RaiseFailure Error.
+Error marshalTDMArgs(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op,
+                     TDMArgs &Out) {
   // Recover the operand-shape variant. The pseudo's InOperandList
   // (MIMGInstructions.td:2073) has 4 sources for `_d2`
   // (vaddr0, vaddr1, r128, cpol) and 6 for `_d4` (vaddr0..vaddr3,
@@ -163,11 +164,10 @@ bool marshalTDMArgs(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op,
   // audited -- refuse loudly so the drift surfaces immediately.
   const unsigned Nsrcs = Op.nSrcs();
   if (Nsrcs != 4 && Nsrcs != 6) {
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    return RaiseFailure::unsupportedInstructionForm(
         Di, "VIMAGE",
-        Twine("unexpected source operand count ") + Twine(Nsrcs) +
+        "unexpected source operand count " + Twine(Nsrcs) +
             " for tensor op (expected 4 for _d2 or 6 for _d4)");
-    return false;
   }
   const bool IsD2 = (Nsrcs == 4);
 
@@ -186,22 +186,24 @@ bool marshalTDMArgs(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op,
   // of how the tuple chain is named, so reading via baseIdx is
   // the source of truth -- it matches the decode of the encoded
   // 8-bit SGPR pointer field exactly.
-  auto RequireSgpr = [&](ParsedReg Pr, const char *Role) -> bool {
+  auto RequireSgpr = [&](ParsedReg Pr, llvm::StringRef Role) -> Error {
     if (Pr.RegKind != ParsedReg::SGPR) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "VIMAGE",
-          Twine("tensor ") + Role + " must be a contiguous SGPR range "
-                "(got non-SGPR operand kind)");
-      return false;
+          "tensor " + Role +
+              " must be a contiguous SGPR range "
+              "(got non-SGPR operand kind)");
     }
-    return true;
+    return Error::success();
   };
 
   ParsedReg Vaddr0 = Op.srcReg(0);
   ParsedReg Vaddr1 = Op.srcReg(1);
-  if (!RequireSgpr(Vaddr0, "vaddr0/D# group 0") ||
-      !RequireSgpr(Vaddr1, "vaddr1/D# group 1"))
-    return false;
+  if (Error Err = RequireSgpr(Vaddr0, "vaddr0/D# group 0"))
+    return Err;
+
+  if (Error Err = RequireSgpr(Vaddr1, "vaddr1/D# group 1"))
+    return Err;
 
   Out.Grp0 = marshalSgprGroup(Ctx, Vaddr0, 4, "td_grp0");
   Out.Grp1 = marshalSgprGroup(Ctx, Vaddr1, 8, "td_grp1");
@@ -212,21 +214,24 @@ bool marshalTDMArgs(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op,
   } else {
     ParsedReg Vaddr2 = Op.srcReg(2);
     ParsedReg Vaddr3 = Op.srcReg(3);
-    if (!RequireSgpr(Vaddr2, "vaddr2/D# group 2") ||
-        !RequireSgpr(Vaddr3, "vaddr3/D# group 3"))
-      return false;
+    if (Error Err = RequireSgpr(Vaddr2, "vaddr2/D# group 2"))
+      return Err;
+
+    if (Error Err = RequireSgpr(Vaddr3, "vaddr3/D# group 3"))
+      return Err;
+
     Out.Grp2 = marshalSgprGroup(Ctx, Vaddr2, 4, "td_grp2");
     Out.Grp3 = marshalSgprGroup(Ctx, Vaddr3, 4, "td_grp3");
     Out.Cpol = cpolImm(Ctx, Op, 5);
   }
   Out.Grp4 = zeroVec(Ctx, 8); // reserved for future targets
-  return true;
+  return Error::success();
 }
 
 } // namespace
 
-HandlerResult handleVIMAGE(RaiseContext &Ctx, const DecodedInst &Di,
-                           OpResolver &Op) {
+Expected<HandlerResult> handleVIMAGE(RaiseContext &Ctx, const DecodedInst &Di,
+                                     OpResolver &Op) {
   HandlerResult Hr;
   CanonicalOp Sop = Di.CanonOp;
 
@@ -243,8 +248,8 @@ HandlerResult handleVIMAGE(RaiseContext &Ctx, const DecodedInst &Di,
   }
 
   TDMArgs Args;
-  if (!marshalTDMArgs(Ctx, Di, Op, Hr, Args))
-    return Hr;
+  if (Error Err = marshalTDMArgs(Ctx, Di, Op, Args))
+    return Err;
 
   // Same-target gfx1250 -> gfx1250 intrinsic lift.
   if (Ctx.TargetIsa.HasTensorOps) {
@@ -265,20 +270,18 @@ HandlerResult handleVIMAGE(RaiseContext &Ctx, const DecodedInst &Di,
   // pre-existing loud refusal so the no-hipcc build behaves exactly
   // as it did before this path landed.
   if (!tdmRuntimeAvailable()) {
-    llvm::errs()
-        << "transpiler: VIMAGE: " << Di.Mnemonic
-        << " has no equivalent on the compilation target "
-        << "(gfx1250 TENSORcnt unit; LLVM intrinsic "
-        << (Sop == CanonicalOp::TENSOR_LOAD_TO_LDS
-                ? "amdgcn.tensor.load.to.lds"
-                : "amdgcn.tensor.store.from.lds")
-        << " is gated isGFX125xOnly) and the TDM emulation runtime is "
-           "unavailable (transpiler was built without hipcc).\n";
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    llvm::errs() << "transpiler: VIMAGE: " << Di.Mnemonic
+                 << " has no equivalent on the compilation target "
+                 << "(gfx1250 TENSORcnt unit; LLVM intrinsic "
+                 << (Sop == CanonicalOp::TENSOR_LOAD_TO_LDS
+                         ? "amdgcn.tensor.load.to.lds"
+                         : "amdgcn.tensor.store.from.lds")
+                 << " is gated isGFX125xOnly) and the TDM emulation runtime is "
+                    "unavailable (transpiler was built without hipcc).\n";
+    return RaiseFailure::unsupportedInstructionForm(
         Di, "VIMAGE",
         "gfx1250-only TENSOR cnt op; no equivalent on non-gfx1250 "
         "compilation target and TDM emulation runtime unavailable");
-    return Hr;
   }
 
   const unsigned SourceWaveSize = Ctx.Isa.WaveSize;
@@ -287,14 +290,13 @@ HandlerResult handleVIMAGE(RaiseContext &Ctx, const DecodedInst &Di,
       SourceWaveSize == TargetWaveSize ||
       (SourceWaveSize == 32 && TargetWaveSize == 64);
   if (!SupportedWaveShape) {
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    return RaiseFailure::unsupportedInstructionForm(
         Di, "VIMAGE",
-        Twine("TDM emulation supports only source-wave-local same-wave "
-              "execution or wave32 source -> wave64 target cross-widening "
-              "(got source wave ") +
+        "TDM emulation supports only source-wave-local same-wave "
+        "execution or wave32 source -> wave64 target cross-widening "
+        "(got source wave " +
             Twine(SourceWaveSize) + ", target wave " + Twine(TargetWaveSize) +
             ")");
-    return Hr;
   }
 
   FunctionCallee Helper = (Sop == CanonicalOp::TENSOR_LOAD_TO_LDS)

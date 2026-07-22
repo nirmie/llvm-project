@@ -27,8 +27,8 @@
 using namespace llvm;
 
 namespace COMGR::hotswap {
-HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
-                        OpResolver &Op) {
+Expected<HandlerResult> handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
+                                    OpResolver &Op) {
   HandlerResult Hr;
   StringRef Mn(Di.Mnemonic);
   CanonicalOp Sop = Di.CanonOp;
@@ -39,31 +39,53 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
   // and merge into the named half of the destination VGPR, preserving
   // the other half. See BUFInstructions.td:1155-1177 (predicate
   // `D16PreservesUnusedBits`).
-  auto MubufClassify = [](CanonicalOp S)
-      -> std::tuple<bool, bool, int, int, bool, bool, int> {
-    // returns {isLoad, isStore, dwords, loadBits, isSubDword, isSigned, d16Half}
+  auto MubufClassify =
+      [](CanonicalOp S) -> std::tuple<bool, bool, int, int, bool, bool, int> {
+    // returns {isLoad, isStore, dwords, loadBits, isSubDword, isSigned,
+    // d16Half}
     switch (S) {
-    case CanonicalOp::BUFFER_LOAD_DWORD:    return {true, false, 1, 32, false, false, 0};
-    case CanonicalOp::BUFFER_LOAD_DWORDX2:  return {true, false, 2, 64, false, false, 0};
-    case CanonicalOp::BUFFER_LOAD_DWORDX3:  return {true, false, 3, 96, false, false, 0};
-    case CanonicalOp::BUFFER_LOAD_DWORDX4:  return {true, false, 4, 128, false, false, 0};
-    case CanonicalOp::BUFFER_LOAD_UBYTE:    return {true, false, 1, 8, true, false, 0};
-    case CanonicalOp::BUFFER_LOAD_SBYTE:    return {true, false, 1, 8, true, true, 0};
-    case CanonicalOp::BUFFER_LOAD_USHORT:   return {true, false, 1, 16, true, false, 0};
-    case CanonicalOp::BUFFER_LOAD_SSHORT:   return {true, false, 1, 16, true, true, 0};
-    case CanonicalOp::BUFFER_LOAD_SHORT_D16:     return {true, false, 1, 16, true, false, 1};
-    case CanonicalOp::BUFFER_LOAD_SHORT_D16_HI:  return {true, false, 1, 16, true, false, 2};
-    case CanonicalOp::BUFFER_LOAD_UBYTE_D16:     return {true, false, 1, 8,  true, false, 1};
-    case CanonicalOp::BUFFER_LOAD_UBYTE_D16_HI:  return {true, false, 1, 8,  true, false, 2};
-    case CanonicalOp::BUFFER_LOAD_SBYTE_D16:     return {true, false, 1, 8,  true, true,  1};
-    case CanonicalOp::BUFFER_LOAD_SBYTE_D16_HI:  return {true, false, 1, 8,  true, true,  2};
-    case CanonicalOp::BUFFER_STORE_DWORD:   return {false, true, 1, 32, false, false, 0};
-    case CanonicalOp::BUFFER_STORE_DWORDX2: return {false, true, 2, 64, false, false, 0};
-    case CanonicalOp::BUFFER_STORE_DWORDX3: return {false, true, 3, 96, false, false, 0};
-    case CanonicalOp::BUFFER_STORE_DWORDX4: return {false, true, 4, 128, false, false, 0};
-    case CanonicalOp::BUFFER_STORE_BYTE:    return {false, true, 1, 8, true, false, 0};
-    case CanonicalOp::BUFFER_STORE_SHORT:   return {false, true, 1, 16, true, false, 0};
-    default: return {false, false, 0, 0, false, false, 0};
+    case CanonicalOp::BUFFER_LOAD_DWORD:
+      return {true, false, 1, 32, false, false, 0};
+    case CanonicalOp::BUFFER_LOAD_DWORDX2:
+      return {true, false, 2, 64, false, false, 0};
+    case CanonicalOp::BUFFER_LOAD_DWORDX3:
+      return {true, false, 3, 96, false, false, 0};
+    case CanonicalOp::BUFFER_LOAD_DWORDX4:
+      return {true, false, 4, 128, false, false, 0};
+    case CanonicalOp::BUFFER_LOAD_UBYTE:
+      return {true, false, 1, 8, true, false, 0};
+    case CanonicalOp::BUFFER_LOAD_SBYTE:
+      return {true, false, 1, 8, true, true, 0};
+    case CanonicalOp::BUFFER_LOAD_USHORT:
+      return {true, false, 1, 16, true, false, 0};
+    case CanonicalOp::BUFFER_LOAD_SSHORT:
+      return {true, false, 1, 16, true, true, 0};
+    case CanonicalOp::BUFFER_LOAD_SHORT_D16:
+      return {true, false, 1, 16, true, false, 1};
+    case CanonicalOp::BUFFER_LOAD_SHORT_D16_HI:
+      return {true, false, 1, 16, true, false, 2};
+    case CanonicalOp::BUFFER_LOAD_UBYTE_D16:
+      return {true, false, 1, 8, true, false, 1};
+    case CanonicalOp::BUFFER_LOAD_UBYTE_D16_HI:
+      return {true, false, 1, 8, true, false, 2};
+    case CanonicalOp::BUFFER_LOAD_SBYTE_D16:
+      return {true, false, 1, 8, true, true, 1};
+    case CanonicalOp::BUFFER_LOAD_SBYTE_D16_HI:
+      return {true, false, 1, 8, true, true, 2};
+    case CanonicalOp::BUFFER_STORE_DWORD:
+      return {false, true, 1, 32, false, false, 0};
+    case CanonicalOp::BUFFER_STORE_DWORDX2:
+      return {false, true, 2, 64, false, false, 0};
+    case CanonicalOp::BUFFER_STORE_DWORDX3:
+      return {false, true, 3, 96, false, false, 0};
+    case CanonicalOp::BUFFER_STORE_DWORDX4:
+      return {false, true, 4, 128, false, false, 0};
+    case CanonicalOp::BUFFER_STORE_BYTE:
+      return {false, true, 1, 8, true, false, 0};
+    case CanonicalOp::BUFFER_STORE_SHORT:
+      return {false, true, 1, 16, true, false, 0};
+    default:
+      return {false, false, 0, 0, false, false, 0};
     }
   };
   auto [isLoad, isStore, dwords, loadBits, isSubDword, isBufSigned, d16Half] =
@@ -73,7 +95,11 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
     // loads return 0, stores are silently dropped. This avoids the
     // flat-memory lowering that requires conditional branches (which
     // break under LLVM -O1+ SIMT optimizations).
-    MubufAddr Mbuf = decodeMubufAddr(Ctx, Di, Op, isStore, "MUBUF");
+    Expected<MubufAddr> MbufOrErr =
+        decodeMubufAddr(Ctx, Di, Op, isStore, "MUBUF");
+    if (!MbufOrErr)
+      return MbufOrErr.takeError();
+    MubufAddr Mbuf = *MbufOrErr;
     // For loads, vdata is the dst; for stores it's the first VGPR src
     // (captured into mbuf.stData by the decoder).
     ParsedReg Vdata = isStore ? Mbuf.StData : Op.dst(0);
@@ -84,90 +110,100 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
     auto RawPtrBufferLoad = [&](Type *LoadTy) -> Value * {
       Function *BufLd = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_raw_ptr_buffer_load, {LoadTy});
-      return Ctx.B.CreateCall(
-          BufLd, {Mbuf.RawPtrRsrc, Voffset, Soffset, AuxFlags},
-          "buf_ld_rawptr");
+      return Ctx.B.CreateCall(BufLd,
+                              {Mbuf.RawPtrRsrc, Voffset, Soffset, AuxFlags},
+                              "buf_ld_rawptr");
     };
 
     if (isLoad) {
-      if (isSubDword) {
-        // Load the sub-dword datum and zero/sign-extend to i32. For
-        // plain ushort/sbyte/etc. (`d16Half == 0`) we then write the
-        // whole VGPR; for D16 partial-write loads we merge with the
-        // prior dst (see comment block above mubufClassify).
-        Type *MemTy = (loadBits == 8) ? Type::getInt8Ty(Ctx.C)
-                                      : Type::getInt16Ty(Ctx.C);
-        Value *Loaded = nullptr;
-        if (Ctx.TargetIsa.WaveSize > Ctx.Isa.WaveSize) {
-          Loaded = RawPtrBufferLoad(MemTy);
-        } else {
-          Function *BufLd = Intrinsic::getOrInsertDeclaration(
-              &Ctx.M, Intrinsic::amdgcn_raw_buffer_load, {MemTy});
-          Loaded = Ctx.B.CreateCall(BufLd,
-              {Srd, Voffset, Soffset, AuxFlags}, "buf_ld");
-        }
-        if (d16Half == 0) {
-          Value *Ext = isBufSigned ? Ctx.B.CreateSExt(Loaded, Ctx.I32Ty)
-                                   : Ctx.B.CreateZExt(Loaded, Ctx.I32Ty);
-          Ctx.writeReg32(Vdata, Ext);
-        } else {
-          // Partial-write: extend to i16 (sign for `_SBYTE_D16*`,
-          // zero for `_UBYTE_D16*` / `_SHORT_D16*`), zext to i32 so
-          // the high half of the i32 is exactly zero before merging.
-          Value *Ext16 = Loaded;
-          if (loadBits == 8) {
-            Ext16 = isBufSigned
-                        ? Ctx.B.CreateSExt(Loaded, Type::getInt16Ty(Ctx.C))
-                        : Ctx.B.CreateZExt(Loaded, Type::getInt16Ty(Ctx.C));
-          }
-          Value *Ext32 = Ctx.B.CreateZExt(Ext16, Ctx.I32Ty);
-          Value *Prior = Ctx.Regs.readReg32(Ctx.B, Vdata);
-          Value *Merged;
-          if (d16Half == 1) {
-            // _D16: place datum in lo 16, preserve hi 16 of prior.
-            Value *PriorHi =
-                Ctx.B.CreateAnd(Prior, ConstantInt::get(Ctx.I32Ty, 0xFFFF0000));
-            Merged = Ctx.B.CreateOr(PriorHi, Ext32, "d16_lo_merge");
+      // EXEC-gate the load itself, not just the VGPR write-back: a
+      // WaveNative "phantom" lane (no source-wave workitem at this
+      // position) can hold a stale per-lane offset that, after the
+      // NUM_RECORDS remap in `mubuf-addr.cpp`, lands in-bounds and
+      // dereferences a wild address. Gating a load is always safe -- the
+      // masked-out lane's result is discarded -- unlike the masked store
+      // below, whose per-lane OOB-offset predicate needs full-wave issue.
+      // Same fix and rationale as the GLOBAL_LOAD path in `handle-flat.cpp`.
+      //
+      // Write the destination with `Ctx.Regs.write*` (the low-level
+      // reg-file path) inside the body; `Ctx.writeReg*` would wrap it in a
+      // second, redundant `emitUnderExec` diamond.
+      Ctx.emitUnderExec([&] {
+        if (isSubDword) {
+          // Load the sub-dword datum and zero/sign-extend to i32. For
+          // plain ushort/sbyte/etc. (`d16Half == 0`) we then write the
+          // whole VGPR; for D16 partial-write loads we merge with the
+          // prior dst (see comment block above mubufClassify).
+          Type *MemTy = (loadBits == 8) ? Type::getInt8Ty(Ctx.C)
+                                        : Type::getInt16Ty(Ctx.C);
+          Value *Loaded = nullptr;
+          if (Ctx.TargetIsa.WaveSize > Ctx.Isa.WaveSize) {
+            Loaded = RawPtrBufferLoad(MemTy);
           } else {
-            // _D16_HI: place datum in hi 16, preserve lo 16 of prior.
-            Value *PriorLo =
-                Ctx.B.CreateAnd(Prior, ConstantInt::get(Ctx.I32Ty, 0x0000FFFF));
-            Value *Shifted =
-                Ctx.B.CreateShl(Ext32, ConstantInt::get(Ctx.I32Ty, 16));
-            Merged = Ctx.B.CreateOr(PriorLo, Shifted, "d16_hi_merge");
+            Function *BufLd = Intrinsic::getOrInsertDeclaration(
+                &Ctx.M, Intrinsic::amdgcn_raw_buffer_load, {MemTy});
+            Loaded = Ctx.B.CreateCall(BufLd, {Srd, Voffset, Soffset, AuxFlags},
+                                      "buf_ld");
           }
-          Ctx.writeReg32(Vdata, Merged);
-        }
-      } else if (dwords == 1) {
-        Value *Loaded = nullptr;
-        if (Ctx.TargetIsa.WaveSize > Ctx.Isa.WaveSize) {
-          Loaded = RawPtrBufferLoad(Ctx.I32Ty);
+          if (d16Half == 0) {
+            Value *Ext = isBufSigned ? Ctx.B.CreateSExt(Loaded, Ctx.I32Ty)
+                                     : Ctx.B.CreateZExt(Loaded, Ctx.I32Ty);
+            Ctx.Regs.writeReg32(Ctx.B, Vdata, Ext);
+          } else {
+            // Partial-write: extend to i16 (sign for `_SBYTE_D16*`,
+            // zero for `_UBYTE_D16*` / `_SHORT_D16*`), zext to i32 so
+            // the high half of the i32 is exactly zero before merging.
+            Value *Ext16 = Loaded;
+            if (loadBits == 8) {
+              Ext16 = isBufSigned
+                          ? Ctx.B.CreateSExt(Loaded, Type::getInt16Ty(Ctx.C))
+                          : Ctx.B.CreateZExt(Loaded, Type::getInt16Ty(Ctx.C));
+            }
+            Value *Ext32 = Ctx.B.CreateZExt(Ext16, Ctx.I32Ty);
+            Value *Prior = Ctx.Regs.readReg32(Ctx.B, Vdata);
+            Value *Merged;
+            if (d16Half == 1) {
+              // _D16: place datum in lo 16, preserve hi 16 of prior.
+              Value *PriorHi = Ctx.B.CreateAnd(
+                  Prior, ConstantInt::get(Ctx.I32Ty, 0xFFFF0000));
+              Merged = Ctx.B.CreateOr(PriorHi, Ext32, "d16_lo_merge");
+            } else {
+              // _D16_HI: place datum in hi 16, preserve lo 16 of prior.
+              Value *PriorLo = Ctx.B.CreateAnd(
+                  Prior, ConstantInt::get(Ctx.I32Ty, 0x0000FFFF));
+              Value *Shifted =
+                  Ctx.B.CreateShl(Ext32, ConstantInt::get(Ctx.I32Ty, 16));
+              Merged = Ctx.B.CreateOr(PriorLo, Shifted, "d16_hi_merge");
+            }
+            Ctx.Regs.writeReg32(Ctx.B, Vdata, Merged);
+          }
+        } else if (dwords == 1) {
+          Value *Loaded = nullptr;
+          if (Ctx.TargetIsa.WaveSize > Ctx.Isa.WaveSize) {
+            Loaded = RawPtrBufferLoad(Ctx.I32Ty);
+          } else {
+            Function *BufLd = Intrinsic::getOrInsertDeclaration(
+                &Ctx.M, Intrinsic::amdgcn_raw_buffer_load, {Ctx.I32Ty});
+            Loaded = Ctx.B.CreateCall(BufLd, {Srd, Voffset, Soffset, AuxFlags},
+                                      "buf_ld");
+          }
+          Ctx.Regs.writeReg32(Ctx.B, Vdata, Loaded);
         } else {
-          Function *BufLd = Intrinsic::getOrInsertDeclaration(
-              &Ctx.M,
-              Intrinsic::amdgcn_raw_buffer_load,
-              {Ctx.I32Ty});
-          Loaded = Ctx.B.CreateCall(BufLd,
-              {Srd, Voffset, Soffset, AuxFlags}, "buf_ld");
+          auto *VecTy = FixedVectorType::get(Ctx.I32Ty, dwords);
+          Value *Loaded = nullptr;
+          if (Ctx.TargetIsa.WaveSize > Ctx.Isa.WaveSize) {
+            Loaded = RawPtrBufferLoad(VecTy);
+          } else {
+            Function *BufLd = Intrinsic::getOrInsertDeclaration(
+                &Ctx.M, Intrinsic::amdgcn_raw_buffer_load, {VecTy});
+            Loaded = Ctx.B.CreateCall(BufLd, {Srd, Voffset, Soffset, AuxFlags},
+                                      "buf_ld");
+          }
+          Ctx.Regs.writeRegVec(Ctx.B, Vdata, Loaded);
         }
-        Ctx.writeReg32(Vdata, Loaded);
-      } else {
-        auto *VecTy = FixedVectorType::get(Ctx.I32Ty, dwords);
-        Value *Loaded = nullptr;
-        if (Ctx.TargetIsa.WaveSize > Ctx.Isa.WaveSize) {
-          Loaded = RawPtrBufferLoad(VecTy);
-        } else {
-          Function *BufLd = Intrinsic::getOrInsertDeclaration(
-              &Ctx.M,
-              Intrinsic::amdgcn_raw_buffer_load,
-              {VecTy});
-          Loaded = Ctx.B.CreateCall(BufLd,
-              {Srd, Voffset, Soffset, AuxFlags}, "buf_ld");
-        }
-        Ctx.writeRegVec(Vdata, Loaded);
-      }
+      });
       Hr.Handled = true;
-    return Hr;
+      return Hr;
     }
     if (isStore) {
       // Use the gfx942 buffer-store intrinsic directly, exactly
@@ -247,7 +283,7 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
       else
         Ctx.emitUnderExec(EmitStore);
       Hr.Handled = true;
-    return Hr;
+      return Hr;
     }
   }
 
@@ -257,28 +293,42 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
   if (Sop == CanonicalOp::BUFFER_LOAD_DWORD_LDS ||
       Sop == CanonicalOp::BUFFER_LOAD_DWORDX2_LDS ||
       Sop == CanonicalOp::BUFFER_LOAD_DWORDX4_LDS) {
-    int Dwords = (Sop == CanonicalOp::BUFFER_LOAD_DWORDX4_LDS) ? 4
-               : (Sop == CanonicalOp::BUFFER_LOAD_DWORDX2_LDS) ? 2 : 1;
+    int Dwords = (Sop == CanonicalOp::BUFFER_LOAD_DWORDX4_LDS)   ? 4
+                 : (Sop == CanonicalOp::BUFFER_LOAD_DWORDX2_LDS) ? 2
+                                                                 : 1;
 
-    MubufAddr Mbuf = decodeMubufAddr(Ctx, Di, Op, /*isStore=*/false,
-                                      "MUBUF_LDS");
+    Expected<MubufAddr> MbufOrErr =
+        decodeMubufAddr(Ctx, Di, Op, /*isStore=*/false, "MUBUF_LDS");
+    if (!MbufOrErr)
+      return MbufOrErr.takeError();
+    MubufAddr Mbuf = *MbufOrErr;
 
-    // Load from buffer into a temp value.
-    Type *LdTy = (Dwords == 1)
-                     ? Ctx.I32Ty
-                     : FixedVectorType::get(Ctx.I32Ty, Dwords);
+    Type *LdTy = (Dwords == 1) ? static_cast<Type *>(Ctx.I32Ty)
+                               : FixedVectorType::get(Ctx.I32Ty, Dwords);
     Function *BufLd = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_raw_buffer_load, {LdTy});
-    Value *Loaded = Ctx.B.CreateCall(
-        BufLd, {Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset, Mbuf.AuxFlags},
-        "lds_buf_ld");
 
-    // Store to LDS at address from M0.
-    ParsedReg M0Reg; M0Reg.RegKind = ParsedReg::M0; M0Reg.BaseIdx = 0;
+    // LDS destination address comes from M0, which is wave-uniform; read it
+    // once outside the diamond.
+    ParsedReg M0Reg;
+    M0Reg.RegKind = ParsedReg::M0;
+    M0Reg.BaseIdx = 0;
     Value *LdsAddr = Ctx.Regs.readReg32(Ctx.B, M0Reg);
     auto *LdsPtrTy = PointerType::get(Ctx.C, 3);
     Value *LdsPtr = Ctx.B.CreateIntToPtr(LdsAddr, LdsPtrTy);
-    Ctx.emitUnderExec([&] { Ctx.B.CreateStore(Loaded, LdsPtr); });
+
+    // EXEC-gate the buffer load together with its LDS store. As on the
+    // VGPR-dest MUBUF load path, a WaveNative phantom / source-inactive
+    // lane must not issue the load: its per-lane offset can be stale and,
+    // after the NUM_RECORDS remap in `mubuf-addr.cpp`, land in-bounds on
+    // the target and fault. Gating a load is always safe (the value is
+    // discarded on masked-out lanes).
+    Ctx.emitUnderExec([&] {
+      Value *Loaded = Ctx.B.CreateCall(
+          BufLd, {Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset, Mbuf.AuxFlags},
+          "lds_buf_ld");
+      Ctx.B.CreateStore(Loaded, LdsPtr);
+    });
 
     Hr.Handled = true;
     return Hr;
@@ -299,11 +349,16 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
   // `lit_tests/buffer_atomic_swap_b32/` (RTN) +
   // `lit_tests/buffer_atomic_swap_b32_nortn/` (non-RTN) and the
   // cmpswap twins.
-  if (Sop >= CanonicalOp::BUFFER_ATOMIC_ADD && Sop <= CanonicalOp::BUFFER_ATOMIC_MAX_NUM_F64) {
-    assert(((Di.TsFlags & SIInstrFlags::IsAtomicRet) != 0) == (Di.NumDefs > 0) &&
+  if (Sop >= CanonicalOp::BUFFER_ATOMIC_ADD &&
+      Sop <= CanonicalOp::BUFFER_ATOMIC_MAX_NUM_F64) {
+    assert(((Di.TsFlags & SIInstrFlags::IsAtomicRet) != 0) ==
+               (Di.NumDefs > 0) &&
            "buffer atomic: IsAtomicRet disagrees with numDefs");
-    MubufAddr Mbuf = decodeMubufAddr(Ctx, Di, Op, /*isStore=*/true,
-                                     "buffer_atomic");
+    Expected<MubufAddr> MbufOrErr =
+        decodeMubufAddr(Ctx, Di, Op, /*isStore=*/true, "buffer_atomic");
+    if (!MbufOrErr)
+      return MbufOrErr.takeError();
+    MubufAddr Mbuf = *MbufOrErr;
 
     // `BUFFER_ATOMIC_CMPSWAP` is the one buffer atomic whose vdata is
     // a register PAIR carrying `{cmp, new}` rather than a single data
@@ -323,10 +378,11 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
         // Raw-buffer atomics preserve descriptor-relative addressing and
         // hardware OOB behavior. The intrinsic takes {new, cmp}, matching
         // LLVM's AMDGPU intrinsic contract for buffer cmpswap.
-        Value *OldVal = Ctx.B.CreateCall(
-            CasFn, {NewVal, CmpVal, Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset,
-                    Mbuf.AuxFlags},
-            "buf_atomic_cmpswap");
+        Value *OldVal =
+            Ctx.B.CreateCall(CasFn,
+                             {NewVal, CmpVal, Mbuf.Srd, Mbuf.Voffset,
+                              Mbuf.Soffset, Mbuf.AuxFlags},
+                             "buf_atomic_cmpswap");
         if (Di.NumDefs > 0)
           Ctx.Regs.writeReg32(Ctx.B, Op.dst(), OldVal);
       });
@@ -351,60 +407,49 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
         Sop == CanonicalOp::BUFFER_ATOMIC_MAX_NUM_F64) {
       const bool IsMax = Sop == CanonicalOp::BUFFER_ATOMIC_MAX_F64 ||
                          Sop == CanonicalOp::BUFFER_ATOMIC_MAX_NUM_F64;
-      const bool IsIeeeNum =
-          Sop == CanonicalOp::BUFFER_ATOMIC_MIN_NUM_F64 ||
-          Sop == CanonicalOp::BUFFER_ATOMIC_MAX_NUM_F64;
-      Value *SrcF64 = Ctx.B.CreateBitCast(Data, Ctx.F64Ty,
-                                          "fp64_minmax_src");
+      const bool IsIeeeNum = Sop == CanonicalOp::BUFFER_ATOMIC_MIN_NUM_F64 ||
+                             Sop == CanonicalOp::BUFFER_ATOMIC_MAX_NUM_F64;
+      Value *SrcF64 = Ctx.B.CreateBitCast(Data, Ctx.F64Ty, "fp64_minmax_src");
       Function *BufLd = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_raw_buffer_load, {Ctx.I64Ty});
       Function *CasFn = Intrinsic::getOrInsertDeclaration(
-          &Ctx.M, Intrinsic::amdgcn_raw_buffer_atomic_cmpswap,
-          {Ctx.I64Ty});
+          &Ctx.M, Intrinsic::amdgcn_raw_buffer_atomic_cmpswap, {Ctx.I64Ty});
       Ctx.emitUnderExec([&] {
         Value *InitI64 = Ctx.B.CreateCall(
-            BufLd,
-            {Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset, Mbuf.AuxFlags},
+            BufLd, {Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset, Mbuf.AuxFlags},
             "fp64_minmax_init");
         Function *F = Ctx.B.GetInsertBlock()->getParent();
         BasicBlock *PreBb = Ctx.B.GetInsertBlock();
-        BasicBlock *LoopBb =
-            BasicBlock::Create(Ctx.C, "fp64_minmax_loop", F);
-        BasicBlock *ExitBb =
-            BasicBlock::Create(Ctx.C, "fp64_minmax_exit", F);
+        BasicBlock *LoopBb = BasicBlock::Create(Ctx.C, "fp64_minmax_loop", F);
+        BasicBlock *ExitBb = BasicBlock::Create(Ctx.C, "fp64_minmax_exit", F);
         Ctx.B.CreateBr(LoopBb);
         Ctx.B.SetInsertPoint(LoopBb);
         PHINode *Expected =
             Ctx.B.CreatePHI(Ctx.I64Ty, 2, "fp64_minmax_expected");
         Expected->addIncoming(InitI64, PreBb);
-        Value *OldF64 = Ctx.B.CreateBitCast(Expected, Ctx.F64Ty,
-                                            "fp64_minmax_old");
+        Value *OldF64 =
+            Ctx.B.CreateBitCast(Expected, Ctx.F64Ty, "fp64_minmax_old");
         Value *NewF64;
         if (IsIeeeNum) {
           Intrinsic::ID NumIntr =
               IsMax ? Intrinsic::maximumnum : Intrinsic::minimumnum;
-          Function *NumFn = Intrinsic::getOrInsertDeclaration(
-              &Ctx.M, NumIntr, {Ctx.F64Ty});
-          NewF64 = Ctx.B.CreateCall(NumFn, {OldF64, SrcF64},
-                                    "fp64_minmax_new");
+          Function *NumFn =
+              Intrinsic::getOrInsertDeclaration(&Ctx.M, NumIntr, {Ctx.F64Ty});
+          NewF64 = Ctx.B.CreateCall(NumFn, {OldF64, SrcF64}, "fp64_minmax_new");
         } else {
           Value *Cmp =
-              IsMax ? Ctx.B.CreateFCmpOGT(SrcF64, OldF64,
-                                          "fp64_minmax_cmp")
-                    : Ctx.B.CreateFCmpOLT(SrcF64, OldF64,
-                                          "fp64_minmax_cmp");
-          NewF64 = Ctx.B.CreateSelect(Cmp, SrcF64, OldF64,
-                                      "fp64_minmax_new");
+              IsMax ? Ctx.B.CreateFCmpOGT(SrcF64, OldF64, "fp64_minmax_cmp")
+                    : Ctx.B.CreateFCmpOLT(SrcF64, OldF64, "fp64_minmax_cmp");
+          NewF64 = Ctx.B.CreateSelect(Cmp, SrcF64, OldF64, "fp64_minmax_new");
         }
-        Value *NewI64 = Ctx.B.CreateBitCast(NewF64, Ctx.I64Ty,
-                                            "fp64_minmax_new_bits");
-        Value *Returned = Ctx.B.CreateCall(
-            CasFn,
-            {NewI64, Expected, Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset,
-             Mbuf.AuxFlags},
-            "fp64_minmax_cas");
-        Value *Ok = Ctx.B.CreateICmpEQ(Returned, Expected,
-                                       "fp64_minmax_ok");
+        Value *NewI64 =
+            Ctx.B.CreateBitCast(NewF64, Ctx.I64Ty, "fp64_minmax_new_bits");
+        Value *Returned =
+            Ctx.B.CreateCall(CasFn,
+                             {NewI64, Expected, Mbuf.Srd, Mbuf.Voffset,
+                              Mbuf.Soffset, Mbuf.AuxFlags},
+                             "fp64_minmax_cas");
+        Value *Ok = Ctx.B.CreateICmpEQ(Returned, Expected, "fp64_minmax_ok");
         Expected->addIncoming(Returned, Ctx.B.GetInsertBlock());
         Ctx.B.CreateCondBr(Ok, ExitBb, LoopBb);
         Ctx.B.SetInsertPoint(ExitBb);
@@ -469,17 +514,16 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
     // above the switch; they never reach this default.
     default:
       llvm::errs() << "transpiler: Unsupported buffer atomic: " << Mn << "\n";
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(Di, "MUBUF",
-                                                   "unsupported buffer atomic");
-      return Hr;
+      return RaiseFailure::unsupportedInstructionForm(
+          Di, "MUBUF", "unsupported buffer atomic");
     }
-    if (IsFp) Data = Ctx.B.CreateBitCast(Data, AtomicTy);
-    Function *AtomicFn = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, AtomicIntrinsic, {AtomicTy});
+    if (IsFp)
+      Data = Ctx.B.CreateBitCast(Data, AtomicTy);
+    Function *AtomicFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, AtomicIntrinsic, {AtomicTy});
     Ctx.emitUnderExec([&] {
       Value *OldVal = Ctx.B.CreateCall(
-          AtomicFn,
-          {Data, Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset, Mbuf.AuxFlags},
+          AtomicFn, {Data, Mbuf.Srd, Mbuf.Voffset, Mbuf.Soffset, Mbuf.AuxFlags},
           "buf_atomic");
       // RTN-form write-back. The raw-buffer intrinsic returns the old
       // memory value just like the target ISA RTN form; when the source
@@ -488,10 +532,12 @@ HandlerResult handleMUBUF(RaiseContext &Ctx, const DecodedInst &Di,
       if (Di.NumDefs > 0) {
         Value *RetVal = OldVal;
         if (IsF64) {
-          if (IsFp) RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I64Ty);
+          if (IsFp)
+            RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I64Ty);
           Ctx.Regs.writeReg64(Ctx.B, Op.dst(), RetVal);
         } else {
-          if (IsFp) RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I32Ty);
+          if (IsFp)
+            RetVal = Ctx.B.CreateBitCast(RetVal, Ctx.I32Ty);
           Ctx.Regs.writeReg32(Ctx.B, Op.dst(), RetVal);
         }
       }

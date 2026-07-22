@@ -9,6 +9,8 @@
 #ifndef HOTSWAP_TRANSPILER_REWRITE_CROSS_LANE_DIVERGENT_H
 #define HOTSWAP_TRANSPILER_REWRITE_CROSS_LANE_DIVERGENT_H
 
+#include "llvm/Support/Error.h"
+
 #include <string>
 
 namespace llvm {
@@ -21,7 +23,7 @@ namespace COMGR::hotswap {
 // ============================================================================
 // Post-raise rewrite: per-source-wave cross-lane primitives under
 // cross-widen divergence. See hotswap/docs/wave-size-translation.md
-// §5.6.3 for the principled derivation of the rewrite shapes below.
+// sec. 5.6.3 for the principled derivation of the rewrite shapes below.
 // ============================================================================
 //
 // PROBLEM. The AMDGPU backend lowers `llvm.amdgcn.writelane(val, lane,
@@ -32,7 +34,7 @@ namespace COMGR::hotswap {
 // scalarise it. Under cross-widening (source wave32 -> target wave64),
 // a value that is *intentionally* per-lane-divergent within a target
 // wave -- e.g. the `wave_id_in_workgroup` divergent-VGPR lifted out of
-// `s_bfe_u32 ttmp8, 0x50019` (handle-sop2.cpp §5.6.2 rescue) -- gets
+// `s_bfe_u32 ttmp8, 0x50019` (handle-sop2.cpp sec. 5.6.2 rescue) -- gets
 // collapsed by the readfirstlane to one lane's value, and the other
 // target lanes lose their per-source-wave meaning. Every downstream
 // computation keyed on the collapsed value (tile-column address, EXEC
@@ -239,9 +241,7 @@ struct CrossLaneDivergentRewriteReport {
   // When true, the rewrite pass performed zero rewrites and the
   // caller must surface `unsupportedDppDetail` as a raise-time
   // refusal diagnostic.
-  bool refusedUnsupportedDpp() const {
-    return !UnsupportedDppDetail.empty();
-  }
+  bool refusedUnsupportedDpp() const { return !UnsupportedDppDetail.empty(); }
 
   // True iff the pass refused the function for any reason.
   bool refused() const {
@@ -253,6 +253,21 @@ struct CrossLaneDivergentRewriteReport {
 // IF the forward use-chain classifier proves every site VGPR-safe.
 // Otherwise perform zero rewrites and return the refusal detail in
 // `sgprForcedDetail`. No-op when `targetWaveSize <= sourceWaveSize`.
+//
+// `ProvidesFullWaveExecInvariant` says whether the active projection
+// guarantees hardware EXEC = -1 kernel-wide (i.e.
+// `WaveProjection::providesFullWaveExecInvariant()`, true only for
+// `WaveNativeProjection` via its kernel-entry `init_whole_wave`).  It
+// governs the whole-wave gather for the `readlane` / `readfirstlane`
+// rewrites: the source ops ignore EXEC (they read the selected lane's
+// real VGPR even when that lane is inactive), but `ds_bpermute`
+// returns 0 for a read of an EXEC-inactive lane.  When the invariant
+// does NOT hold (MODREP / ThreadLoop, where hardware EXEC tracks the
+// modeled per-lane active mask), the rewritten `ds_bpermute` gather is
+// wrapped in `@llvm.amdgcn.strict.wwm` so the backend runs it under
+// HW EXEC = -1 and every lane stages its real value.  When the
+// invariant holds the wrap is omitted (it would be redundant and the
+// `SIPreAllocateWWMRegs` pressure is best avoided).
 //
 // `TM` is an optional (default-null) handle to the compilation
 // target's `TargetMachine`. It is currently unused -- the classifier
@@ -268,9 +283,11 @@ struct CrossLaneDivergentRewriteReport {
 // `ds_bpermute` whose result is MODREP-replica-divergent -- so a
 // pre-rewrite UA verdict does not survive the rewrite), so no such
 // refinement is active today.
-CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
-    llvm::Function &F, unsigned SourceWaveSize, unsigned TargetWaveSize,
-    llvm::TargetMachine *TM = nullptr);
+llvm::Expected<CrossLaneDivergentRewriteReport>
+rewriteCrossLaneDivergent(llvm::Function &F, unsigned SourceWaveSize,
+                          unsigned TargetWaveSize,
+                          bool ProvidesFullWaveExecInvariant = false,
+                          llvm::TargetMachine *TM = nullptr);
 
 } // namespace COMGR::hotswap
 

@@ -27,57 +27,47 @@ namespace COMGR::hotswap {
 // other half must be preserved by explicitly merging with the old destination
 // dword. Missing or non-immediate modifier operands are treated as TableGen
 // layout drift and refused rather than defaulting to low-half semantics.
-bool readRequiredVOP3F16SrcMods(const DecodedInst &Di, HandlerResult &Hr,
-                                unsigned SrcIndex, StringRef OpName,
-                                unsigned &Mods) {
+Error readRequiredVOP3F16SrcMods(const DecodedInst &Di, unsigned SrcIndex,
+                                 StringRef OpName, unsigned &Mods) {
   if (SrcIndex >= Di.NumSrcs) {
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
-        Di, "VOP3",
-        (Twine(OpName) + " missing f16 source operand").str());
-    return false;
+    return RaiseFailure::unsupportedInstructionForm(
+        Di, "VOP3", OpName + " missing f16 source operand");
   }
 
   unsigned ModIdx = Di.ModMap[SrcIndex];
   if (ModIdx == UINT_MAX || !Di.isImm(ModIdx)) {
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    return RaiseFailure::unsupportedInstructionForm(
         Di, "VOP3",
-        (Twine(OpName) + " missing immediate f16 src" + Twine(SrcIndex) +
-         "_modifiers operand; operand table layout does not match the "
-         "expected VOP3 f16 profile")
-            .str());
-    return false;
+        OpName + " missing immediate f16 src" + Twine(SrcIndex) +
+            "_modifiers operand; operand table layout does not match the "
+            "expected VOP3 f16 profile");
   }
 
   int64_t Raw = Di.getImm(ModIdx);
   const unsigned Allowed = SrcIndex == 0 ? 0xFu : 0x7u;
   if (Raw < 0 || (static_cast<unsigned>(Raw) & ~Allowed) != 0) {
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    return RaiseFailure::unsupportedInstructionForm(
         Di, "VOP3",
-        (Twine(OpName) + " has unsupported f16 src" + Twine(SrcIndex) +
-         "_modifiers bits")
-            .str());
-    return false;
+        OpName + " has unsupported f16 src" + Twine(SrcIndex) +
+            "_modifiers bits");
   }
 
   Mods = static_cast<unsigned>(Raw);
-  return true;
+  return Error::success();
 }
 
-bool readOptionalVOP3F16SrcMods(const DecodedInst &Di, HandlerResult &Hr,
-                                unsigned SrcIndex, StringRef OpName,
-                                unsigned &Mods) {
+Error readOptionalVOP3F16SrcMods(const DecodedInst &Di, unsigned SrcIndex,
+                                 StringRef OpName, unsigned &Mods) {
   Mods = 0;
-  if (SrcIndex >= Di.NumSrcs) {
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
-        Di, "VOP3",
-        (Twine(OpName) + " missing f16 source operand").str());
-    return false;
-  }
+  if (SrcIndex >= Di.NumSrcs)
+    return RaiseFailure::unsupportedInstructionForm(
+        Di, "VOP3", OpName + " missing f16 source operand");
 
   unsigned ModIdx = Di.ModMap[SrcIndex];
   if (ModIdx == UINT_MAX)
-    return true;
-  return readRequiredVOP3F16SrcMods(Di, Hr, SrcIndex, OpName, Mods);
+    return Error::success();
+
+  return readRequiredVOP3F16SrcMods(Di, SrcIndex, OpName, Mods);
 }
 
 Value *readOpSelF16FromMods(RaiseContext &Ctx, OpResolver &Op,
@@ -103,52 +93,66 @@ Value *readOpSelF16FromMods(RaiseContext &Ctx, OpResolver &Op,
   return V;
 }
 
-Value *readOpSelF16(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op,
-                    HandlerResult &Hr, unsigned SrcIndex, StringRef OpName) {
+Expected<Value *> readOpSelF16(RaiseContext &Ctx, const DecodedInst &Di,
+                               OpResolver &Op, unsigned SrcIndex,
+                               StringRef OpName) {
   unsigned Mods = 0;
-  if (!readRequiredVOP3F16SrcMods(Di, Hr, SrcIndex, OpName, Mods))
-    return nullptr;
+  if (Error Err = readRequiredVOP3F16SrcMods(Di, SrcIndex, OpName, Mods))
+    return Err;
+
   return readOpSelF16FromMods(Ctx, Op, SrcIndex, Mods);
 }
 
-Value *readOptionalOpSelF16(RaiseContext &Ctx, const DecodedInst &Di,
-                            OpResolver &Op, HandlerResult &Hr,
-                            unsigned SrcIndex, StringRef OpName) {
+Expected<Value *> readOptionalOpSelF16(RaiseContext &Ctx, const DecodedInst &Di,
+                                       OpResolver &Op, unsigned SrcIndex,
+                                       StringRef OpName) {
   unsigned Mods = 0;
-  if (!readOptionalVOP3F16SrcMods(Di, Hr, SrcIndex, OpName, Mods))
-    return nullptr;
+  if (Error Err = readOptionalVOP3F16SrcMods(Di, SrcIndex, OpName, Mods))
+    return Err;
+
   return readOpSelF16FromMods(Ctx, Op, SrcIndex, Mods);
 }
 
-bool readVOP3F16DstHigh(const DecodedInst &Di, HandlerResult &Hr,
-                        StringRef OpName, bool &DstHigh) {
+Error readVOP3F16DstHigh(const DecodedInst &Di, StringRef OpName,
+                         bool &DstHigh) {
   unsigned Mods = 0;
-  if (!readRequiredVOP3F16SrcMods(Di, Hr, 0, OpName, Mods))
-    return false;
+  if (Error Err = readRequiredVOP3F16SrcMods(Di, 0, OpName, Mods))
+    return Err;
+
   DstHigh = (Mods & SISrcMods::DST_OP_SEL) != 0;
-  return true;
+  return Error::success();
 }
 
-void writeOpSelF16(RaiseContext &Ctx, OpResolver &Op, Value *Result,
-                   bool DstHigh, StringRef MergeLoName,
-                   StringRef MergeHiName) {
-  // True16 instructions write one 16-bit lane of a VGPR dword. LLVM IR has no
-  // partial-register write, so model it explicitly as a read/modify/write:
-  // preserve the old opposite half and OR in the new result bits.
-  Type *I16Ty = Type::getInt16Ty(Ctx.C);
-  Value *Bits =
-      Ctx.B.CreateZExt(Ctx.B.CreateBitCast(Result, I16Ty), Ctx.I32Ty);
-  Value *Old = Ctx.Regs.readReg32(Ctx.B, Op.dst());
+void writeSelectedI16Bits(RaiseContext &Ctx, ParsedReg Dst, Value *Result,
+                          bool DstHigh, StringRef MergeName) {
+  writeSelectedI16Bits(Ctx, Dst, Result, DstHigh, MergeName, MergeName);
+}
+
+void writeSelectedI16Bits(RaiseContext &Ctx, ParsedReg Dst, Value *Result,
+                          bool DstHigh, StringRef MergeLoName,
+                          StringRef MergeHiName) {
+  Value *Bits = Ctx.B.CreateZExt(Result, Ctx.I32Ty);
+  Value *Old = Ctx.Regs.readReg32(Ctx.B, Dst);
   if (!DstHigh) {
     Value *High =
         Ctx.B.CreateAnd(Old, ConstantInt::get(Ctx.I32Ty, 0xFFFF0000u));
-    Ctx.writeReg32(Op.dst(), Ctx.B.CreateOr(High, Bits, MergeLoName));
+    Ctx.writeReg32(Dst, Ctx.B.CreateOr(High, Bits, MergeLoName));
     return;
   }
 
   Value *Low = Ctx.B.CreateAnd(Old, ConstantInt::get(Ctx.I32Ty, 0x0000FFFFu));
   Value *Shifted = Ctx.B.CreateShl(Bits, 16);
-  Ctx.writeReg32(Op.dst(), Ctx.B.CreateOr(Low, Shifted, MergeHiName));
+  Ctx.writeReg32(Dst, Ctx.B.CreateOr(Low, Shifted, MergeHiName));
+}
+
+void writeOpSelF16(RaiseContext &Ctx, OpResolver &Op, Value *Result,
+                   bool DstHigh, StringRef MergeLoName, StringRef MergeHiName) {
+  // True16 instructions write one 16-bit lane of a VGPR dword. LLVM IR has no
+  // partial-register write, so model it explicitly as a read/modify/write:
+  // preserve the old opposite half and OR in the new result bits.
+  Type *I16Ty = Type::getInt16Ty(Ctx.C);
+  Value *Bits = Ctx.B.CreateBitCast(Result, I16Ty);
+  writeSelectedI16Bits(Ctx, Op.dst(), Bits, DstHigh, MergeLoName, MergeHiName);
 }
 
 } // namespace COMGR::hotswap

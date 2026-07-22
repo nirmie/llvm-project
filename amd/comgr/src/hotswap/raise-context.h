@@ -9,6 +9,7 @@
 #ifndef HOTSWAP_TRANSPILER_RAISE_CONTEXT_H
 #define HOTSWAP_TRANSPILER_RAISE_CONTEXT_H
 
+#include "code-object-utils.h"
 #include "decoded-inst.h"
 #include "isa-profile.h"
 #include "kernarg-layout.h"
@@ -23,14 +24,57 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCRegister.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include <cassert>
 #include <map>
+#include <optional>
+#include <utility>
 
 namespace COMGR::hotswap {
+
+// Result of classifying an instruction as a constant rebase of the tracked
+// kernarg pointer pair. `TouchesKernargPtr` distinguishes "not this pattern"
+// from "this pattern, but not by a known constant"; `Delta` is present only for
+// the latter's proven constant byte adjustment.
+struct KernargPtrConstRebase {
+  bool TouchesKernargPtr = false;
+  std::optional<int64_t> Delta;
+};
+
+// Recognize scalar 64-bit add/sub forms that preserve a pointer's identity
+// while changing only its constant byte offset. The caller supplies register
+// identity so the same predicate can serve both the MC-only prepass and
+// handler-time ParsedReg state.
+inline KernargPtrConstRebase classifyKernargPtrConstRebase(
+    const DecodedInst &Di, llvm::function_ref<bool(llvm::MCRegister)> IsPair) {
+  if ((Di.CanonOp != CanonicalOp::S_ADD_NC_U64 &&
+       Di.CanonOp != CanonicalOp::S_SUB_NC_U64) ||
+      Di.NumSrcs < 2 || !Di.isReg(0) || !IsPair(Di.getReg(0)))
+    return {};
+
+  unsigned Src0 = Di.SrcMap[0];
+  unsigned Src1 = Di.SrcMap[1];
+  bool Src0IsPair = Di.isReg(Src0) && IsPair(Di.getReg(Src0));
+  bool Src1IsPair = Di.isReg(Src1) && IsPair(Di.getReg(Src1));
+  std::optional<int64_t> Delta;
+
+  if (Src0IsPair && !Src1IsPair) {
+    Delta = evalOperandAsConst(Di.Inst, Src1);
+    if (Delta && Di.CanonOp == CanonicalOp::S_SUB_NC_U64)
+      *Delta = -*Delta;
+  } else if (Src1IsPair && !Src0IsPair &&
+             Di.CanonOp == CanonicalOp::S_ADD_NC_U64) {
+    Delta = evalOperandAsConst(Di.Inst, Src0);
+  }
+
+  return {true, Delta};
+}
 
 // Shared state threaded through every format handler.
 struct RaiseContext {
@@ -40,8 +84,12 @@ struct RaiseContext {
   AllocaRegFile &Regs;
   const WaveProjection &Projection;
   const MCState &Mc;
-  const ISAProfile &Isa;       // source ISA (for disassembly / instruction semantics)
-  ISAProfile TargetIsa;        // compilation target ISA (for code generation decisions)
+  const ISAProfile &Isa; // source ISA (for disassembly / instruction semantics)
+  ISAProfile
+      TargetIsa; // compilation target ISA (for code generation decisions)
+  // Target hidden-arg offsets are code-object-version dependent; default to
+  // the backend's current emission contract and let the raiser override it.
+  unsigned TargetCodeObjectVersion = 6;
   KernargLayout &Kernargs;
   // Source-ISA user-SGPR ABI derived from the kernel descriptor. Owned by
   // the raiser; threaded into every handler that needs to identify a
@@ -54,18 +102,37 @@ struct RaiseContext {
   llvm::Function *Kernel;
   llvm::BasicBlock *ThreadLoopLatch = nullptr;
 
-  llvm::Type *I1Ty;
-  llvm::Type *I8Ty;
-  llvm::Type *I32Ty;
-  llvm::Type *I64Ty;
+  llvm::IntegerType *I1Ty;
+  llvm::IntegerType *I8Ty;
+  llvm::IntegerType *I16Ty;
+  llvm::IntegerType *I32Ty;
+  llvm::IntegerType *I64Ty;
   llvm::Type *F32Ty;
   llvm::Type *F16Ty;
   llvm::Type *F64Ty;
   llvm::Type *PtrGlobalTy;
 
   llvm::DenseMap<uint64_t, llvm::BasicBlock *> &OffsetToBb;
+  // Source code-object bytes used to materialise proven PC-relative literals.
+  // `SourceTextBytes` remains the disassembly image; `SourceImageSections`
+  // carries allocated sections addressable by source code-object address.
+  llvm::ArrayRef<uint8_t> SourceTextBytes;
+  uint64_t SourceTextBaseAddress = 0;
+  llvm::ArrayRef<TextSection::ImageSection> SourceImageSections;
   uint64_t KernelStartOffset = 0;
   uint64_t KernelEndOffset = 0;
+
+  RaiseContext(llvm::LLVMContext &C, llvm::Module &M, llvm::IRBuilder<> &B,
+               AllocaRegFile &Regs, const WaveProjection &Projection,
+               const MCState &Mc, const ISAProfile &Isa, ISAProfile TargetIsa,
+               unsigned TargetCodeObjectVersion, KernargLayout &Kernargs,
+               const UserSgprLayout *Layout, llvm::Function *Kernel,
+               llvm::BasicBlock *ThreadLoopLatch,
+               llvm::DenseMap<uint64_t, llvm::BasicBlock *> &OffsetToBb,
+               llvm::ArrayRef<uint8_t> SourceTextBytes,
+               uint64_t SourceTextBaseAddress,
+               llvm::ArrayRef<TextSection::ImageSection> SourceImageSections,
+               uint64_t KernelStartOffset, uint64_t KernelEndOffset);
 
   // Source KD private/scratch allocation. `handle-flat.cpp` sets
   // `usesScratchPrivateSegment` when it lowers a `scratch_*` instruction; the
@@ -80,7 +147,7 @@ struct RaiseContext {
   // Result of the static analysis that classifies every s_set_pc_i64
   // site. Owned by the raiser; the handler reads it to decide
   // between Pattern A (direct br) and Pattern B / DispatchSet
-  // (cmp+br cascade via `emitEnumeratedDispatch`) lowerings, and
+  // (switch dispatch via `emitEnumeratedDispatch`) lowerings, and
   // the raiser's main loop reads `chainTerminators` to materialise
   // call-site blockaddress writes into ret-pair SGPRs. See
   // setpc-analysis.h for the full contract; see canonical-op.h's
@@ -118,14 +185,14 @@ struct RaiseContext {
 
   // Per-instruction VGPR index adjustment, indexed by MCInst operand index.
   // Computed from vgprMSBs before each instruction dispatch. computeVGPRAdjust
-  // fails loudly if LLVM TableGen grows a VGPR-MSB-controlled operand beyond
-  // this bound; silently dropping such an adjustment would misdecode the source
-  // register bank.
+  // returns an error if LLVM TableGen grows a VGPR-MSB-controlled operand
+  // beyond this bound; silently dropping such an adjustment would misdecode the
+  // source register bank.
   static constexpr unsigned KMaxOps = 16;
   unsigned CurrentVgprAdjust[KMaxOps] = {};
 
   // Compute currentVGPRAdjust for the given instruction based on vgprMSBs.
-  void computeVGPRAdjust(const DecodedInst &Di);
+  llvm::Error computeVGPRAdjust(const DecodedInst &Di);
 
   llvm::BasicBlock *lookupBB(uint64_t Addr);
 
@@ -135,10 +202,13 @@ struct RaiseContext {
   llvm::Value *readOp32(const DecodedInst &Di, unsigned OpIdx);
   llvm::Value *readOp64(const DecodedInst &Di, unsigned OpIdx);
   llvm::Value *readOpExecWidth(const DecodedInst &Di, unsigned OpIdx);
+  // Read the mask a source-wave instruction should see, e.g. for `v_mbcnt_lo`.
+  // EXEC/VCC/SGPR-shadow masks are projected; scalars use readOp32.
+  llvm::Value *readOpSourceWaveMask32(const DecodedInst &Di, unsigned OpIdx);
 
   // Emit `llvm.amdgcn.update.dpp.<i32>(old, src, ctrl, row_mask, bank_mask,
   // bound_ctrl)` -- the P5 lowering for src0-path DPP modifiers; see the
-  // DPP row of hotswap/docs/wave-size-translation.md §5.3 for the rewrite
+  // DPP row of hotswap/docs/wave-size-translation.md sec. 5.3 for the rewrite
   // contract. `src` and `old` must be 32-bit (i32 or f32/bitcastable); a
   // future 64-bit lift would extend the intrinsic overload set and the
   // bitcast-bridge below. The return type matches `src->getType()` so
@@ -150,14 +220,35 @@ struct RaiseContext {
   // stay DPP-agnostic. See `decoded-inst.h`'s DPP-state block for how
   // the modifier operand values reach us.
   llvm::Value *emitUpdateDpp(llvm::Value *OldVal, llvm::Value *Src,
-                              uint16_t Ctrl, uint8_t RowMask,
-                              uint8_t BankMask, bool BoundCtrl);
+                             uint16_t Ctrl, uint8_t RowMask, uint8_t BankMask,
+                             bool BoundCtrl);
 
   // Target-hardware lane id (i32), emitted once per kernel and reused.
   llvm::Value *emitLaneIdx();
 
+  // Neutralise a per-lane memory ADDRESS against poison on inactive lanes
+  // when cross-widening wave32 -> wave64.
+  //
+  // A per-lane address VGPR is produced under one EXEC-gated `emitUnderExec`
+  // region and consumed by a memory op under a later, possibly different one.
+  // On lanes that were inactive when the address was produced, the alloca
+  // reg-file carries `undef` (the inactive arm of the first-def phi after
+  // mem2reg). Those lanes never commit the memory op -- the op is itself
+  // wrapped in `emitUnderExec` -- but feeding `undef`/poison through
+  // `inttoptr` into a load/store is UB, which the AMDGPU backend is entitled
+  // to exploit (it may drop the divergent branch and issue the access at the
+  // wave-native HW EXEC = -1 forced by `init_whole_wave`, faulting on the
+  // undef address). Freezing the address integer replaces poison with an
+  // arbitrary but well-defined value, removing the UB while leaving the
+  // per-lane `emitUnderExec` gate to keep the access off inactive lanes.
+  //
+  // Gated on cross-widening (`Isa.isWave32() && !TargetIsa.isWave32()`) so
+  // same-wave and narrowing lifts keep byte-identical codegen. `Addr` is the
+  // integer address (returned unchanged when not cross-widening).
+  llvm::Value *freezeMemAddr(llvm::Value *Addr);
+
   // ==== SIMT Predicated Execution (SPE) helpers
-  // (see hotswap/docs/wave-size-translation.md §5.1). ================
+  // (see hotswap/docs/wave-size-translation.md sec. 5.1). ================
   //
   // emitLaneActiveBit() returns an i1 true iff the current lane's bit in the
   // EXEC-mask alloca is set. Wave-size-aware via targetIsa: the lane id is
@@ -215,33 +306,35 @@ struct RaiseContext {
   void storeVGPR64(int Idx, llvm::Value *V);
   void storeAGPR32(int Idx, llvm::Value *V);
 
-  // Per-lane entry fact for the source-ABI kernarg-segment pointer SGPR pair at
-  // a recovered source BB leader.
+  // Provenance fact for the physical SGPR pair that originally held the
+  // source-ABI kernarg-segment pointer.
   //
-  //   LiveEntry   - all incoming CFG paths still carry this entry-pointer lane.
-  //   NonEntry  - all incoming CFG paths have overwritten this lane with a
-  //               value loaded from memory rather than the dispatch-provided
-  //               entry SGPR value.
-  //   Unknown     - paths disagree, are unreachable, or include an
-  //                 unclassified write; strict hidden-arg lowering refuses
-  //                 when either lane is unknown.
+  //   LiveEntry - all incoming CFG paths carry the dispatch-provided entry
+  //               pointer plus EntryByteOffset. Both lanes must be LiveEntry
+  //               for the offset to be meaningful.
+  //   NonEntry  - all incoming CFG paths have overwritten the pair with a value
+  //               loaded from memory rather than the dispatch-provided entry
+  //               SGPR value. Constant rebases of such a value remain NonEntry.
+  //   Unknown   - paths disagree, are unreachable, include an unclassified
+  //               write, or carry different EntryByteOffset values.
   enum class KernargPtrLaneProvenance {
     LiveEntry,
     NonEntry,
     Unknown,
   };
 
-  // Combined provenance for the physical SGPR pair that originally held the
-  // source ABI kernarg pointer. Consumers classify the pair by combining the
-  // two lane facts: both LiveEntry permits source hidden-arg synthesis, both
-  // NonEntry uses ordinary memory lowering, and any mixed/Unknown state is
-  // ambiguous in strict mode.
+  // Consumers classify the pair by combining the two lane facts: both LiveEntry
+  // permits source hidden-arg synthesis at EntryByteOffset + instruction
+  // offset, both NonEntry uses ordinary memory lowering, and any mixed/Unknown
+  // state is ambiguous in strict mode.
   struct KernargPtrProvenance {
     KernargPtrLaneProvenance Low = KernargPtrLaneProvenance::Unknown;
     KernargPtrLaneProvenance High = KernargPtrLaneProvenance::Unknown;
+    int64_t EntryByteOffset = 0;
 
     bool operator==(KernargPtrProvenance Other) const {
-      return Low == Other.Low && High == Other.High;
+      return Low == Other.Low && High == Other.High &&
+             EntryByteOffset == Other.EntryByteOffset;
     }
 
     bool isLiveEntry() const {
@@ -256,9 +349,11 @@ struct RaiseContext {
   };
 
   // Merge facts from two control-flow paths. Equal lane facts survive; any
-  // disagreement becomes Unknown so strict hidden-arg lowering refuses.
-  static KernargPtrLaneProvenance joinKernargPtrLaneProvenance(
-      KernargPtrLaneProvenance Lhs, KernargPtrLaneProvenance Rhs) {
+  // disagreement becomes Unknown. A LiveEntry pair keeps EntryByteOffset only
+  // when every incoming path has the same offset.
+  static KernargPtrLaneProvenance
+  joinKernargPtrLaneProvenance(KernargPtrLaneProvenance Lhs,
+                               KernargPtrLaneProvenance Rhs) {
     if (Lhs == Rhs)
       return Lhs;
     return KernargPtrLaneProvenance::Unknown;
@@ -266,10 +361,18 @@ struct RaiseContext {
 
   // Pair-wise control-flow join for provenance carried through IR diamonds.
   static KernargPtrProvenance
-  joinKernargPtrProvenance(KernargPtrProvenance Lhs,
-                           KernargPtrProvenance Rhs) {
-    return {joinKernargPtrLaneProvenance(Lhs.Low, Rhs.Low),
-            joinKernargPtrLaneProvenance(Lhs.High, Rhs.High)};
+  joinKernargPtrProvenance(KernargPtrProvenance Lhs, KernargPtrProvenance Rhs) {
+    KernargPtrProvenance Result = {
+        joinKernargPtrLaneProvenance(Lhs.Low, Rhs.Low),
+        joinKernargPtrLaneProvenance(Lhs.High, Rhs.High), 0};
+    if (Result.isLiveEntry()) {
+      if (Lhs.isLiveEntry() && Rhs.isLiveEntry() &&
+          Lhs.EntryByteOffset == Rhs.EntryByteOffset)
+        Result.EntryByteOffset = Lhs.EntryByteOffset;
+      else
+        Result.Low = Result.High = KernargPtrLaneProvenance::Unknown;
+    }
+    return Result;
   }
 
   // True when `Base` names the descriptor-provided kernarg pointer SGPR pair.
@@ -286,6 +389,20 @@ struct RaiseContext {
     return CurrentKernargPtrProvenance;
   }
 
+  // Restore a proven entry-pointer fact after a constant-preserving rebase.
+  void setKernargPtrLiveEntryByteOffset(int64_t ByteOffset) {
+    CurrentKernargPtrProvenance.Low = KernargPtrLaneProvenance::LiveEntry;
+    CurrentKernargPtrProvenance.High = KernargPtrLaneProvenance::LiveEntry;
+    CurrentKernargPtrProvenance.EntryByteOffset = ByteOffset;
+  }
+
+  // Restore a proven non-entry pointer fact after a constant-preserving rebase.
+  void setKernargPtrNonEntry() {
+    CurrentKernargPtrProvenance.Low = KernargPtrLaneProvenance::NonEntry;
+    CurrentKernargPtrProvenance.High = KernargPtrLaneProvenance::NonEntry;
+    CurrentKernargPtrProvenance.EntryByteOffset = 0;
+  }
+
   // Update the current intra-BB provenance state after an ordinary SGPR write.
   // Only writes to either kernarg-pointer lane change this fact. A generic
   // register write kills LiveEntry but does not prove a non-entry value.
@@ -300,6 +417,7 @@ struct RaiseContext {
       CurrentKernargPtrProvenance.High = KernargPtrLaneProvenance::Unknown;
     else
       return;
+    CurrentKernargPtrProvenance.EntryByteOffset = 0;
   }
 
   // Record that an SMEM-style load wrote one or more SGPR lanes from memory.
@@ -317,6 +435,7 @@ struct RaiseContext {
       CurrentKernargPtrProvenance.Low = KernargPtrLaneProvenance::NonEntry;
     if (BaseIdx <= KernargPtrSgpr + 1 && EndIdx >= KernargPtrSgpr + 1)
       CurrentKernargPtrProvenance.High = KernargPtrLaneProvenance::NonEntry;
+    CurrentKernargPtrProvenance.EntryByteOffset = 0;
   }
 
   // Record the prepass-computed entry fact for a recovered source BB.
@@ -430,7 +549,7 @@ struct RaiseContext {
   // Default-construct via an explicit zero-arg temporary to disambiguate
   // from DenseMap's `explicit` single-unsigned-int constructor under
   // RaiseContext's aggregate brace-init. (With `= {}` or no initializer
-  // GCC warns: "converting … from initializer list would use explicit
+  // GCC warns: "converting ... from initializer list would use explicit
   // constructor DenseMap(unsigned int)".)
   llvm::DenseMap<int, WaveMaskEntry> LastSgprWaveMaskI1 =
       llvm::DenseMap<int, WaveMaskEntry>();
@@ -445,11 +564,23 @@ struct RaiseContext {
   // shadow and fallback via `select`, avoiding SSA-dominance hazards.
   llvm::SmallVector<llvm::AllocaInst *> SgprWaveMaskExecShadow;
   llvm::SmallVector<llvm::AllocaInst *> SgprWaveMaskValidShadow;
+  llvm::SmallVector<llvm::AllocaInst *> SourceWaveSgprPairShadow;
+  llvm::SmallVector<llvm::AllocaInst *> SourceWaveSgprPairValidShadow;
+  // Same-BB source-image address facts for PC-relative literal loads. This is
+  // not a generic constant tracker: only s_get_pc_i64 seeds it, only constant
+  // s_add/sub_nc_u64 propagates it, and only SMEM literal materialisation reads
+  // it.
+  llvm::DenseMap<int, uint64_t> SourceImageSgprPairAddrShadow =
+      llvm::DenseMap<int, uint64_t>();
+
+  // Raise-time constant shadow of M0; see updateM0Const / getM0Const.
+  std::optional<uint64_t> M0Const;
 
   // Conservative lane-wise kernarg-pointer provenance for the strict hidden-arg
   // SMEM gate. Filled before instruction lowering by a fixed-point over the
-  // decoded CFG. Mixed incoming states become Unknown and keep strict mode loud.
-  // False means tracking is inactive and BB entry uses Unknown without lookup.
+  // decoded CFG. Mixed incoming states become Unknown and keep strict mode
+  // loud. False means tracking is inactive and BB entry uses Unknown without
+  // lookup.
   bool HasKernargPtrProvenanceByBB = false;
   llvm::DenseMap<llvm::BasicBlock *, KernargPtrProvenance>
       KernargSegmentPtrProvenanceByBB =
@@ -468,11 +599,68 @@ struct RaiseContext {
     LastSgprWaveMaskI1[BaseIdx] = WaveMaskEntry{CmpI1, IsPair};
     if (BaseIdx >= 0 &&
         static_cast<size_t>(BaseIdx) < SgprWaveMaskExecShadow.size()) {
-      llvm::Value *ExecMask = Projection.ballotI1ToWidth(
-          B, CmpI1, Regs.ExecTy, "wm_shadow_exec");
+      llvm::Value *ExecMask =
+          Projection.ballotI1ToWidth(B, CmpI1, Regs.ExecTy, "wm_shadow_exec");
       B.CreateStore(ExecMask, SgprWaveMaskExecShadow[BaseIdx]);
       B.CreateStore(B.getTrue(), SgprWaveMaskValidShadow[BaseIdx]);
     }
+  }
+
+  // Return true when the source wave containing the current target lane has any
+  // active lane in EXEC.
+  llvm::Value *emitCurrentSourceWaveHasActiveLane() {
+    llvm::Value *Exec = Regs.loadExec(B);
+    if (!Projection.providesFullWaveExecInvariant())
+      return emitLaneActiveBit();
+    unsigned SourceBits = Isa.WaveSize;
+    assert(Isa.hasValidWaveSize() && "source wave size must be 32 or 64");
+    if (SourceBits >= 64)
+      return B.CreateICmpNE(Exec, llvm::ConstantInt::get(Exec->getType(), 0),
+                            "source_wave_active");
+    llvm::Type *ExecTy = Exec->getType();
+    llvm::Value *Lane =
+        B.CreateZExtOrTrunc(emitLaneIdx(), ExecTy, "source_wave_lane");
+    llvm::Value *Group = B.CreateUDiv(
+        Lane, llvm::ConstantInt::get(ExecTy, SourceBits), "source_wave_group");
+    llvm::Value *Shift = B.CreateMul(
+        Group, llvm::ConstantInt::get(ExecTy, SourceBits), "source_wave_shift");
+    llvm::Value *Shifted = B.CreateLShr(Exec, Shift, "source_wave_exec");
+    uint64_t Mask = (uint64_t{1} << SourceBits) - 1;
+    llvm::Value *GroupMask = B.CreateAnd(
+        Shifted, llvm::ConstantInt::get(ExecTy, Mask), "source_wave_mask");
+    return B.CreateICmpNE(GroupMask, llvm::ConstantInt::get(ExecTy, 0),
+                          "source_wave_active");
+  }
+
+  // Record an SGPR-pair marker for the currently active source wave, preserving
+  // the old marker for inactive source waves.
+  void recordSourceWaveSgprPair(int BaseIdx, llvm::Value *V) {
+    if (!Projection.providesFullWaveExecInvariant())
+      return;
+    if (BaseIdx < 0 ||
+        static_cast<size_t>(BaseIdx) >= SourceWaveSgprPairShadow.size())
+      return;
+    llvm::Value *Old = B.CreateLoad(I64Ty, SourceWaveSgprPairShadow[BaseIdx],
+                                    "source_wave_sgpr_pair_old");
+    llvm::Value *Merged = B.CreateSelect(emitCurrentSourceWaveHasActiveLane(),
+                                         V, Old, "source_wave_sgpr_pair");
+    B.CreateStore(Merged, SourceWaveSgprPairShadow[BaseIdx]);
+    B.CreateStore(B.getTrue(), SourceWaveSgprPairValidShadow[BaseIdx]);
+  }
+
+  // Load the source-wave marker when one was recorded; otherwise use the normal
+  // SGPR-pair value.
+  llvm::Value *materializeSourceWaveSgprPair(int BaseIdx,
+                                             llvm::Value *Fallback) {
+    if (!Projection.providesFullWaveExecInvariant() || BaseIdx < 0 ||
+        static_cast<size_t>(BaseIdx) >= SourceWaveSgprPairShadow.size())
+      return Fallback;
+    llvm::Value *Shadow = B.CreateLoad(I64Ty, SourceWaveSgprPairShadow[BaseIdx],
+                                       "source_wave_sgpr_pair");
+    llvm::Value *Valid =
+        B.CreateLoad(I1Ty, SourceWaveSgprPairValidShadow[BaseIdx],
+                     "source_wave_sgpr_pair_valid");
+    return B.CreateSelect(Valid, Shadow, Fallback, "source_wave_sgpr_pair_sel");
   }
 
   // Look up the cached per-lane i1 for SGPR baseIdx in the current
@@ -486,14 +674,16 @@ struct RaiseContext {
   }
 
   llvm::Value *loadSgprWaveMaskExec(int BaseIdx) const {
-    if (BaseIdx < 0 || static_cast<size_t>(BaseIdx) >= SgprWaveMaskExecShadow.size())
+    if (BaseIdx < 0 ||
+        static_cast<size_t>(BaseIdx) >= SgprWaveMaskExecShadow.size())
       return nullptr;
     return B.CreateLoad(Regs.ExecTy, SgprWaveMaskExecShadow[BaseIdx],
                         "sgpr_mask_exec");
   }
 
   llvm::Value *loadSgprWaveMaskValid(int BaseIdx) const {
-    if (BaseIdx < 0 || static_cast<size_t>(BaseIdx) >= SgprWaveMaskValidShadow.size())
+    if (BaseIdx < 0 ||
+        static_cast<size_t>(BaseIdx) >= SgprWaveMaskValidShadow.size())
       return nullptr;
     return B.CreateLoad(I1Ty, SgprWaveMaskValidShadow[BaseIdx],
                         "sgpr_mask_valid");
@@ -519,9 +709,13 @@ struct RaiseContext {
   void invalidateSgprWaveMaskI1(int BaseIdx) {
     noteSgprWriteForKernargProvenance(BaseIdx);
     LastSgprWaveMaskI1.erase(BaseIdx);
+    SourceImageSgprPairAddrShadow.erase(BaseIdx);
     if (BaseIdx >= 0 &&
         static_cast<size_t>(BaseIdx) < SgprWaveMaskValidShadow.size())
       B.CreateStore(B.getFalse(), SgprWaveMaskValidShadow[BaseIdx]);
+    if (BaseIdx >= 0 &&
+        static_cast<size_t>(BaseIdx) < SourceWaveSgprPairValidShadow.size())
+      B.CreateStore(B.getFalse(), SourceWaveSgprPairValidShadow[BaseIdx]);
     if (BaseIdx > 0) {
       auto Prev = LastSgprWaveMaskI1.find(BaseIdx - 1);
       if (Prev != LastSgprWaveMaskI1.end() && Prev->second.IsPair) {
@@ -529,6 +723,10 @@ struct RaiseContext {
         if (static_cast<size_t>(BaseIdx - 1) < SgprWaveMaskValidShadow.size())
           B.CreateStore(B.getFalse(), SgprWaveMaskValidShadow[BaseIdx - 1]);
       }
+      if (static_cast<size_t>(BaseIdx - 1) <
+          SourceWaveSgprPairValidShadow.size())
+        B.CreateStore(B.getFalse(), SourceWaveSgprPairValidShadow[BaseIdx - 1]);
+      SourceImageSgprPairAddrShadow.erase(BaseIdx - 1);
     }
   }
 
@@ -539,12 +737,57 @@ struct RaiseContext {
   // the consumer. A future reaching-definitions pass on the raised
   // IR (see sgpr-wave-mask-translation.md section 7 evolution
   // path) can upgrade this to a proper per-BB merge.
-  void clearSgprWaveMaskShadow() { LastSgprWaveMaskI1.clear(); }
+  void clearSgprWaveMaskShadow() {
+    LastSgprWaveMaskI1.clear();
+    SourceImageSgprPairAddrShadow.clear();
+  }
+
+  // Record that SGPR pair [BaseIdx:BaseIdx+1] currently holds a source
+  // code-object address, in the same address domain as s_get_pc_i64. This is
+  // used only for PC-relative literal-table sequences and is cleared on any
+  // overlapping SGPR write or BB boundary.
+  void recordSourceImageSgprPairAddr(int BaseIdx, uint64_t Value) {
+    if (BaseIdx < 0)
+      llvm::report_fatal_error(
+          "transpiler: source-image SGPR pair record has invalid base index");
+    SourceImageSgprPairAddrShadow[BaseIdx] = Value;
+  }
+
+  // Return the source-image address fact for SGPR pair [BaseIdx:BaseIdx+1], if
+  // the current BB has proven one. Absence means the SMEM handler must use the
+  // ordinary runtime memory path or refuse according to its own operand rules.
+  std::optional<uint64_t> lookupSourceImageSgprPairAddr(int BaseIdx) const {
+    auto It = SourceImageSgprPairAddrShadow.find(BaseIdx);
+    if (It == SourceImageSgprPairAddrShadow.end())
+      return std::nullopt;
+    return It->second;
+  }
+
+  // --- M0 raise-time constant shadow ---------------------------------------
+  // v_movrel* resolve their VGPR index from `base + M0`. Because the reg
+  // file promotes VGPRs to SSA by index, the index must be known at raise
+  // time. `M0Const` tracks the last constant stored to M0 within the
+  // current basic block; it is cleared on any non-constant M0 store and at
+  // every BB boundary (M0 is uniform, but a value written in a predecessor
+  // no longer dominates trivially, so we stay conservative). Installed via
+  // `RegFile::OnM0Written`.
+  void updateM0Const(llvm::Value *V) {
+    if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(V))
+      M0Const = CI->getZExtValue();
+    else
+      M0Const = std::nullopt;
+  }
+  void clearM0Const() { M0Const = std::nullopt; }
+  std::optional<uint64_t> getM0Const() const { return M0Const; }
 
   void collectSgprWaveMaskShadowAllocas(
       llvm::SmallVectorImpl<llvm::AllocaInst *> &Out) const {
     Out.append(SgprWaveMaskExecShadow.begin(), SgprWaveMaskExecShadow.end());
     Out.append(SgprWaveMaskValidShadow.begin(), SgprWaveMaskValidShadow.end());
+    Out.append(SourceWaveSgprPairShadow.begin(),
+               SourceWaveSgprPairShadow.end());
+    Out.append(SourceWaveSgprPairValidShadow.begin(),
+               SourceWaveSgprPairValidShadow.end());
   }
 
   // Pending failure raised during operand-read dispatch (e.g.
@@ -552,38 +795,30 @@ struct RaiseContext {
   // register such as SRC_SHARED_BASE / SRC_FLAT_SCRATCH_BASE_LO).
   // Read paths cannot bail mid-handler -- they must return some
   // Value* -- so they record the failure here and the per-instruction
-  // dispatch loop in `raiser.cpp` checks `pendingFailure` after each
-  // handler returns and aborts the kernel raise. Set via
-  // `recordReadFailure`; cleared per instruction by the dispatch
-  // loop after consumption (or before the next instruction starts).
-  RaiseFailure PendingFailure;
+  // dispatch loop in `raiser.cpp` checks it after each handler returns
+  // and aborts the kernel raise. Set via `recordReadFailure`.
 
-  // Record an operand-read failure. Only the first failure per
-  // instruction is captured; subsequent reads of the same kernel
-  // simply return undef and let the dispatch loop bail on the
-  // first one we observed.
-  void recordReadFailure(RaiseFailure F) {
-    if (!PendingFailure.hasFailed())
-      PendingFailure = std::move(F);
-  }
+  // Record an operand-read failure so the dispatch loop can promote it to
+  // a structured kernel-raise failure at the next instruction boundary.
+  llvm::function_ref<void(llvm::Error Err)> recordReadFailure;
 };
 
-// Return value from every format handler.
+// Return value from every format handler, carried inside an
+// `llvm::Expected<HandlerResult>`.
 //
 // Handlers communicate back in three ways:
-//   * `handled = true` -> the handler fully lowered the instruction.
-//   * `handled = false`, `failure.reason = None` -> this handler does
-//     not claim the instruction; the main loop falls through to the
-//     generic `UnsupportedOpcode` diagnostic.
-//   * `handled = false`, `failure.reason != None` -> the handler
-//     recognised the instruction but refuses to lower it (e.g. operand
-//     shape unsupported); the main loop records the structured failure
-//     and aborts without consulting other handlers.
+//   * `Handled = true` -> the handler fully lowered the instruction.
+//   * `Handled = false` (no Error) -> this handler does not claim the
+//     instruction; the main loop falls through to the generic
+//     `UnsupportedOpcode` diagnostic.
+//   * an `llvm::Error` (a `RaiseFailure`) -> the handler recognised the
+//     instruction but refuses to lower it (e.g. operand shape
+//     unsupported); the main loop records the structured failure and
+//     aborts without consulting other handlers.
 struct HandlerResult {
   bool Handled = false;
   llvm::Value *SccResult = nullptr;
   bool SccHandled = false;
-  RaiseFailure Failure;
 };
 
 // Reads source operands via srcMap, skipping VOP3 modifiers. If the
@@ -605,21 +840,26 @@ struct OpResolver {
 
   unsigned srcMod(unsigned I) const {
     unsigned ModIdx = Di.ModMap[I];
-    if (ModIdx == UINT_MAX) return 0;
-    if (!Di.isImm(ModIdx)) return 0;
+    if (ModIdx == UINT_MAX)
+      return 0;
+    if (!Di.isImm(ModIdx))
+      return 0;
     return static_cast<unsigned>(Di.getImm(ModIdx) & 0xF);
   }
 
   llvm::Value *applyMods(unsigned I, llvm::Value *V) {
     unsigned Mods = srcMod(I);
-    if (Mods == 0) return V;
+    if (Mods == 0)
+      return V;
     bool IsI32 = (V->getType() == Ctx.I32Ty);
-    if (IsI32) V = Ctx.B.CreateBitCast(V, Ctx.F32Ty);
+    if (IsI32)
+      V = Ctx.B.CreateBitCast(V, Ctx.F32Ty);
     if (Mods & 2)
       V = Ctx.B.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, V, nullptr, "abs");
     if (Mods & 1)
       V = Ctx.B.CreateFNeg(V, "neg");
-    if (IsI32) V = Ctx.B.CreateBitCast(V, Ctx.I32Ty);
+    if (IsI32)
+      V = Ctx.B.CreateBitCast(V, Ctx.I32Ty);
     return V;
   }
 
@@ -644,12 +884,14 @@ struct OpResolver {
   // but each lookup stays coherent. `emitUpdateDpp` supports both
   // widths; other widths abort loudly.
   llvm::Value *wrapDppIfNeeded(unsigned LogicalSrc, llvm::Value *Raw) {
-    if (!Di.HasDpp || LogicalSrc != 0) return Raw;
-    if (rejectDpp16FetchInactiveIfNeeded()) return Raw;
+    if (!Di.HasDpp || LogicalSrc != 0)
+      return Raw;
+    if (rejectDpp16FetchInactiveIfNeeded())
+      return Raw;
     if (!CachedDppOldVdst32)
       CachedDppOldVdst32 = Ctx.readOp32(Di, 0);
     return Ctx.emitUpdateDpp(CachedDppOldVdst32, Raw, Di.DppCtrl, Di.DppRowMask,
-                              Di.DppBankMask, Di.DppBoundCtrl);
+                             Di.DppBankMask, Di.DppBoundCtrl);
   }
 
   llvm::Value *src(unsigned I) {
@@ -662,13 +904,16 @@ struct OpResolver {
     llvm::Value *Raw = Ctx.readOp64(Di, srcIdx(I));
     if (!Di.HasDpp || I != 0)
       return Raw;
-    if (rejectDpp16FetchInactiveIfNeeded()) return Raw;
+    if (rejectDpp16FetchInactiveIfNeeded())
+      return Raw;
     if (!CachedDppOldVdst64)
       CachedDppOldVdst64 = Ctx.readOp64(Di, 0);
     return Ctx.emitUpdateDpp(CachedDppOldVdst64, Raw, Di.DppCtrl, Di.DppRowMask,
-                              Di.DppBankMask, Di.DppBoundCtrl);
+                             Di.DppBankMask, Di.DppBoundCtrl);
   }
-  llvm::Value *srcExecWidth(unsigned I) { return Ctx.readOpExecWidth(Di, srcIdx(I)); }
+  llvm::Value *srcExecWidth(unsigned I) {
+    return Ctx.readOpExecWidth(Di, srcIdx(I));
+  }
   int64_t srcImm(unsigned I) { return Di.getImm(srcIdx(I)); }
 
   ParsedReg dst(unsigned I = 0) { return Ctx.parseReg(Di.getReg(I), I); }

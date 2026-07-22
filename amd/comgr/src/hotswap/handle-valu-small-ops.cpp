@@ -6,14 +6,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "handle-valu-internal.h"
 #include "handle-valu-f16-utils.h"
+#include "handle-valu-internal.h"
 #include "handle-valu-output-mods.h"
 
 #include "canonical-op.h"
 #include "ocml-runtime.h"
 
 #include "SIDefines.h"
+#include "Utils/AMDGPUBaseInfo.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/Constants.h"
@@ -22,7 +23,6 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/Support/LogicalResult.h"
-#include "Utils/AMDGPUBaseInfo.h"
 
 using namespace llvm;
 
@@ -32,24 +32,23 @@ namespace {
 
 // Lift a bf16 unary transcendental through an f32 callee, wrapping with
 // bf16<->f32 fpext/fptrunc and merging into the dst half. Half-select honors
-// both op_sel modifiers and _HI16 subreg naming. Returns failure (with
-// Hr.Failure set) when a present src0 modifier operand is malformed.
-LogicalResult emitBF16UnaryViaF32Callee(RaiseContext &Ctx, OpResolver &Op,
-                                        HandlerResult &Hr,
-                                        FunctionCallee F32Callee,
-                                        StringRef Name) {
+// both op_sel modifiers and _HI16 subreg naming. Returns an error when a
+// present src0 modifier operand is malformed.
+Error emitBF16UnaryViaF32Callee(RaiseContext &Ctx, OpResolver &Op,
+                                FunctionCallee F32Callee, StringRef Name) {
   const DecodedInst &Di = Op.Di;
   const MCRegisterInfo &MRI = *Ctx.Mc.RegInfo;
   unsigned Mods = 0;
-  if (!readOptionalVOP3F16SrcMods(Di, Hr, 0, Name, Mods))
-    return failure();
+  if (Error Err = readOptionalVOP3F16SrcMods(Di, 0, Name, Mods))
+    return Err;
+
   Type *BfTy = Type::getBFloatTy(Ctx.C);
   Type *I16Ty = Type::getInt16Ty(Ctx.C);
 
   unsigned SrcSlot = Di.SrcMap[0];
-  bool SrcHi = (Mods & SISrcMods::OP_SEL_0) != 0 ||
-               (Di.isReg(SrcSlot) &&
-                AMDGPU::isHi16Reg(Di.getReg(SrcSlot), MRI));
+  bool SrcHi =
+      (Mods & SISrcMods::OP_SEL_0) != 0 ||
+      (Di.isReg(SrcSlot) && AMDGPU::isHi16Reg(Di.getReg(SrcSlot), MRI));
   bool DstHi = (Mods & SISrcMods::DST_OP_SEL) != 0 ||
                (Di.isReg(0) && AMDGPU::isHi16Reg(Di.getReg(0), MRI));
 
@@ -64,11 +63,71 @@ LogicalResult emitBF16UnaryViaF32Callee(RaiseContext &Ctx, OpResolver &Op,
   Value *ResBf = Ctx.B.CreateFPTrunc(Res32, BfTy, (Name + "_tr").str());
 
   writeOpSelF16(Ctx, Op, ResBf, DstHi, "bf16_merge_lo", "bf16_merge_hi");
-  return success();
+  return Error::success();
 }
 
 FunctionCallee getF32Intrinsic(RaiseContext &Ctx, Intrinsic::ID IID) {
   return Intrinsic::getOrInsertDeclaration(&Ctx.M, IID, {Ctx.F32Ty});
+}
+
+// Half-selection state for VOP1 true16 conversions. Source half selection can
+// come from either a true16 subregister name (`vN.h`) or from the VOP3
+// `src0_modifiers` OP_SEL bit; destination half selection follows the same
+// subregister/modifier split.
+struct Cvt16HalfSelect {
+  bool SrcHi = false;
+  bool DstHi = false;
+  unsigned SrcMods = 0;
+};
+
+// Decode source/destination half selection for VOP1 true16 conversion
+// instructions. Integer-source conversions disallow FP abs/neg modifiers;
+// F16-source conversions keep them because VOP3Mods in TableGen makes those
+// modifiers part of the floating source operand.
+Error readCvt16HalfSelect(RaiseContext &Ctx, const DecodedInst &Di,
+                          OpResolver &Op, StringRef OpName, bool AllowFpSrcMods,
+                          Cvt16HalfSelect &Sel) {
+  if (Error Err = readOptionalVOP3F16SrcMods(Di, 0, OpName, Sel.SrcMods))
+    return Err;
+
+  if (!AllowFpSrcMods &&
+      (Sel.SrcMods & (SISrcMods::NEG | SISrcMods::ABS)) != 0) {
+    return RaiseFailure::unsupportedInstructionForm(
+        Di, "VOP1",
+        OpName +
+            " has unsupported integer source modifiers; only op_sel/dst_op_sel "
+            "half selection is modeled");
+  }
+
+  const MCRegisterInfo &MRI = *Ctx.Mc.RegInfo;
+  unsigned SrcSlot = Op.srcIdx(0);
+  Sel.SrcHi = (Sel.SrcMods & SISrcMods::OP_SEL_0) != 0 ||
+              (Di.isReg(SrcSlot) && AMDGPU::isHi16Reg(Di.getReg(SrcSlot), MRI));
+  Sel.DstHi = (Sel.SrcMods & SISrcMods::DST_OP_SEL) != 0 ||
+              (Di.isReg(0) && AMDGPU::isHi16Reg(Di.getReg(0), MRI));
+  return Error::success();
+}
+
+// Read the selected 16-bit source lane as integer bits.
+Value *readSelectedI16(RaiseContext &Ctx, OpResolver &Op,
+                       const Cvt16HalfSelect &Sel, StringRef Name) {
+  Value *Raw = Op.src(0);
+  if (Sel.SrcHi)
+    Raw = Ctx.B.CreateLShr(Raw, 16, Name + "_src_hi");
+  return Ctx.B.CreateTrunc(Raw, Type::getInt16Ty(Ctx.C));
+}
+
+// Read the selected 16-bit source lane as an F16 value and apply any decoded
+// floating-point source modifiers.
+Value *readSelectedF16(RaiseContext &Ctx, OpResolver &Op,
+                       const Cvt16HalfSelect &Sel, StringRef Name) {
+  Value *Bits = readSelectedI16(Ctx, Op, Sel, Name);
+  Value *V = Ctx.B.CreateBitCast(Bits, Ctx.F16Ty);
+  if ((Sel.SrcMods & SISrcMods::ABS) != 0)
+    V = Ctx.B.CreateUnaryIntrinsic(Intrinsic::fabs, V, nullptr, Name + "_abs");
+  if ((Sel.SrcMods & SISrcMods::NEG) != 0)
+    V = Ctx.B.CreateFNeg(V, Name + "_neg");
+  return V;
 }
 
 } // namespace
@@ -77,19 +136,82 @@ FunctionCallee getF32Intrinsic(RaiseContext &Ctx, Intrinsic::ID IID) {
 // extract), F16 two-src arith (add/sub/mul/min/max/mac/fmac), packed
 // F16 fmac, 16-bit min/max and reverse-operand shifts, byte pack,
 // V_BFREV_B32 / V_NOT_B32, and F32 single-src transcendentals
-// (rcp/exp/log/ldexp/sqrt/rsq/floor/ceil/trunc/rndne/fract).
+// (rcp/exp/log/sin/cos/ldexp/sqrt/rsq/floor/ceil/trunc/rndne/fract).
 //
 // Grouped here because each case is 1-5 lines of IR emission and they
 // would bloat the arithmetic / 3-src sub-handlers if interleaved.
 // Structured as a switch on CanonicalOp: cases are mutually exclusive and
 // ordering is not load-bearing.
-HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
-                                   OpResolver &Op) {
+Expected<HandlerResult>
+handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op) {
   HandlerResult Hr;
   Type *I16Ty = Type::getInt16Ty(Ctx.C);
   Type *HalfTy = Type::getHalfTy(Ctx.C);
 
   switch (Di.CanonOp) {
+  // ---- Register-relative moves (v_movrel{d,s,sd}_b32) ----
+  //
+  // These access a VGPR at an M0-relative index. M0 is uniform across
+  // lanes, so there is no cross-lane component -- this is a plain indexed
+  // register access. Because the reg file promotes VGPRs to SSA by index,
+  // the M0-relative index must be resolved at raise time; we use the M0
+  // constant shadow (RaiseContext::getM0Const), which covers the common
+  // unrolled-copy-loop idiom (e.g. CatArrayBatchedCopy). A data-dependent
+  // M0 has no statically-known index and is refused loudly (stubbed).
+  //
+  //   v_movreld_b32  vdst, vsrc : VGPR[base(vdst)+M0] = vsrc  (tied vdst_in)
+  //   v_movrels_b32  vdst, vsrc : vdst = VGPR[base(vsrc)+M0]
+  //   v_movrelsd_b32 vdst, vsrc : VGPR[base(vdst)+M0] = VGPR[base(vsrc)+M0]
+  case CanonicalOp::V_MOVRELD_B32:
+  case CanonicalOp::V_MOVRELS_B32:
+  case CanonicalOp::V_MOVRELSD_B32: {
+    unsigned Opc = Di.Inst.getOpcode();
+    int VdstIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::vdst);
+    int VsrcIdx = AMDGPU::getNamedOperandIdx(Opc, AMDGPU::OpName::src0);
+    if (VdstIdx < 0 || VsrcIdx < 0 || !Di.isReg(VdstIdx) ||
+        !Di.isReg(VsrcIdx)) {
+      return RaiseFailure::unsupportedInstructionForm(
+          Di, "VOP1", "v_movrel* missing vdst/vsrc register operand");
+    }
+    std::optional<uint64_t> M0 = Ctx.getM0Const();
+    if (!M0) {
+      // Data-dependent M0: no statically-known relative index. Refuse
+      // rather than emit an unbounded index cascade.
+      return RaiseFailure::unsupportedInstructionForm(
+          Di, "VOP1",
+          "v_movrel* with non-constant M0 (data-dependent register-relative "
+          "index) is not supported; only a raise-time-constant M0 is handled");
+    }
+    ParsedReg VdstBase = Ctx.parseReg(Di.getReg(VdstIdx), VdstIdx);
+    ParsedReg VsrcBase = Ctx.parseReg(Di.getReg(VsrcIdx), VsrcIdx);
+    auto InRange = [](long Idx) {
+      return Idx >= 0 && Idx < static_cast<long>(AllocaRegFile::KVGPRCap);
+    };
+    assert(*M0 <= UINT32_MAX && "M0 is a 32-bit hardware register");
+    long Rel = static_cast<long>(*M0);
+    bool RelDst = Di.CanonOp == CanonicalOp::V_MOVRELD_B32 ||
+                  Di.CanonOp == CanonicalOp::V_MOVRELSD_B32;
+    bool RelSrc = Di.CanonOp == CanonicalOp::V_MOVRELS_B32 ||
+                  Di.CanonOp == CanonicalOp::V_MOVRELSD_B32;
+    long DstIdx = VdstBase.BaseIdx + (RelDst ? Rel : 0);
+    long SrcIdx = VsrcBase.BaseIdx + (RelSrc ? Rel : 0);
+    if (!InRange(DstIdx) || !InRange(SrcIdx)) {
+      return RaiseFailure::unsupportedInstructionForm(
+          Di, "VOP1",
+          "v_movrel* M0-relative VGPR index out of range (MEMVIOL)");
+    }
+    // Read the value to move: vsrc's SSA value for V_MOVRELD; the
+    // relative-source VGPR for V_MOVRELS / V_MOVRELSD.
+    Value *Val = RelSrc ? Ctx.Regs.loadVGPR32(Ctx.B, static_cast<int>(SrcIdx))
+                        : Ctx.readOp32(Di, static_cast<unsigned>(VsrcIdx));
+    ParsedReg DstPr;
+    DstPr.RegKind = ParsedReg::VGPR;
+    DstPr.BaseIdx = static_cast<int>(DstIdx);
+    DstPr.WidthInDwords = 1;
+    Ctx.writeReg32(DstPr, Val);
+    Hr.Handled = true;
+    return Hr;
+  }
   // ---- F32 <-> integer conversions ----
   case CanonicalOp::V_CVT_F32_U32: {
     Value *R = Ctx.B.CreateUIToFP(Op.src(0), Ctx.F32Ty, "cvt");
@@ -131,20 +253,51 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
-  case CanonicalOp::V_CVT_F16_U16: {
-    Value *S = Ctx.B.CreateTrunc(Op.src(0), I16Ty);
-    Value *Res = Ctx.B.CreateUIToFP(S, Ctx.F16Ty, "cvt_f16_u16");
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateZExt(Ctx.B.CreateBitCast(Res, I16Ty),
-                                    Ctx.I32Ty));
+  case CanonicalOp::V_CVT_F16_U16:
+  case CanonicalOp::V_CVT_F16_I16: {
+    // True16 conversion: select one i16 source half, convert with the requested
+    // signedness, then merge the f16 result into the selected destination half.
+    bool IsSigned = Di.CanonOp == CanonicalOp::V_CVT_F16_I16;
+    StringRef OpName = IsSigned ? "v_cvt_f16_i16" : "v_cvt_f16_u16";
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+    Cvt16HalfSelect Sel;
+    if (Error Err = readCvt16HalfSelect(Ctx, Di, Op, OpName,
+                                        /*AllowFpSrcMods=*/false, Sel))
+      return Err;
+
+    Value *S = readSelectedI16(Ctx, Op, Sel, OpName);
+    Value *Res = IsSigned ? Ctx.B.CreateSIToFP(S, Ctx.F16Ty, "cvt_f16_i16")
+                          : Ctx.B.CreateUIToFP(S, Ctx.F16Ty, "cvt_f16_u16");
+    writeOpSelF16(Ctx, Op, Res, Sel.DstHi,
+                  IsSigned ? "cvt_f16_i16_merge_lo" : "cvt_f16_u16_merge_lo",
+                  IsSigned ? "cvt_f16_i16_merge_hi" : "cvt_f16_u16_merge_hi");
     Hr.Handled = true;
     return Hr;
   }
-  case CanonicalOp::V_CVT_U16_F16: {
-    Value *S = Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty),
-                                    Ctx.F16Ty);
-    Value *Res = Ctx.B.CreateFPToUI(S, I16Ty, "cvt_u16_f16");
-    Ctx.writeReg32(Op.dst(), Ctx.B.CreateZExt(Res, Ctx.I32Ty));
+  case CanonicalOp::V_CVT_U16_F16:
+  case CanonicalOp::V_CVT_I16_F16: {
+    // Hardware saturates f16-to-i16 conversions; plain fptoui/fptosi would be
+    // poison for out-of-range inputs.
+    bool IsSigned = Di.CanonOp == CanonicalOp::V_CVT_I16_F16;
+    StringRef OpName = IsSigned ? "v_cvt_i16_f16" : "v_cvt_u16_f16";
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+    Cvt16HalfSelect Sel;
+    if (Error Err = readCvt16HalfSelect(Ctx, Di, Op, OpName,
+                                        /*AllowFpSrcMods=*/true, Sel))
+      return Err;
+
+    Value *S = readSelectedF16(Ctx, Op, Sel, OpName);
+    Intrinsic::ID SatId =
+        IsSigned ? Intrinsic::fptosi_sat : Intrinsic::fptoui_sat;
+    Function *SatFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, SatId, {I16Ty, Ctx.F16Ty});
+    Value *Res = Ctx.B.CreateCall(SatFn, {S}, OpName);
+    writeSelectedI16Bits(
+        Ctx, Op.dst(), Res, Sel.DstHi,
+        IsSigned ? "cvt_i16_f16_merge_lo" : "cvt_u16_f16_merge_lo",
+        IsSigned ? "cvt_i16_f16_merge_hi" : "cvt_u16_f16_merge_hi");
     Hr.Handled = true;
     return Hr;
   }
@@ -160,42 +313,39 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   // named, so the lift is `trunc(lshr_if_hi(src0, 16), i16)` zero-extended
   // back to i32.
   case CanonicalOp::V_CVT_U32_U16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     unsigned Mods = Op.srcMod(0);
     constexpr unsigned AllowedMods = SISrcMods::OP_SEL_0;
-    if ((Mods & ~AllowedMods) != 0) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    if ((Mods & ~AllowedMods) != 0)
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "VOP1",
           "v_cvt_u32_u16 has unsupported source modifiers; only src0 "
           "op_sel (half select) is modeled");
-      return Hr;
-    }
+
     const MCRegisterInfo &MRI = *Ctx.Mc.RegInfo;
     unsigned SrcSlot = Di.SrcMap[0];
-    bool Src0SubHi = Di.isReg(SrcSlot) &&
-                     AMDGPU::isHi16Reg(Di.getReg(SrcSlot), MRI);
+    bool Src0SubHi =
+        Di.isReg(SrcSlot) && AMDGPU::isHi16Reg(Di.getReg(SrcSlot), MRI);
     bool Src0Hi = Src0SubHi || (Mods & SISrcMods::OP_SEL_0) != 0;
     Value *Raw = Op.src(0);
     if (Src0Hi)
       Raw = Ctx.B.CreateLShr(Raw, 16, "cvt_u32_u16_hi");
     Value *Half = Ctx.B.CreateTrunc(Raw, I16Ty);
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateZExt(Half, Ctx.I32Ty, "cvt_u32_u16"));
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateZExt(Half, Ctx.I32Ty, "cvt_u32_u16"));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_CVT_F32_F64: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (Di.HasDpp) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+    if (Di.HasDpp)
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "VOP1",
           "V_CVT_F32_F64 DPP has mixed source/destination widths; inactive "
           "lane preservation must be modeled as old-destination semantics, "
           "not the generic same-width DPP source wrapper");
-      return Hr;
-    }
     Value *Src = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
     Src = Op.applyMods(0, Src);
     Value *Result = Ctx.B.CreateFPTrunc(Src, Ctx.F32Ty, "cvt_f32_f64");
@@ -204,16 +354,14 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
   case CanonicalOp::V_CVT_F64_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (Di.HasDpp) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+    if (Di.HasDpp)
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "VOP1",
           "V_CVT_F64_F32 DPP has mixed source/destination widths; inactive "
           "lane preservation must be modeled as old-destination semantics, "
           "not the generic same-width DPP source wrapper");
-      return Hr;
-    }
     Value *Src = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Value *Result = Ctx.B.CreateFPExt(Src, Ctx.F64Ty, "cvt_f64_f32");
     Ctx.writeReg64(Op.dst(), Ctx.B.CreateBitCast(Result, Ctx.I64Ty));
@@ -221,37 +369,36 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
   case CanonicalOp::V_CVT_F32_UBYTE0: {
-    Value *Byte = Ctx.B.CreateAnd(Op.src(0),
-                                   ConstantInt::get(Ctx.I32Ty, 0xFF));
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
+    Value *Byte = Ctx.B.CreateAnd(Op.src(0), ConstantInt::get(Ctx.I32Ty, 0xFF));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_CVT_F32_UBYTE1: {
     Value *Byte = Ctx.B.CreateAnd(Ctx.B.CreateLShr(Op.src(0), 8),
-                                   ConstantInt::get(Ctx.I32Ty, 0xFF));
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
+                                  ConstantInt::get(Ctx.I32Ty, 0xFF));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_CVT_F32_UBYTE2: {
     Value *Byte = Ctx.B.CreateAnd(Ctx.B.CreateLShr(Op.src(0), 16),
-                                   ConstantInt::get(Ctx.I32Ty, 0xFF));
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
+                                  ConstantInt::get(Ctx.I32Ty, 0xFF));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_CVT_F32_UBYTE3: {
     Value *Byte = Ctx.B.CreateLShr(Op.src(0), 24);
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateUIToFP(Byte, Ctx.F32Ty), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
@@ -263,16 +410,24 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   case CanonicalOp::V_SUBREV_F16:
   case CanonicalOp::V_MAX_NUM_F16:
   case CanonicalOp::V_MIN_NUM_F16: {
-    Value *A = Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty),
-                                    Ctx.F16Ty);
-    Value *B = Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(1), I16Ty),
-                                    Ctx.F16Ty);
+    Value *A =
+        Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty), Ctx.F16Ty);
+    Value *B =
+        Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(1), I16Ty), Ctx.F16Ty);
     Value *Res = nullptr;
     switch (Di.CanonOp) {
-    case CanonicalOp::V_MUL_F16:    Res = Ctx.B.CreateFMul(A, B, "mul_f16"); break;
-    case CanonicalOp::V_ADD_F16:    Res = Ctx.B.CreateFAdd(A, B, "add_f16"); break;
-    case CanonicalOp::V_SUB_F16:    Res = Ctx.B.CreateFSub(A, B, "sub_f16"); break;
-    case CanonicalOp::V_SUBREV_F16: Res = Ctx.B.CreateFSub(B, A, "subrev_f16"); break;
+    case CanonicalOp::V_MUL_F16:
+      Res = Ctx.B.CreateFMul(A, B, "mul_f16");
+      break;
+    case CanonicalOp::V_ADD_F16:
+      Res = Ctx.B.CreateFAdd(A, B, "add_f16");
+      break;
+    case CanonicalOp::V_SUB_F16:
+      Res = Ctx.B.CreateFSub(A, B, "sub_f16");
+      break;
+    case CanonicalOp::V_SUBREV_F16:
+      Res = Ctx.B.CreateFSub(B, A, "subrev_f16");
+      break;
     case CanonicalOp::V_MAX_NUM_F16: {
       Function *Fn = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::maximumnum, {Ctx.F16Ty});
@@ -285,11 +440,11 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
       Res = Ctx.B.CreateCall(Fn, {A, B}, "min_f16");
       break;
     }
-    default: llvm_unreachable("filtered by outer switch");
+    default:
+      llvm_unreachable("filtered by outer switch");
     }
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateZExt(Ctx.B.CreateBitCast(Res, I16Ty),
-                                    Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(), Ctx.B.CreateZExt(Ctx.B.CreateBitCast(Res, I16Ty), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
@@ -299,10 +454,10 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     auto *V2f16 = FixedVectorType::get(Ctx.F16Ty, 2);
     Value *S0 = Ctx.B.CreateBitCast(Op.src(0), V2f16);
     Value *S1 = Ctx.B.CreateBitCast(Op.src(1), V2f16);
-    Value *Acc = Ctx.B.CreateBitCast(Ctx.Regs.readReg32(Ctx.B, Op.dst()),
-                                      V2f16);
-    Function *Fma = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::fma, {V2f16});
+    Value *Acc =
+        Ctx.B.CreateBitCast(Ctx.Regs.readReg32(Ctx.B, Op.dst()), V2f16);
+    Function *Fma =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::fma, {V2f16});
     Value *Res = Ctx.B.CreateCall(Fma, {S0, S1, Acc}, "pk_fmac");
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateBitCast(Res, Ctx.I32Ty));
     Hr.Handled = true;
@@ -312,15 +467,15 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   // ---- F16 MAC: dst = src0 * src1 + dst ----
   case CanonicalOp::V_MAC_F16:
   case CanonicalOp::V_FMAC_F16: {
-    Value *S0 = Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty),
-                                     Ctx.F16Ty);
-    Value *S1 = Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(1), I16Ty),
-                                     Ctx.F16Ty);
+    Value *S0 =
+        Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty), Ctx.F16Ty);
+    Value *S1 =
+        Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(1), I16Ty), Ctx.F16Ty);
     Value *Acc = Ctx.B.CreateBitCast(
         Ctx.B.CreateTrunc(Ctx.Regs.readReg32(Ctx.B, Op.dst()), I16Ty),
         Ctx.F16Ty);
-    Function *Fma = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::fma, {Ctx.F16Ty});
+    Function *Fma =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::fma, {Ctx.F16Ty});
     Value *Res = Ctx.B.CreateBitCast(
         Ctx.B.CreateCall(Fma, {S0, S1, Acc}, "mac_f16"), I16Ty);
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateZExt(Res, Ctx.I32Ty));
@@ -329,19 +484,19 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   }
 
   case CanonicalOp::V_FLOOR_F16: {
-    Value *S = Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty),
-                                    Ctx.F16Ty);
-    Function *Fn = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::floor, {Ctx.F16Ty});
-    Value *Res = Ctx.B.CreateBitCast(
-        Ctx.B.CreateCall(Fn, {S}, "floor_f16"), I16Ty);
+    Value *S =
+        Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty), Ctx.F16Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::floor,
+                                                     {Ctx.F16Ty});
+    Value *Res =
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(Fn, {S}, "floor_f16"), I16Ty);
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateZExt(Res, Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_LDEXP_F16: {
-    Value *S0 = Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty),
-                                     Ctx.F16Ty);
+    Value *S0 =
+        Ctx.B.CreateBitCast(Ctx.B.CreateTrunc(Op.srcF(0), I16Ty), Ctx.F16Ty);
     Value *S1 = Ctx.B.CreateTrunc(Op.src(1), I16Ty);
     Function *LdexpFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::ldexp, {Ctx.F16Ty, I16Ty});
@@ -352,19 +507,22 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
   case CanonicalOp::V_TANH_F16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
 
     bool DstHigh = false;
     unsigned Mods = 0;
-    if (!readOptionalVOP3F16SrcMods(Di, Hr, 0, "v_tanh_f16", Mods))
-      return Hr;
+    if (Error Err = readOptionalVOP3F16SrcMods(Di, 0, "v_tanh_f16", Mods))
+      return Err;
+
     DstHigh = (Mods & SISrcMods::DST_OP_SEL) != 0;
 
-    Value *Src = readOptionalOpSelF16(Ctx, Di, Op, Hr, 0, "v_tanh_f16");
-    if (!Src)
-      return Hr;
+    Expected<Value *> SrcOrErr =
+        readOptionalOpSelF16(Ctx, Di, Op, 0, "v_tanh_f16");
+    if (!SrcOrErr)
+      return SrcOrErr.takeError();
 
+    Value *Src = *SrcOrErr;
     Value *Result = nullptr;
     if (Ctx.TargetIsa.HasTanhInsts) {
       Function *TanhFn = Intrinsic::getOrInsertDeclaration(
@@ -382,6 +540,58 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     Hr.Handled = true;
     return Hr;
   }
+  // f16 unary rounding (ceil/trunc/rndne) and reciprocal (rcp). true16
+  // op_sel half-select like V_TANH_F16. ceil/trunc/rndne lower to the
+  // matching llvm.* intrinsic; rcp to llvm.amdgcn.rcp.f16 (native
+  // v_rcp_f16 on the target -- the hardware approximation, not a generic
+  // fdiv, mirroring V_RCP_F32).
+  case CanonicalOp::V_CEIL_F16:
+  case CanonicalOp::V_TRUNC_F16:
+  case CanonicalOp::V_RNDNE_F16:
+  case CanonicalOp::V_RCP_F16: {
+    StringRef OpName = Di.CanonOp == CanonicalOp::V_CEIL_F16    ? "v_ceil_f16"
+                       : Di.CanonOp == CanonicalOp::V_TRUNC_F16 ? "v_trunc_f16"
+                       : Di.CanonOp == CanonicalOp::V_RNDNE_F16 ? "v_rndne_f16"
+                                                                : "v_rcp_f16";
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    bool DstHigh = false;
+    unsigned Mods = 0;
+    if (Error Err = readOptionalVOP3F16SrcMods(Di, 0, OpName, Mods))
+      return Err;
+
+    DstHigh = (Mods & SISrcMods::DST_OP_SEL) != 0;
+
+    Expected<Value *> SrcOrErr = readOptionalOpSelF16(Ctx, Di, Op, 0, OpName);
+    if (!SrcOrErr)
+      return SrcOrErr.takeError();
+
+    Value *Src = *SrcOrErr;
+    Intrinsic::ID IID;
+    switch (Di.CanonOp) {
+    case CanonicalOp::V_CEIL_F16:
+      IID = Intrinsic::ceil;
+      break;
+    case CanonicalOp::V_TRUNC_F16:
+      IID = Intrinsic::trunc;
+      break;
+    case CanonicalOp::V_RNDNE_F16:
+      IID = Intrinsic::roundeven;
+      break;
+    case CanonicalOp::V_RCP_F16:
+      IID = Intrinsic::amdgcn_rcp;
+      break;
+    default:
+      llvm_unreachable("filtered by outer switch");
+    }
+    Function *Fn = Intrinsic::getOrInsertDeclaration(&Ctx.M, IID, {Ctx.F16Ty});
+    Value *Result = Ctx.B.CreateCall(Fn, {Src}, "f16_unary");
+    writeOpSelF16(Ctx, Op, Result, DstHigh, "f16_unary_merge_lo",
+                  "f16_unary_merge_hi");
+    Hr.Handled = true;
+    return Hr;
+  }
 
   // ---- 16-bit integer min/max ----
   case CanonicalOp::V_MAX_U16:
@@ -392,11 +602,20 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     Value *B = Ctx.B.CreateTrunc(Op.src(1), I16Ty);
     Value *Cmp = nullptr;
     switch (Di.CanonOp) {
-    case CanonicalOp::V_MAX_U16: Cmp = Ctx.B.CreateICmpUGT(A, B); break;
-    case CanonicalOp::V_MIN_U16: Cmp = Ctx.B.CreateICmpULT(A, B); break;
-    case CanonicalOp::V_MAX_I16: Cmp = Ctx.B.CreateICmpSGT(A, B); break;
-    case CanonicalOp::V_MIN_I16: Cmp = Ctx.B.CreateICmpSLT(A, B); break;
-    default: llvm_unreachable("filtered by outer switch");
+    case CanonicalOp::V_MAX_U16:
+      Cmp = Ctx.B.CreateICmpUGT(A, B);
+      break;
+    case CanonicalOp::V_MIN_U16:
+      Cmp = Ctx.B.CreateICmpULT(A, B);
+      break;
+    case CanonicalOp::V_MAX_I16:
+      Cmp = Ctx.B.CreateICmpSGT(A, B);
+      break;
+    case CanonicalOp::V_MIN_I16:
+      Cmp = Ctx.B.CreateICmpSLT(A, B);
+      break;
+    default:
+      llvm_unreachable("filtered by outer switch");
     }
     Value *Res = Ctx.B.CreateSelect(Cmp, A, B, "i16sel");
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateZExt(Res, Ctx.I32Ty));
@@ -417,11 +636,20 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     Value *B = Ctx.B.CreateTrunc(Op.src(1), I16Ty);
     Value *Res = nullptr;
     switch (Di.CanonOp) {
-    case CanonicalOp::V_ADD_U16:    Res = Ctx.B.CreateAdd(A, B, "vadd16"); break;
-    case CanonicalOp::V_SUB_U16:    Res = Ctx.B.CreateSub(A, B, "vsub16"); break;
-    case CanonicalOp::V_SUBREV_U16: Res = Ctx.B.CreateSub(B, A, "vsubrev16"); break;
-    case CanonicalOp::V_MUL_LO_U16: Res = Ctx.B.CreateMul(A, B, "vmullo16"); break;
-    default: llvm_unreachable("filtered by outer switch");
+    case CanonicalOp::V_ADD_U16:
+      Res = Ctx.B.CreateAdd(A, B, "vadd16");
+      break;
+    case CanonicalOp::V_SUB_U16:
+      Res = Ctx.B.CreateSub(A, B, "vsub16");
+      break;
+    case CanonicalOp::V_SUBREV_U16:
+      Res = Ctx.B.CreateSub(B, A, "vsubrev16");
+      break;
+    case CanonicalOp::V_MUL_LO_U16:
+      Res = Ctx.B.CreateMul(A, B, "vmullo16");
+      break;
+    default:
+      llvm_unreachable("filtered by outer switch");
     }
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateZExt(Res, Ctx.I32Ty));
     Hr.Handled = true;
@@ -433,14 +661,21 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   case CanonicalOp::V_LSHRREV_B16:
   case CanonicalOp::V_LSHLREV_B16: {
     Value *Shamt = Ctx.B.CreateAnd(Ctx.B.CreateTrunc(Op.src(0), I16Ty),
-                                    ConstantInt::get(I16Ty, 0xF));
+                                   ConstantInt::get(I16Ty, 0xF));
     Value *Base = Ctx.B.CreateTrunc(Op.src(1), I16Ty);
     Value *Res = nullptr;
     switch (Di.CanonOp) {
-    case CanonicalOp::V_ASHRREV_I16: Res = Ctx.B.CreateAShr(Base, Shamt, "vashr16"); break;
-    case CanonicalOp::V_LSHRREV_B16: Res = Ctx.B.CreateLShr(Base, Shamt, "vlshr16"); break;
-    case CanonicalOp::V_LSHLREV_B16: Res = Ctx.B.CreateShl(Base, Shamt, "vlshl16"); break;
-    default: llvm_unreachable("filtered by outer switch");
+    case CanonicalOp::V_ASHRREV_I16:
+      Res = Ctx.B.CreateAShr(Base, Shamt, "vashr16");
+      break;
+    case CanonicalOp::V_LSHRREV_B16:
+      Res = Ctx.B.CreateLShr(Base, Shamt, "vlshr16");
+      break;
+    case CanonicalOp::V_LSHLREV_B16:
+      Res = Ctx.B.CreateShl(Base, Shamt, "vlshl16");
+      break;
+    default:
+      llvm_unreachable("filtered by outer switch");
     }
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateZExt(Res, Ctx.I32Ty));
     Hr.Handled = true;
@@ -448,8 +683,7 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   }
 
   case CanonicalOp::V_PACK_B32_F16: {
-    Value *Lo = Ctx.B.CreateAnd(Op.src(0),
-                                 ConstantInt::get(Ctx.I32Ty, 0xFFFF));
+    Value *Lo = Ctx.B.CreateAnd(Op.src(0), ConstantInt::get(Ctx.I32Ty, 0xFFFF));
     Value *Hi = Ctx.B.CreateShl(
         Ctx.B.CreateAnd(Op.src(1), ConstantInt::get(Ctx.I32Ty, 0xFFFF)), 16);
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateOr(Lo, Hi, "pack_f16"));
@@ -461,8 +695,7 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   case CanonicalOp::V_BFREV_B32: {
     Function *Brev = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::bitreverse, {Ctx.I32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateCall(Brev, {Op.src(0)}, "bfrev"));
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateCall(Brev, {Op.src(0)}, "bfrev"));
     Hr.Handled = true;
     return Hr;
   }
@@ -481,27 +714,27 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   // v_ffbh_i32_e32 (no fixup needed -- the intrinsic and the hardware
   // share the "-1 on uniform-sign input" convention).
   case CanonicalOp::V_FFBH_U32: {
-    Function *Ctlz = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::ctlz, {Ctx.I32Ty});
+    Function *Ctlz =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::ctlz, {Ctx.I32Ty});
     Value *Src = Op.src(0);
-    Value *Raw = Ctx.B.CreateCall(
-        Ctlz, {Src, ConstantInt::getFalse(Ctx.I1Ty)}, "ffbh_u32_raw");
+    Value *Raw = Ctx.B.CreateCall(Ctlz, {Src, ConstantInt::getFalse(Ctx.I1Ty)},
+                                  "ffbh_u32_raw");
     Value *IsZero = Ctx.B.CreateICmpEQ(Src, Ctx.B.getInt32(0), "ffbh_u32_zero");
-    Value *Res = Ctx.B.CreateSelect(IsZero, Ctx.B.getInt32(-1), Raw,
-                                    "ffbh_u32");
+    Value *Res =
+        Ctx.B.CreateSelect(IsZero, Ctx.B.getInt32(-1), Raw, "ffbh_u32");
     Ctx.writeReg32(Op.dst(), Res);
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_FFBL_B32: {
-    Function *Cttz = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::cttz, {Ctx.I32Ty});
+    Function *Cttz =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::cttz, {Ctx.I32Ty});
     Value *Src = Op.src(0);
-    Value *Raw = Ctx.B.CreateCall(
-        Cttz, {Src, ConstantInt::getFalse(Ctx.I1Ty)}, "ffbl_b32_raw");
+    Value *Raw = Ctx.B.CreateCall(Cttz, {Src, ConstantInt::getFalse(Ctx.I1Ty)},
+                                  "ffbl_b32_raw");
     Value *IsZero = Ctx.B.CreateICmpEQ(Src, Ctx.B.getInt32(0), "ffbl_b32_zero");
-    Value *Res = Ctx.B.CreateSelect(IsZero, Ctx.B.getInt32(-1), Raw,
-                                    "ffbl_b32");
+    Value *Res =
+        Ctx.B.CreateSelect(IsZero, Ctx.B.getInt32(-1), Raw, "ffbl_b32");
     Ctx.writeReg32(Op.dst(), Res);
     Hr.Handled = true;
     return Hr;
@@ -509,8 +742,7 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   case CanonicalOp::V_FFBH_I32: {
     Function *Sffbh = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_sffbh, {Ctx.I32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateCall(Sffbh, {Op.src(0)}, "ffbh_i32"));
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateCall(Sffbh, {Op.src(0)}, "ffbh_i32"));
     Hr.Handled = true;
     return Hr;
   }
@@ -521,16 +753,17 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     Value *Src = Op.src(0);
     Value *Res;
     if (Ctx.TargetIsa.HasPrngInst) {
-      Function *PrngFn = Intrinsic::getOrInsertDeclaration(
-          &Ctx.M, Intrinsic::amdgcn_prng_b32);
+      Function *PrngFn =
+          Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::amdgcn_prng_b32);
       Res = Ctx.B.CreateCall(PrngFn, {Src}, "prng_b32");
     } else {
-      Value *Shl = Ctx.B.CreateShl(Src, ConstantInt::get(Ctx.I32Ty, 1),
-                                   "prng_shl");
-      Value *Neg = Ctx.B.CreateICmpSLT(Src, ConstantInt::get(Ctx.I32Ty, 0),
-                                       "prng_neg");
-      Value *Tap = Ctx.B.CreateSelect(Neg, ConstantInt::get(Ctx.I32Ty, 197),
-                                      ConstantInt::get(Ctx.I32Ty, 0), "prng_tap");
+      Value *Shl =
+          Ctx.B.CreateShl(Src, ConstantInt::get(Ctx.I32Ty, 1), "prng_shl");
+      Value *Neg =
+          Ctx.B.CreateICmpSLT(Src, ConstantInt::get(Ctx.I32Ty, 0), "prng_neg");
+      Value *Tap =
+          Ctx.B.CreateSelect(Neg, ConstantInt::get(Ctx.I32Ty, 197),
+                             ConstantInt::get(Ctx.I32Ty, 0), "prng_tap");
       Res = Ctx.B.CreateXor(Shl, Tap, "prng_b32");
     }
     Ctx.writeReg32(Op.dst(), Res);
@@ -540,8 +773,9 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
 
   // ---- F32 scalar math / rounding ----
   case CanonicalOp::V_RCP_IFLAG_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Value *R = Ctx.B.CreateFDiv(ConstantFP::get(Ctx.F32Ty, 1.0), S, "rcp");
     Ctx.writeReg32(Op.dst(), Ctx.B.CreateBitCast(R, Ctx.I32Ty));
@@ -550,73 +784,96 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   }
   case CanonicalOp::V_RCP_F32:
   case CanonicalOp::V_S_RCP_F32: {
-    if (Di.CanonOp == CanonicalOp::V_S_RCP_F32 &&
-        !requireDefaultPseudoScalarOutputMods(Di, Hr))
-      return Hr;
-    if (Di.CanonOp == CanonicalOp::V_RCP_F32 &&
-        !requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Di.CanonOp == CanonicalOp::V_S_RCP_F32)
+      if (Error Err = requireDefaultPseudoScalarOutputMods(Di))
+        return Err;
+
+    if (Di.CanonOp == CanonicalOp::V_RCP_F32)
+      if (Error Err = requireDefaultOutputModsIfPresent(Di))
+        return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *RcpFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_rcp, {Ctx.F32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(RcpFn, {S}, "rcp"), Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(RcpFn, {S}, "rcp"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_EXP_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *Exp2Fn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_exp2, {Ctx.F32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(Exp2Fn, {S}, "exp"), Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(Exp2Fn, {S}, "exp"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_S_EXP_F32: {
-    if (!requireDefaultPseudoScalarOutputMods(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultPseudoScalarOutputMods(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *Exp2Fn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_exp2, {Ctx.F32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(Exp2Fn, {S}, "s_exp"), Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(Exp2Fn, {S}, "s_exp"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_LOG_F32:
   case CanonicalOp::V_S_LOG_F32: {
-    if (Di.CanonOp == CanonicalOp::V_S_LOG_F32 &&
-        !requireDefaultPseudoScalarOutputMods(Di, Hr))
-      return Hr;
-    if (Di.CanonOp == CanonicalOp::V_LOG_F32 &&
-        !requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Di.CanonOp == CanonicalOp::V_S_LOG_F32)
+      if (Error Err = requireDefaultPseudoScalarOutputMods(Di))
+        return Err;
+
+    if (Di.CanonOp == CanonicalOp::V_LOG_F32)
+      if (Error Err = requireDefaultOutputModsIfPresent(Di))
+        return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *Log2Fn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_log, {Ctx.F32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(Log2Fn, {S}, "log"), Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(Log2Fn, {S}, "log"), Ctx.I32Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_SIN_F32:
+  case CanonicalOp::V_COS_F32: {
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+    Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
+    bool IsSin = Di.CanonOp == CanonicalOp::V_SIN_F32;
+    Intrinsic::ID Intrin =
+        IsSin ? Intrinsic::amdgcn_sin : Intrinsic::amdgcn_cos;
+    const char *Name = IsSin ? "sin" : "cos";
+    Function *TrigFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrin, {Ctx.F32Ty});
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(TrigFn, {S}, Name), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_TANH_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     if (Ctx.TargetIsa.HasTanhInsts) {
       Function *TanhFn = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_tanh, {Ctx.F32Ty});
       Ctx.writeReg32(Op.dst(),
-                     Ctx.B.CreateBitCast(
-                         Ctx.B.CreateCall(TanhFn, {S}, "tanh"),
-                         Ctx.I32Ty));
+                     Ctx.B.CreateBitCast(Ctx.B.CreateCall(TanhFn, {S}, "tanh"),
+                                         Ctx.I32Ty));
       Hr.Handled = true;
       return Hr;
     }
@@ -627,71 +884,85 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     FunctionCallee TanhFn = declareOCMLTanhF32(Ctx.M);
     Ctx.writeReg32(Op.dst(),
                    Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(TanhFn, {S}, "ocml.tanh"),
-                       Ctx.I32Ty));
+                       Ctx.B.CreateCall(TanhFn, {S}, "ocml.tanh"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_LDEXP_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S0 = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Value *S1 = Op.src(1);
     Function *LdexpFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::ldexp, {Ctx.F32Ty, Ctx.I32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(LdexpFn, {S0, S1}, "ldexp"),
-                       Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(), Ctx.B.CreateBitCast(
+                      Ctx.B.CreateCall(LdexpFn, {S0, S1}, "ldexp"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_SQRT_F32:
   case CanonicalOp::V_S_SQRT_F32: {
-    if (Di.CanonOp == CanonicalOp::V_S_SQRT_F32 &&
-        !requireDefaultPseudoScalarOutputMods(Di, Hr))
-      return Hr;
-    if (Di.CanonOp == CanonicalOp::V_SQRT_F32 &&
-        !requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Di.CanonOp == CanonicalOp::V_S_SQRT_F32)
+      if (Error Err = requireDefaultPseudoScalarOutputMods(Di))
+        return Err;
+
+    if (Di.CanonOp == CanonicalOp::V_SQRT_F32)
+      if (Error Err = requireDefaultOutputModsIfPresent(Di))
+        return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *SqrtFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_sqrt, {Ctx.F32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(SqrtFn, {S}, "sqrt"), Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(SqrtFn, {S}, "sqrt"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_RSQ_F32:
   case CanonicalOp::V_S_RSQ_F32: {
-    if (Di.CanonOp == CanonicalOp::V_S_RSQ_F32 &&
-        !requireDefaultPseudoScalarOutputMods(Di, Hr))
-      return Hr;
-    if (Di.CanonOp == CanonicalOp::V_RSQ_F32 &&
-        !requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Di.CanonOp == CanonicalOp::V_S_RSQ_F32)
+      if (Error Err = requireDefaultPseudoScalarOutputMods(Di))
+        return Err;
+
+    if (Di.CanonOp == CanonicalOp::V_RSQ_F32)
+      if (Error Err = requireDefaultOutputModsIfPresent(Di))
+        return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *RsqFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_rsq, {Ctx.F32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(RsqFn, {S}, "rsq"), Ctx.I32Ty));
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(RsqFn, {S}, "rsq"), Ctx.I32Ty));
+    Hr.Handled = true;
+    return Hr;
+  }
+  case CanonicalOp::V_FREXP_EXP_I32_F32: {
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+    Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
+    Function *Fn = Intrinsic::getOrInsertDeclaration(
+        &Ctx.M, Intrinsic::amdgcn_frexp_exp, {Ctx.I32Ty, Ctx.F32Ty});
+    Value *Exp = Ctx.B.CreateCall(Fn, {S}, "frexp_exp");
+    Ctx.writeReg32(Op.dst(), Exp);
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_FREXP_EXP_I32_F64: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (Di.HasDpp) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Di.HasDpp)
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "VOP1",
           "V_FREXP_EXP_I32_F64 DPP has mixed source/destination widths "
           "(f64 source, i32 destination); inactive lane preservation must "
           "be modeled as 32-bit old-destination semantics, not the generic "
           "same-width DPP source wrapper");
-      return Hr;
-    }
+
     Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
     Function *Fn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_frexp_exp, {Ctx.I32Ty, Ctx.F64Ty});
@@ -704,139 +975,152 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
   // bf16 transcendentals: widen to f32, dispatch the f32 intrinsic, narrow
   // back. v_tanh_bf16 has no f32 hardware, so it routes through OCML.
   case CanonicalOp::V_RCP_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(
-            Ctx, Op, Hr, getF32Intrinsic(Ctx, Intrinsic::amdgcn_rcp),
-            "rcp_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, getF32Intrinsic(Ctx, Intrinsic::amdgcn_rcp), "rcp_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_RSQ_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(
-            Ctx, Op, Hr, getF32Intrinsic(Ctx, Intrinsic::amdgcn_rsq),
-            "rsq_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, getF32Intrinsic(Ctx, Intrinsic::amdgcn_rsq), "rsq_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_SQRT_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(
-            Ctx, Op, Hr, getF32Intrinsic(Ctx, Intrinsic::amdgcn_sqrt),
-            "sqrt_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, getF32Intrinsic(Ctx, Intrinsic::amdgcn_sqrt), "sqrt_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_LOG_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(
-            Ctx, Op, Hr, getF32Intrinsic(Ctx, Intrinsic::amdgcn_log),
-            "log_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, getF32Intrinsic(Ctx, Intrinsic::amdgcn_log), "log_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_EXP_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(
-            Ctx, Op, Hr, getF32Intrinsic(Ctx, Intrinsic::amdgcn_exp2),
-            "exp_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, getF32Intrinsic(Ctx, Intrinsic::amdgcn_exp2), "exp_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_COS_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(
-            Ctx, Op, Hr, getF32Intrinsic(Ctx, Intrinsic::amdgcn_cos),
-            "cos_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, getF32Intrinsic(Ctx, Intrinsic::amdgcn_cos), "cos_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_SIN_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(
-            Ctx, Op, Hr, getF32Intrinsic(Ctx, Intrinsic::amdgcn_sin),
-            "sin_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, getF32Intrinsic(Ctx, Intrinsic::amdgcn_sin), "sin_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_TANH_BF16: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
-    if (failed(emitBF16UnaryViaF32Callee(Ctx, Op, Hr, declareOCMLTanhF32(Ctx.M),
-                                   "tanh_bf16")))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
+    if (Error Err = emitBF16UnaryViaF32Callee(
+            Ctx, Op, declareOCMLTanhF32(Ctx.M), "tanh_bf16"))
+      return Err;
+
     Hr.Handled = true;
     return Hr;
   }
 
   case CanonicalOp::V_FLOOR_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *FloorFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::floor, {Ctx.F32Ty});
     Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(FloorFn, {S}, "floor"), Ctx.I32Ty));
+                   Ctx.B.CreateBitCast(Ctx.B.CreateCall(FloorFn, {S}, "floor"),
+                                       Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_CEIL_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
-    Function *CeilFn = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::ceil, {Ctx.F32Ty});
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(CeilFn, {S}, "ceil"), Ctx.I32Ty));
+    Function *CeilFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::ceil, {Ctx.F32Ty});
+    Ctx.writeReg32(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(CeilFn, {S}, "ceil"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_FLOOR_F64: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Op.applyMods(0, Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty));
     Function *FloorFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::floor, {Ctx.F64Ty});
     Ctx.writeReg64(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(FloorFn, {S}, "floor"), Ctx.I64Ty));
+                   Ctx.B.CreateBitCast(Ctx.B.CreateCall(FloorFn, {S}, "floor"),
+                                       Ctx.I64Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_CEIL_F64: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
     S = Op.applyMods(0, S);
-    Function *CeilFn = Intrinsic::getOrInsertDeclaration(
-        &Ctx.M, Intrinsic::ceil, {Ctx.F64Ty});
-    Ctx.writeReg64(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(CeilFn, {S}, "ceil"), Ctx.I64Ty));
+    Function *CeilFn =
+        Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::ceil, {Ctx.F64Ty});
+    Ctx.writeReg64(
+        Op.dst(),
+        Ctx.B.CreateBitCast(Ctx.B.CreateCall(CeilFn, {S}, "ceil"), Ctx.I64Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_CVT_I32_F64: {
     // Saturates out-of-range f64 to INT_MIN/INT_MAX and maps NaN to 0, so
     // lower to fptosi.sat rather than plain fptosi (which is UB on overflow).
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
     Value *S = Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty);
     S = Op.applyMods(0, S);
     Function *SatFn = Intrinsic::getOrInsertDeclaration(
@@ -846,91 +1130,93 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
   case CanonicalOp::V_TRUNC_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *TruncFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::trunc, {Ctx.F32Ty});
     Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(TruncFn, {S}, "trunc"), Ctx.I32Ty));
+                   Ctx.B.CreateBitCast(Ctx.B.CreateCall(TruncFn, {S}, "trunc"),
+                                       Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_RNDNE_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *RoundEvenFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::roundeven, {Ctx.F32Ty});
-    Ctx.writeReg32(
-        Op.dst(),
-        Ctx.B.CreateBitCast(Ctx.B.CreateCall(RoundEvenFn, {S}, "rndne"),
-                            Ctx.I32Ty));
+    Ctx.writeReg32(Op.dst(),
+                   Ctx.B.CreateBitCast(
+                       Ctx.B.CreateCall(RoundEvenFn, {S}, "rndne"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_TRUNC_F64: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Op.applyMods(0, Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty));
     Function *TruncFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::trunc, {Ctx.F64Ty});
     Ctx.writeReg64(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateCall(TruncFn, {S}, "trunc"), Ctx.I64Ty));
+                   Ctx.B.CreateBitCast(Ctx.B.CreateCall(TruncFn, {S}, "trunc"),
+                                       Ctx.I64Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_RNDNE_F64: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Op.applyMods(0, Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty));
     Function *RoundEvenFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::roundeven, {Ctx.F64Ty});
-    Ctx.writeReg64(
-        Op.dst(),
-        Ctx.B.CreateBitCast(Ctx.B.CreateCall(RoundEvenFn, {S}, "rndne"),
-                            Ctx.I64Ty));
+    Ctx.writeReg64(Op.dst(),
+                   Ctx.B.CreateBitCast(
+                       Ctx.B.CreateCall(RoundEvenFn, {S}, "rndne"), Ctx.I64Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_FREXP_MANT_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *Fn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_frexp_mant, {Ctx.F32Ty});
-    Ctx.writeReg32(
-        Op.dst(),
-        Ctx.B.CreateBitCast(Ctx.B.CreateCall(Fn, {S}, "frexp_mant"),
-                            Ctx.I32Ty));
+    Ctx.writeReg32(Op.dst(),
+                   Ctx.B.CreateBitCast(Ctx.B.CreateCall(Fn, {S}, "frexp_mant"),
+                                       Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_FREXP_MANT_F64: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Op.applyMods(0, Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty));
     Function *Fn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_frexp_mant, {Ctx.F64Ty});
-    Ctx.writeReg64(
-        Op.dst(),
-        Ctx.B.CreateBitCast(Ctx.B.CreateCall(Fn, {S}, "frexp_mant"),
-                            Ctx.I64Ty));
+    Ctx.writeReg64(Op.dst(),
+                   Ctx.B.CreateBitCast(Ctx.B.CreateCall(Fn, {S}, "frexp_mant"),
+                                       Ctx.I64Ty));
     Hr.Handled = true;
     return Hr;
   }
   case CanonicalOp::V_FRACT_F32: {
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Ctx.B.CreateBitCast(Op.srcF(0), Ctx.F32Ty);
     Function *FloorFn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::floor, {Ctx.F32Ty});
     Value *Fl = Ctx.B.CreateCall(FloorFn, {S}, "floor");
-    Ctx.writeReg32(Op.dst(),
-                   Ctx.B.CreateBitCast(
-                       Ctx.B.CreateFSub(S, Fl, "fract"), Ctx.I32Ty));
+    Ctx.writeReg32(Op.dst(), Ctx.B.CreateBitCast(
+                                 Ctx.B.CreateFSub(S, Fl, "fract"), Ctx.I32Ty));
     Hr.Handled = true;
     return Hr;
   }
@@ -938,8 +1224,9 @@ HandlerResult handleValuSmallOps(RaiseContext &Ctx, const DecodedInst &Di,
     // Native llvm.amdgcn.fract.f64: clamps the result to the largest
     // value < 1.0, matching hardware for near-integer negatives where a
     // plain x - floor(x) would round up to 1.0.
-    if (!requireDefaultOutputModsIfPresent(Di, Hr))
-      return Hr;
+    if (Error Err = requireDefaultOutputModsIfPresent(Di))
+      return Err;
+
     Value *S = Op.applyMods(0, Ctx.B.CreateBitCast(Op.src64(0), Ctx.F64Ty));
     Function *Fn = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_fract, {Ctx.F64Ty});

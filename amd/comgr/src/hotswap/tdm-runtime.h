@@ -29,6 +29,7 @@
 // behaviour exactly.
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Error.h"
 
 namespace llvm {
 class FunctionCallee;
@@ -38,7 +39,7 @@ class Module;
 namespace COMGR::hotswap {
 
 // Stable C-linkage names emitted by `runtime/tdm.hip`.
-inline constexpr llvm::StringRef kTDMLoadSymbol  = "hotswap_tdm_load_to_lds";
+inline constexpr llvm::StringRef kTDMLoadSymbol = "hotswap_tdm_load_to_lds";
 inline constexpr llvm::StringRef kTDMStoreSymbol = "hotswap_tdm_store_from_lds";
 
 // Declare (without body) the helper functions in `M`. Signature carries
@@ -65,14 +66,13 @@ bool tdmRuntimeAvailable();
 // the raiser to decide whether a link-merge is required.
 bool moduleUsesTDMRuntime(const llvm::Module &M);
 
-// Parse the embedded `.bc` and link it into `M`. `targetISA` is
+// Parse the embedded `.bc` and link it into `M`. `TargetIsa` is
 // informational today (we ship gfx942-only bitcode for v1); future
-// per-target dispatch will key on it. Returns true on success; on
-// failure logs to `llvm::errs()` and returns false. The caller MUST
-// treat a false return as a hard raise failure -- the unresolved
+// per-target dispatch will key on it. On failure returns an Error; the
+// caller MUST treat any error as a hard raise failure -- the unresolved
 // `CallInst`s emitted by the handler would otherwise reach `llc` as
 // undefined externals.
-bool linkTDMRuntime(llvm::Module &M, llvm::StringRef TargetIsa);
+llvm::Error linkTDMRuntime(llvm::Module &M, llvm::StringRef TargetIsa);
 
 } // namespace COMGR::hotswap
 

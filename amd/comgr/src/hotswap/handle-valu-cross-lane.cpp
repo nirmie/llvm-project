@@ -11,7 +11,7 @@
 #include "canonical-op.h"
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h" // AMDGPU::OpName
-#include "SIDefines.h"                        // SISrcMods::OP_SEL_0
+#include "SIDefines.h"                       // SISrcMods::OP_SEL_0
 #include "Utils/AMDGPUBaseInfo.h"
 
 #include "llvm/ADT/Twine.h"
@@ -27,7 +27,7 @@ namespace COMGR::hotswap {
 // Cross-lane VALU primitives -- the subset of VALU opcodes whose result
 // in lane L depends on values held by lane L' != L. Isolated from the
 // rest of handleVALU because this is exactly the surface the cross-
-// wave strategy (hotswap/docs/wave-size-translation.md §§5.3 and 7)
+// wave strategy (hotswap/docs/wave-size-translation.md sec. sec. 5.3 and 7)
 // keeps iterating on: every rewrite from the "wave-size-baked cross-
 // lane" rewrite table lands in this file, not scattered through the
 // VALU arithmetic sections.
@@ -38,7 +38,7 @@ namespace COMGR::hotswap {
 // selector is a silent miscompile for any kernel that feeds divergent
 // operands into the primitive. Several permlane variants here are
 // known broken (see the pending-rewrite table in wave-size-
-// translation.md §7); they stay same-lane for now but any new cross-
+// translation.md sec. 7); they stay same-lane for now but any new cross-
 // lane CanonicalOp must be modelled correctly before landing.
 
 // Shared `ds_bpermute`-based emulation of the `VOP_PERMLANE_SWAP`
@@ -82,17 +82,17 @@ namespace COMGR::hotswap {
 // The corpus patterns (e32 form, EXEC=full at the swap site) are
 // bit-exact correct under this emulation; fi/bc are accepted
 // without inspection and the EXEC=full assumption is documented
-// here.  P4.b future-hardening (wave-size-translation.md §10): a
+// here.  P4.b future-hardening (wave-size-translation.md sec. 10): a
 // "true fi=0 emulation" would zero inactive lanes' VGPR
 // contribution before the bpermute via `select EXEC[L], src, 0`,
 // at the cost of two extra selects per swap; a static alternative
 // is a classifier check that proves EXEC=full at the swap site
 // and refuses otherwise.  Today's corpus invariant makes both
 // deferrable.
-static HandlerResult
+static Expected<HandlerResult>
 emitPermLaneSwapEmulation(RaiseContext &Ctx, const DecodedInst &Di,
-                           OpResolver &Op, uint32_t PartnerXorMask,
-                           const char *SsaPrefix) {
+                          OpResolver &Op, uint32_t PartnerXorMask,
+                          const char *SsaPrefix) {
   HandlerResult Hr;
 
   // Operand-table contract (same for every `VOP_PERMLANE_SWAP`
@@ -104,18 +104,17 @@ emitPermLaneSwapEmulation(RaiseContext &Ctx, const DecodedInst &Di,
   // slot) and `op.src(0)` (which `buildSrcMap` keeps as src0 after
   // the `vdst_in` elision).  Two outputs, two tied inputs, both
   // carried on VGPRs.
-  int Src0OutIdx = AMDGPU::getNamedOperandIdx(Di.Inst.getOpcode(),
-                                               AMDGPU::OpName::src0_out);
+  int Src0OutIdx =
+      AMDGPU::getNamedOperandIdx(Di.Inst.getOpcode(), AMDGPU::OpName::src0_out);
   if (Src0OutIdx < 0 ||
       static_cast<unsigned>(Src0OutIdx) >= Di.Inst.getNumOperands() ||
       !Di.Inst.getOperand(static_cast<unsigned>(Src0OutIdx)).isReg()) {
-    std::string Msg = std::string(Di.Mnemonic) +
-                      " missing OpName::src0_out register operand -- "
+    return RaiseFailure::unsupportedInstructionForm(
+        Di, "VALU",
+        Di.Mnemonic + " missing OpName::src0_out register operand -- "
                       "operand-table mismatch (expected the "
                       "VOP_PERMLANE_SWAP profile's second-output "
-                      "operand-table slot to be a register)";
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(Di, "VALU", Msg);
-    return Hr;
+                      "operand-table slot to be a register)");
   }
   ParsedReg VdstReg = Op.dst();
   // src0_out is the second output but is tied to src0: it must land in src0's
@@ -142,17 +141,16 @@ emitPermLaneSwapEmulation(RaiseContext &Ctx, const DecodedInst &Di,
   // source lane's LDS slot (LDS slot size = 4 bytes for a 32-bit
   // dword).
   Value *LaneId = Ctx.emitLaneIdx();
-  Value *Partner = Ctx.B.CreateXor(
-      LaneId, Ctx.B.getInt32(PartnerXorMask),
-      Twine(SsaPrefix) + "_partner");
-  Value *BpermIdx = Ctx.B.CreateShl(Partner, Ctx.B.getInt32(2),
-                                     Twine(SsaPrefix) + "_addr");
+  Value *Partner = Ctx.B.CreateXor(LaneId, Ctx.B.getInt32(PartnerXorMask),
+                                   Twine(SsaPrefix) + "_partner");
+  Value *BpermIdx =
+      Ctx.B.CreateShl(Partner, Ctx.B.getInt32(2), Twine(SsaPrefix) + "_addr");
 
   // Two emission shapes gated by source wave size, both emitting
   // TWO `ds_bpermute` calls sharing `bpermIdx`:
   //
   //   * WAVE32 source -- ASYMMETRIC per-lane select matching the
-  //     MI400 Shader Programming Guide § V_PERMLANE16_SWAP_B32
+  //     MI400 Shader Programming Guide sec. V_PERMLANE16_SWAP_B32
   //     pragma (only two of the four 16-lane rows move).
   //
   //   * WAVE64 source -- SYMMETRIC cross-wired bpermute pair
@@ -183,13 +181,13 @@ emitPermLaneSwapEmulation(RaiseContext &Ctx, const DecodedInst &Di,
   // held pre-Session-8 for the fi=0 / bc=0 assumption documented
   // in the top-of-function block comment; the asymmetric arm
   // does not widen the divergent-EXEC contract.
-  Function *Bperm = Intrinsic::getOrInsertDeclaration(
-      &Ctx.M, Intrinsic::amdgcn_ds_bpermute);
+  Function *Bperm =
+      Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::amdgcn_ds_bpermute);
   Value *NewVdst = nullptr;
   Value *NewSrc0Out = nullptr;
   if (Ctx.Isa.isWave32()) {
     // Asymmetric gfx1250 semantic of `v_permlane16_swap_b32`
-    // (MI400 Shader Programming Guide § V_PERMLANE16_SWAP_B32
+    // (MI400 Shader Programming Guide sec. V_PERMLANE16_SWAP_B32
     // pragma, verbatim):
     //
     //   // Lanes 0:15 of src0 and lanes 16:31 of vdst swapped.
@@ -209,26 +207,21 @@ emitPermLaneSwapEmulation(RaiseContext &Ctx, const DecodedInst &Di,
     //                             :  src0_in[L]             // UNCHANGED
     //
     // where `L_low` is the low row of each partnered pair.  For
-    // the XOR-16 variant (partnerXorMask=16) that's `L ∈ [0,15]
-    // ∪ [32,47]` (i.e. `(L & 16) == 0`), which generalises
+    // the XOR-16 variant (partnerXorMask=16) that's `L in [0,15]
+    // union [32,47]` (i.e. `(L & 16) == 0`), which generalises
     // correctly to both MODREP wave32 replicas on the wave64
     // target (lanes 0..31 and 32..63).  The XOR-32 variant
     // cannot reach here (no wave32 ISA exposes
     // `v_permlane32_swap_b32` today); if one is added in the
     // future, the SAME pattern applies with `(L & 32) == 0`.
     //
-    // Pre-Session-8 this arm emitted the symmetric cross-wire
-    // (below) unconditionally -- over-swapping the "unchanged"
-    // halves corrupted every `matmul_fp16` A-operand position
-    // because vdst_in and src0_in carry distinct data at the
-    // swap site (see § 12.4.7 of hotswap/docs/matrix-
-    // translation.md for the Session-8 root-cause pin).  The
-    // self-preserve idiom (`vdst_in == src0_in == seed`, Triton
-    // `tl.sort` / `tl.topk`) masqueraded as working because the
-    // per-lane select collapses to `seed` for the preserved
-    // half anyway; the transitional `rewrite_permlane16_{xor3_
-    // partner,swap_selfpreserve}` passes that papered over that
-    // aliasing are deleted along with the symmetric emission.
+    // The two retained rows must keep their tied-input values
+    // (`vdst_in` on the low row, `src0_in` on the high row).  A
+    // symmetric unconditional cross-wire would overwrite them,
+    // which is only correct when `vdst_in` and `src0_in` alias.
+    // The per-lane select below therefore keeps the tied input on
+    // the retained half and takes the cross-wired value on the
+    // moved half.
     //
     // `isLaneLow` is computed via `lane AND partnerXorMask == 0`
     // rather than `lane < partnerXorMask` so the backend can
@@ -241,18 +234,14 @@ emitPermLaneSwapEmulation(RaiseContext &Ctx, const DecodedInst &Di,
     Value *BpermVdst = Ctx.B.CreateCall(
         Bperm, {BpermIdx, VdstIn},
         Twine(SsaPrefix) + "_bperm_vdst"); // = old vdst[L XOR mask]
-    Value *HalfBit = Ctx.B.CreateAnd(
-        LaneId, Ctx.B.getInt32(PartnerXorMask),
-        Twine(SsaPrefix) + "_half_bit");
-    Value *IsLaneLow = Ctx.B.CreateICmpEQ(
-        HalfBit, Ctx.B.getInt32(0),
-        Twine(SsaPrefix) + "_is_lane_low");
-    NewVdst = Ctx.B.CreateSelect(
-        IsLaneLow, VdstIn, BpermSrc0,
-        Twine(SsaPrefix) + "_new_vdst");
-    NewSrc0Out = Ctx.B.CreateSelect(
-        IsLaneLow, BpermVdst, Src0In,
-        Twine(SsaPrefix) + "_new_src0_out");
+    Value *HalfBit = Ctx.B.CreateAnd(LaneId, Ctx.B.getInt32(PartnerXorMask),
+                                     Twine(SsaPrefix) + "_half_bit");
+    Value *IsLaneLow = Ctx.B.CreateICmpEQ(HalfBit, Ctx.B.getInt32(0),
+                                          Twine(SsaPrefix) + "_is_lane_low");
+    NewVdst = Ctx.B.CreateSelect(IsLaneLow, VdstIn, BpermSrc0,
+                                 Twine(SsaPrefix) + "_new_vdst");
+    NewSrc0Out = Ctx.B.CreateSelect(IsLaneLow, BpermVdst, Src0In,
+                                    Twine(SsaPrefix) + "_new_src0_out");
   } else {
     // Wave64 source (gfx950): pre-Session-8 symmetric lift.
     // Kept verbatim -- see the function-top branch comment above
@@ -275,8 +264,8 @@ emitPermLaneSwapEmulation(RaiseContext &Ctx, const DecodedInst &Di,
   Hr.Handled = true;
   return Hr;
 }
-HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
-                                    OpResolver &Op) {
+Expected<HandlerResult>
+handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di, OpResolver &Op) {
   HandlerResult Hr;
   CanonicalOp Sop = Di.CanonOp;
 
@@ -284,7 +273,7 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
 
   // ---- v_permlane16_b32 / v_permlanex16_b32 ----
   // P2 lowering -- see the permlane16 / permlanex16 row of hotswap/
-  // docs/wave-size-translation.md §5.3. Target constraint: `v_permlane16`
+  // docs/wave-size-translation.md sec. 5.3. Target constraint: `v_permlane16`
   // and `v_permlanex16` are RDNA/gfx10+ instructions and DO NOT exist
   // on CDNA (gfx9/gfx94x). Emitting `llvm.amdgcn.permlane16` or
   // `permlanex16` directly fails isel on gfx942 with "Cannot select:
@@ -303,7 +292,7 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
   //   [4] src1 (SSrc_b32)  = sel_1                                here)
   //
   // Selector encoding: src1 and src2 are each 32-bit scalar values
-  // containing 8 × 4-bit per-lane selectors. src1 covers within-
+  // containing 8 x 4-bit per-lane selectors. src1 covers within-
   // group lanes 0..7, src2 covers within-group lanes 8..15. Each
   // 4-bit nibble selects a source lane within the 16-lane group.
   //
@@ -323,10 +312,10 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
   //   result       = ds_bpermute(byte_addr, src0)
   //
   // Wave-width correctness under modulo-replication (hotswap/docs/
-  // wave-size-translation.md §6's wave-size-obliviousness theorem):
+  // wave-size-translation.md sec. 6's wave-size-obliviousness theorem):
   // the source gfx1250 kernel is wave32 so its selector values
-  // encode a shuffle pattern over 2 × 16-lane groups. On wave64
-  // target each modrep replica occupies 2 × 16-lane groups (R=2),
+  // encode a shuffle pattern over 2 x 16-lane groups. On wave64
+  // target each modrep replica occupies 2 x 16-lane groups (R=2),
   // and the `group ^ 0x10` swap stays within a replica (0<->1 within
   // replica 0, 2<->3 within replica 1), so the modrep invariant is
   // preserved for permlanex16. permlane16 keeps every lane within
@@ -336,11 +325,10 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
   // i1 immediates encoded via `opsel_i1timm` in PermlanePat
   // (`SISrcMods::OP_SEL_0` bit of src0_modifiers / src1_modifiers):
   //
-  //   - `fi=1`: on an EXEC-inactive source lane, the kernel still
-  //     fetches that lane's VGPR value (possibly stale). This is
-  //     exactly how `llvm.amdgcn.ds.bpermute` behaves naturally
-  //     (the LDS-backed path reads the VGPR alloca regardless of
-  //     EXEC), so `fi=1` is supported directly.
+  //   - `fi=1`: an EXEC-inactive source lane still contributes its real
+  //     VGPR value. `ds_bpermute` returns 0 for such a lane, so the
+  //     gather below is forced whole-wave; that is identity when the
+  //     projection already holds hardware EXEC = -1 kernel-wide.
   //   - `bc=0`: on an "out-of-range" source lane, the target lane
   //     retains %old. For permlane16 the 4-bit selector nibble is
   //     always in [0, 16) so the source lane is always in-group;
@@ -377,8 +365,7 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
       Os << "permlane16 / permlanex16 emulation supports only "
             "op_sel:[1,0] (fi=1, bc=0); saw fi="
          << (Fi ? 1 : 0) << ", bc=" << (Bc ? 1 : 0);
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(Di, "VALU", Detail);
-      return Hr;
+      return RaiseFailure::unsupportedInstructionForm(Di, "VALU", Detail);
     }
     Value *Src0 = Op.src(0);
     Value *Sel1 = Op.src(1);
@@ -393,7 +380,8 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
     Value *LaneId = Ctx.emitLaneIdx();
 
     // Group base (lane & ~0xF) and within-group index (lane & 0xF).
-    Value *GroupBase = Ctx.B.CreateAnd(LaneId, Ctx.B.getInt32(~0xF), "pl_group");
+    Value *GroupBase =
+        Ctx.B.CreateAnd(LaneId, Ctx.B.getInt32(~0xF), "pl_group");
     Value *Within = Ctx.B.CreateAnd(LaneId, Ctx.B.getInt32(0xF), "pl_within");
 
     // Pick the right 32-bit selector word based on within's high bit.
@@ -407,9 +395,10 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
     Value *Nibble = Ctx.B.CreateAnd(Shifted, Ctx.B.getInt32(0xF), "pl_nibble");
 
     // For permlanex16, XOR the group base by 0x10 to swap adjacent groups.
-    Value *SrcGroup = IsPermlaneX16
-        ? Ctx.B.CreateXor(GroupBase, Ctx.B.getInt32(0x10), "plx_group")
-        : GroupBase;
+    Value *SrcGroup =
+        IsPermlaneX16
+            ? Ctx.B.CreateXor(GroupBase, Ctx.B.getInt32(0x10), "plx_group")
+            : GroupBase;
     Value *SrcLaneAbs = Ctx.B.CreateOr(SrcGroup, Nibble, "pl_src_lane");
     Value *ByteAddr = Ctx.B.CreateShl(SrcLaneAbs, Ctx.B.getInt32(2), "pl_addr");
 
@@ -418,9 +407,17 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
     // store for EXEC masking.
     Function *Bperm = Intrinsic::getOrInsertDeclaration(
         &Ctx.M, Intrinsic::amdgcn_ds_bpermute);
-    Value *Result = Ctx.B.CreateCall(
-        Bperm, {ByteAddr, Src0},
-        IsPermlaneX16 ? "permlanex16_emu" : "permlane16_emu");
+    Value *Result =
+        Ctx.B.CreateCall(Bperm, {ByteAddr, Src0},
+                         IsPermlaneX16 ? "permlanex16_emu" : "permlane16_emu");
+    // This emulation is only reached with `fi=1`, whose semantics fetch
+    // the source lane's real VGPR even when that lane is EXEC-inactive.
+    // `ds_bpermute` instead returns 0 for such a lane, so force the
+    // gather whole-wave; identity when the projection already holds
+    // hardware EXEC = -1 kernel-wide.
+    Result = Ctx.Projection.wrapAsWWMValue(
+        Ctx.B, Result,
+        IsPermlaneX16 ? "permlanex16_emu_wwm" : "permlane16_emu_wwm");
     Ctx.writeReg32(Op.dst(), Result);
     Hr.Handled = true;
     return Hr;
@@ -428,7 +425,7 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
 
   // ---- v_permlane64_b32 ----
   // KNOWN LIMITATION -- see the v_permlane64_b32 row in the
-  // unrewritable table of hotswap/docs/wave-size-translation.md §7:
+  // unrewritable table of hotswap/docs/wave-size-translation.md sec. 7:
   // no wave32 analogue, so
   // the Phase 1.4.5 classifier refuses this op in any cross-wave
   // lift (it is taxonomised as FullWaveRotate / unrewritable). The
@@ -446,7 +443,7 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
   // ---- gfx950 lane-swap: v_permlane16_swap_b32 ----
   //
   // P4 lowering -- see the permlane16_swap row of hotswap/docs/wave-
-  // size-translation.md §5.3. Exchanges two VGPRs across
+  // size-translation.md sec. 5.3. Exchanges two VGPRs across
   // lanes 0..15 <-> 16..31 within each 32-lane group. Two defs
   // (vdst, src0_out) and two tied uses (vdst_in tied to vdst,
   // src0 tied to src0_out). Effect:
@@ -500,7 +497,7 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
   // probing other targets (e.g. gfx950 which has the native
   // instruction) is left for hardware-availability work and is the
   // P4.b sub-item recorded in hotswap/docs/wave-size-translation.md
-  // §10 (known gaps). The emulation
+  // sec. 10 (known gaps). The emulation
   // independently maps onto the published .td swap semantics
   // (VOP_PERMLANE_SWAP profile), so per-target hardware-vs-
   // emulation parity follows from emulation-correctness +
@@ -543,7 +540,7 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
   // `lit_tests/v_permlane32_swap_b32.s` (XOR-32).
   case CanonicalOp::V_PERMLANE16_SWAP_B32:
     return emitPermLaneSwapEmulation(Ctx, Di, Op, /*partnerXorMask=*/16,
-                                      /*ssaPrefix=*/"pls16");
+                                     /*ssaPrefix=*/"pls16");
   case CanonicalOp::V_PERMLANE32_SWAP_B32: {
     // Two precondition checks, both specific to the wider XOR-32
     // variant:
@@ -559,24 +556,23 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
     //
     // Refusal in both cases preserves the "refuse when uncertain"
     // contract documented on the P4 pending row of
-    // hotswap/docs/wave-size-translation.md §5.3; the wave64 ->
+    // hotswap/docs/wave-size-translation.md sec. 5.3; the wave64 ->
     // wave64 path below is the positive case this handler now
     // lifts.  The XOR-16 sibling has no equivalent precondition
     // because its partner stays within each 32-lane half
     // regardless of wave size.
     if (Ctx.TargetIsa.isWave32()) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "VALU",
           "v_permlane32_swap_b32 lift refused: target is wave32, "
           "but the instruction's XOR-32 partner has no wave32 "
           "analogue (the partner index wraps past the target "
           "wave).  See the P4 permlane32_swap entry in the "
           "pending-rewrite table of "
-          "hotswap/docs/wave-size-translation.md \u00a75.3.");
-      return Hr;
+          "hotswap/docs/wave-size-translation.md sec. 5.3.");
     }
     if (Ctx.Isa.isWave32()) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "VALU",
           "v_permlane32_swap_b32 in a wave32 source kernel -- no "
           "wave32 ISA enables FeaturePermlane32Swap (see "
@@ -585,10 +581,9 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
           "as wave32 upstream.  Refusing rather than silently "
           "emitting an XOR-32 partner that cannot exist in the "
           "source's wave topology.");
-      return Hr;
     }
     return emitPermLaneSwapEmulation(Ctx, Di, Op, /*partnerXorMask=*/32,
-                                      /*ssaPrefix=*/"pls32");
+                                     /*ssaPrefix=*/"pls32");
   }
 
   // ---- v_readfirstlane_b32 sDST, vSRC ----
@@ -614,27 +609,35 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
                                          "rfl_source_wave_base");
 
       Value *Exec = Ctx.Regs.loadExec(Ctx.B);
-      Value *ShiftAmt = Ctx.B.CreateZExtOrTrunc(GroupBase, Exec->getType(),
-                                                "rfl_exec_shift");
-      Value *SourceExecWide = Ctx.B.CreateLShr(Exec, ShiftAmt,
-                                               "rfl_exec_at_srcwave");
-      Value *SourceExec = Ctx.B.CreateTrunc(SourceExecWide, Ctx.I32Ty,
-                                            "rfl_exec");
+      Value *ShiftAmt =
+          Ctx.B.CreateZExtOrTrunc(GroupBase, Exec->getType(), "rfl_exec_shift");
+      Value *SourceExecWide =
+          Ctx.B.CreateLShr(Exec, ShiftAmt, "rfl_exec_at_srcwave");
+      Value *SourceExec =
+          Ctx.B.CreateTrunc(SourceExecWide, Ctx.I32Ty, "rfl_exec");
       Function *Cttz = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::cttz, {Ctx.I32Ty});
       Value *FirstSet = Ctx.B.CreateCall(
           Cttz, {SourceExec, ConstantInt::getFalse(Ctx.I1Ty)}, "rfl_first_set");
-      Value *ExecIsZero = Ctx.B.CreateICmpEQ(SourceExec, Ctx.B.getInt32(0),
-                                             "rfl_exec_is_zero");
+      Value *ExecIsZero =
+          Ctx.B.CreateICmpEQ(SourceExec, Ctx.B.getInt32(0), "rfl_exec_is_zero");
       Value *SourceLane = Ctx.B.CreateSelect(ExecIsZero, Ctx.B.getInt32(0),
                                              FirstSet, "rfl_source_lane");
-      Value *TargetLane = Ctx.B.CreateOr(GroupBase, SourceLane,
-                                         "rfl_target_lane");
-      Value *Addr = Ctx.B.CreateShl(TargetLane, Ctx.B.getInt32(2),
-                                    "rfl_bperm_addr");
+      Value *TargetLane =
+          Ctx.B.CreateOr(GroupBase, SourceLane, "rfl_target_lane");
+      Value *Addr =
+          Ctx.B.CreateShl(TargetLane, Ctx.B.getInt32(2), "rfl_bperm_addr");
       Function *Bperm = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_ds_bpermute);
-      Val = Ctx.B.CreateCall(Bperm, {Addr, Src}, "readfirstlane_srcwave");
+      Value *Gathered =
+          Ctx.B.CreateCall(Bperm, {Addr, Src}, "readfirstlane_srcwave");
+      // `v_readfirstlane_b32` ignores EXEC and reads the selected lane's
+      // real VGPR even when it is inactive; `ds_bpermute` returns 0 for
+      // an EXEC-inactive lane. Force the gather whole-wave so every lane
+      // stages its real value (identity when hardware EXEC = -1 holds
+      // kernel-wide).
+      Val = Ctx.Projection.wrapAsWWMValue(Ctx.B, Gathered,
+                                          "readfirstlane_srcwave_wwm");
     } else {
       Function *Rfl = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_readfirstlane, {Ctx.I32Ty});
@@ -666,16 +669,23 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
     Lane = Ctx.B.CreateZExtOrTrunc(Lane, Ctx.I32Ty, "wrlane_idx");
     Value *OldVal = Ctx.Regs.readReg32(Ctx.B, Dst);
     Value *NewVal = nullptr;
+    // ThreadLoopProjection is the only projection that scopes lane ops to the
+    // source wave inside the handler (`sourceWaveScopedLaneOps()`); the wider
+    // ModuloReplicationProjection path leaves the native intrinsic here and
+    // relies on the default-on post-raise `rewriteCrossLaneDivergent` pass to
+    // rebase it symmetrically (with the SGPR-forced use-chain safety net), or
+    // on the TLP re-raise fallback when that pass refuses.  See issue #146 and
+    // wave-size-translation.md §5.6.3.
     if (Ctx.Projection.sourceWaveScopedLaneOps()) {
       Value *LaneId = Ctx.emitLaneIdx();
       Value *SourceLane = Ctx.B.CreateAnd(
           LaneId, Ctx.B.getInt32(Ctx.Isa.WaveSize - 1), "wrlane_source_lane");
       Value *WantedLane = Ctx.B.CreateAnd(
           Lane, Ctx.B.getInt32(Ctx.Isa.WaveSize - 1), "wrlane_wanted_lane");
-      Value *IsTargetLane = Ctx.B.CreateICmpEQ(SourceLane, WantedLane,
-                                               "wrlane_is_target_lane");
-      NewVal = Ctx.B.CreateSelect(IsTargetLane, Val, OldVal,
-                                  "writelane_srcwave");
+      Value *IsTargetLane =
+          Ctx.B.CreateICmpEQ(SourceLane, WantedLane, "wrlane_is_target_lane");
+      NewVal =
+          Ctx.B.CreateSelect(IsTargetLane, Val, OldVal, "writelane_srcwave");
     } else {
       Function *Wl = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_writelane, {Ctx.I32Ty});
@@ -687,14 +697,17 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
   }
 
   // ---- v_readlane_b32 sDST, vSRC, lane ----
-  // Read a specific lane of vSRC into an SGPR. Reverse of writelane;
-  // cross-lane so must use the native intrinsic.
+  // Read a specific lane of vSRC into an SGPR. Reverse of writelane.
   case CanonicalOp::V_READLANE_B32: {
     ParsedReg SrcReg = Op.srcReg(0);
     Value *Lane = Op.src(1);
     Lane = Ctx.B.CreateZExtOrTrunc(Lane, Ctx.I32Ty, "rdlane_idx");
     Value *Src = Ctx.Regs.readReg32(Ctx.B, SrcReg);
     Value *Val = nullptr;
+    // See the parallel note on V_WRITELANE_B32: the source-wave rebase here is
+    // the ThreadLoopProjection path; under ModuloReplicationProjection the
+    // native intrinsic is left for the default-on `rewriteCrossLaneDivergent`
+    // pass (or the TLP re-raise fallback) to rebase.  Issue #146.
     if (Ctx.Projection.sourceWaveScopedLaneOps()) {
       Value *LaneId = Ctx.emitLaneIdx();
       uint32_t SourceMask = Ctx.Isa.WaveSize - 1;
@@ -702,13 +715,21 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
                                          "rdlane_source_wave_base");
       Value *SourceLane = Ctx.B.CreateAnd(Lane, Ctx.B.getInt32(SourceMask),
                                           "rdlane_source_lane");
-      Value *TargetLane = Ctx.B.CreateOr(GroupBase, SourceLane,
-                                         "rdlane_target_lane");
-      Value *Addr = Ctx.B.CreateShl(TargetLane, Ctx.B.getInt32(2),
-                                    "rdlane_bperm_addr");
+      Value *TargetLane =
+          Ctx.B.CreateOr(GroupBase, SourceLane, "rdlane_target_lane");
+      Value *Addr =
+          Ctx.B.CreateShl(TargetLane, Ctx.B.getInt32(2), "rdlane_bperm_addr");
       Function *Bperm = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_ds_bpermute);
-      Val = Ctx.B.CreateCall(Bperm, {Addr, Src}, "readlane_srcwave");
+      Value *Gathered =
+          Ctx.B.CreateCall(Bperm, {Addr, Src}, "readlane_srcwave");
+      // `v_readlane_b32` ignores EXEC and reads the selected lane's real
+      // VGPR even when it is inactive; `ds_bpermute` returns 0 for an
+      // EXEC-inactive lane. Force the gather whole-wave so the inactive
+      // source lane still contributes its value (identity when hardware
+      // EXEC = -1 holds kernel-wide).
+      Val = Ctx.Projection.wrapAsWWMValue(Ctx.B, Gathered,
+                                          "readlane_srcwave_wwm");
     } else {
       Function *Rl = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_readlane, {Ctx.I32Ty});
@@ -732,16 +753,16 @@ HandlerResult handleValuCrossLane(RaiseContext &Ctx, const DecodedInst &Di,
       Value *LaneId = Ctx.emitLaneIdx();
       Value *SourceLane = Ctx.B.CreateAnd(
           LaneId, Ctx.B.getInt32(Ctx.Isa.WaveSize - 1), "mbcnt_source_lane");
-      Value *LaneBit = Ctx.B.CreateShl(Ctx.B.getInt32(1), SourceLane,
-                                       "mbcnt_lane_bit");
-      Value *BelowMask = Ctx.B.CreateSub(LaneBit, Ctx.B.getInt32(1),
-                                         "mbcnt_below_mask");
-      Value *Masked = Ctx.B.CreateAnd(Op.src(0), BelowMask, "mbcnt_masked");
+      Value *LaneBit =
+          Ctx.B.CreateShl(Ctx.B.getInt32(1), SourceLane, "mbcnt_lane_bit");
+      Value *BelowMask =
+          Ctx.B.CreateSub(LaneBit, Ctx.B.getInt32(1), "mbcnt_below_mask");
+      Value *SrcMask = Ctx.readOpSourceWaveMask32(Di, Op.srcIdx(0));
+      Value *Masked = Ctx.B.CreateAnd(SrcMask, BelowMask, "mbcnt_masked");
       Function *Ctpop = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::ctpop, {Ctx.I32Ty});
-      Result = Ctx.B.CreateAdd(
-          Ctx.B.CreateCall(Ctpop, {Masked}, "mbcnt_pop"), Op.src(1),
-          "mbcnt_lo_srcwave");
+      Result = Ctx.B.CreateAdd(Ctx.B.CreateCall(Ctpop, {Masked}, "mbcnt_pop"),
+                               Op.src(1), "mbcnt_lo_srcwave");
     } else {
       Function *Mbcnt = Intrinsic::getOrInsertDeclaration(
           &Ctx.M, Intrinsic::amdgcn_mbcnt_lo, {});

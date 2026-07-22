@@ -27,9 +27,9 @@ namespace COMGR::hotswap {
 namespace {
 
 // ============================================================================
-// Narrow-O1 classifier -- see hotswap/docs/modrep-predicate-chain.md §5 (O1)
-// (§5 O1 "narrow-O1, as landed" documents the narrowing
-// rationale). Two-pass design:
+// Narrow-O1 classifier -- see hotswap/docs/modrep-predicate-chain.md sec. 5
+// (O1) (sec. 5 O1 "narrow-O1, as landed" documents the narrowing rationale).
+// Two-pass design:
 //
 //   Pass 1: forward-walk from each `@llvm.amdgcn.workitem.id.x()` call,
 //           tagging every tid-reachable value with its masked-or-unmasked
@@ -102,12 +102,12 @@ Value *otherOperand(const Instruction *I, const Value *V) {
 }
 
 // True iff `I` is an `and` that AND-masks `V` against a compile-time
-// constant K with `K <= sourceWaveSize - 1`. Matches the §5.6.2
+// constant K with `K <= sourceWaveSize - 1`. Matches the sec. 5.6.2
 // `wave_id` lift's `and X, 0x1F` mask, the SPE prelude's
 // `lane_id & (execBits - 1)` mask, and the Triton-emitted
 // `offs & (BLOCK_SIZE - 1)` mask when `BLOCK_SIZE <= W_s`.
 bool isSourceWaveMaskAnd(const Instruction *I, const Value *V,
-                          unsigned SourceWaveSize) {
+                         unsigned SourceWaveSize) {
   const auto *Bop = dyn_cast<BinaryOperator>(I);
   if (!Bop || Bop->getOpcode() != Instruction::And)
     return false;
@@ -224,22 +224,44 @@ bool isPurePropagator(const Instruction *I) {
 // stable so lit fixtures can pin the refusal on substrings without
 // tying themselves to exact wording.
 std::string formatRefusalDetail(const ICmpInst *Cmp, unsigned SourceWaveSize,
-                                 const ConstantInt *SmallK) {
+                                const ConstantInt *SmallK) {
   std::string S;
   raw_string_ostream Os(S);
   Os << "`workitem.id.x()` reaches `icmp";
   switch (Cmp->getPredicate()) {
-  case ICmpInst::ICMP_EQ:  Os << " eq"; break;
-  case ICmpInst::ICMP_NE:  Os << " ne"; break;
-  case ICmpInst::ICMP_ULT: Os << " ult"; break;
-  case ICmpInst::ICMP_ULE: Os << " ule"; break;
-  case ICmpInst::ICMP_UGT: Os << " ugt"; break;
-  case ICmpInst::ICMP_UGE: Os << " uge"; break;
-  case ICmpInst::ICMP_SLT: Os << " slt"; break;
-  case ICmpInst::ICMP_SLE: Os << " sle"; break;
-  case ICmpInst::ICMP_SGT: Os << " sgt"; break;
-  case ICmpInst::ICMP_SGE: Os << " sge"; break;
-  default:                 Os << " ?"; break;
+  case ICmpInst::ICMP_EQ:
+    Os << " eq";
+    break;
+  case ICmpInst::ICMP_NE:
+    Os << " ne";
+    break;
+  case ICmpInst::ICMP_ULT:
+    Os << " ult";
+    break;
+  case ICmpInst::ICMP_ULE:
+    Os << " ule";
+    break;
+  case ICmpInst::ICMP_UGT:
+    Os << " ugt";
+    break;
+  case ICmpInst::ICMP_UGE:
+    Os << " uge";
+    break;
+  case ICmpInst::ICMP_SLT:
+    Os << " slt";
+    break;
+  case ICmpInst::ICMP_SLE:
+    Os << " sle";
+    break;
+  case ICmpInst::ICMP_SGT:
+    Os << " sgt";
+    break;
+  case ICmpInst::ICMP_SGE:
+    Os << " sge";
+    break;
+  default:
+    Os << " ?";
+    break;
   }
   Os << "` against compile-time constant " << SmallK->getValue()
      << " which is within (0, W_s-1=" << (SourceWaveSize - 1) << "]. ";
@@ -247,7 +269,7 @@ std::string formatRefusalDetail(const ICmpInst *Cmp, unsigned SourceWaveSize,
   Os << "modulo-replication, source wave 0's lane L and target replica-1's ";
   Os << "lane L+W_s would evaluate the predicate differently despite sharing ";
   Os << "the same source EXEC bit. Refusing per hotswap/docs/"
-        "modrep-predicate-chain.md \u00a75 (narrow-O1 classifier).";
+        "modrep-predicate-chain.md sec. 5 (narrow-O1 classifier).";
   return S;
 }
 
@@ -262,12 +284,10 @@ bool modrepCanHaveActiveReplicaLane(unsigned SourceWaveSize,
 
 bool shouldRefuseC5(PredicateChainProjection Projection,
                     unsigned SourceWaveSize, unsigned TargetWaveSize,
-                    unsigned MaxFlatWorkgroupSize,
-                    bool SuppressThreadLoopC5) {
+                    unsigned MaxFlatWorkgroupSize, bool SuppressThreadLoopC5) {
   switch (Projection) {
   case PredicateChainProjection::ModuloReplication:
-    return modrepCanHaveActiveReplicaLane(SourceWaveSize,
-                                          MaxFlatWorkgroupSize);
+    return modrepCanHaveActiveReplicaLane(SourceWaveSize, MaxFlatWorkgroupSize);
   case PredicateChainProjection::WaveNative:
     return MaxFlatWorkgroupSize > 0 && MaxFlatWorkgroupSize < TargetWaveSize;
   case PredicateChainProjection::ThreadLoop:
@@ -339,9 +359,8 @@ PredicateChainClassifierReport classifyPredicateChain(
   const bool RefuseObservedC5 =
       shouldRefuseC5(Projection, SourceWaveSize, TargetWaveSize,
                      MaxFlatWorkgroupSize, SuppressThreadLoopC5);
-  const bool WaveNativePhantomRefusal =
-      isWaveNativePhantomRefusal(Projection, TargetWaveSize,
-                                 MaxFlatWorkgroupSize);
+  const bool WaveNativePhantomRefusal = isWaveNativePhantomRefusal(
+      Projection, TargetWaveSize, MaxFlatWorkgroupSize);
 
   // ===== Pass 0: collect `@llvm.amdgcn.workitem.id.x()` call sites. =====
   SmallVector<CallInst *> Sites;
@@ -406,7 +425,7 @@ PredicateChainClassifierReport classifyPredicateChain(
         Report.ObservedSites.push_back(
             "unexpected non-Instruction user of tid-derived Value; "
             "classifier cannot prove safety. "
-            "See hotswap/docs/modrep-predicate-chain.md \u00a75.");
+            "See hotswap/docs/modrep-predicate-chain.md sec. 5.");
         Report.Refused = true;
         Report.WaveNativePhantomRefusal = false;
         if (Report.RefusalDetail.empty())
@@ -525,8 +544,8 @@ PredicateChainClassifierReport classifyPredicateChain(
         std::string Prefix;
         raw_string_ostream Os(Prefix);
         Os << "phantom-lane regime: HSACO "
-              "`max_flat_workgroup_size`=" << MaxFlatWorkgroupSize
-           << " is below target wavefront width "
+              "`max_flat_workgroup_size`="
+           << MaxFlatWorkgroupSize << " is below target wavefront width "
            << TargetWaveSize
            << ", so every launch activates lanes outside the "
               "source kernel's lane index space via "

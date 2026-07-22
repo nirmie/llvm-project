@@ -15,26 +15,25 @@
 //     in the same basic block. Lowers to `br label %BB_target`.
 //
 //   * IndirectB: subroutine-return shape -- the source SGPR pair is the
-//     ret-pair populated by a caller's chain (Pattern B). Lowers to a
-//     `cmp eq + br` cascade (emitted by `emitEnumeratedDispatch` in
-//     handle-sop1.cpp) over the resolved return targets, terminating
-//     in an `unreachable` trap BB. Each call site in the kernel that
-//     wrote that ret-pair contributes one target via the
-//     `chainTerminators` rewrite hook.
+//     ret-pair populated by a caller's chain (Pattern B). Lowers to an
+//     explicit switch (emitted by `emitEnumeratedDispatch` in
+//     handle-sop1.cpp) over the resolved return targets, terminating in
+//     a trap default. Each call site in the kernel that wrote that ret-pair
+//     contributes one target via the `chainTerminators` rewrite hook.
 //
 //   * DispatchSet: multi-target dispatch -- the source SGPR pair holds
 //     one of N statically-known absolute targets reaching the use site
 //     through distinct CFG paths (e.g. a tensilelite "activation
 //     function dispatcher" -- each predecessor block writes a different
 //     chain target into the same pair, then a join block consumes it).
-//     Lowers to the same enumerated-dispatch cascade as IndirectB. For
-//     `s_swap_pc_i64` it ALSO writes the return-PC `blockaddress` into
-//     sdst before the cascade (mirroring the DirectA dst-write).
+//     Lowers to the same enumerated dispatch as IndirectB. For
+//     `s_swap_pc_i64` it ALSO writes the return-address marker into sdst
+//     before the switch (mirroring the DirectA dst-write).
 //
-// The cascade shape replaces an earlier `indirectbr` lowering; see the
-// rationale block on `emitEnumeratedDispatch` in handle-sop1.cpp for
-// why (FixIrreducible pass compatibility under the irreducible CFGs
-// the call/return pattern produces).
+// The raised switch is normalized through LLVM's LowerSwitch pass before
+// AMDGPU codegen; see the rationale block on `emitEnumeratedDispatch` in
+// handle-sop1.cpp for why (FixIrreducible pass compatibility under the
+// irreducible CFGs the call/return pattern produces).
 //
 // See canonical-op.h's `S_SET_PC_I64` and `S_SWAP_PC_I64` doc for the full
 // lowering contracts. The handler in `handle-sop1.cpp` consumes the
@@ -94,7 +93,7 @@
 //             logic, identifies it by `retPairLowReg` membership) OR
 //             (b) a DispatchSet site, where retention is conditional
 //             on BOTH `retPairLowReg == DispatchSet.indirectRetPairLowReg`
-//             AND `resolvedReturnAddr ∈ DispatchSet.indirectTargets`
+//             AND `resolvedReturnAddr in DispatchSet.indirectTargets`
 //             (so dead chain terminators that don't match a target
 //             are still pruned). Build per-pair return-target lists
 //             for IndirectB. Drop unused terminators so the raiser's
@@ -236,8 +235,8 @@ std::optional<uint32_t> imm32(const MCInst &Inst, unsigned OpIdx) {
 // already fired (a complete chain follows the strict order
 // getpc -> low-add -> high-add).
 struct PcChain {
-  uint64_t Value = 0;       // symbolic absolute kernel offset
-  uint64_t Terminator = 0;  // offset of the high-half s_add_co_ci_u32
+  uint64_t Value = 0;      // symbolic absolute kernel offset
+  uint64_t Terminator = 0; // offset of the high-half s_add_co_ci_u32
   bool LowAddDone = false;
 };
 
@@ -365,18 +364,13 @@ public:
   // pair `lowIdx`. Used by Phase 2 to decide whether a swap/set_pc
   // site may fall back on dataflow entry facts.
   bool isPairDirty(unsigned LowIdx) const {
-    return IntraDirtyHalf.count(LowIdx) ||
-           IntraDirtyHalf.count(LowIdx + 1);
+    return IntraDirtyHalf.count(LowIdx) || IntraDirtyHalf.count(LowIdx + 1);
   }
 
   // Accessors used by Phase 2 to construct the per-block transfer
   // summary at end-of-block.
-  const llvm::DenseMap<unsigned, PcChain> &pcChains() const {
-    return PcChains;
-  }
-  const llvm::DenseSet<unsigned> &dirtyHalves() const {
-    return IntraDirtyHalf;
-  }
+  const llvm::DenseMap<unsigned, PcChain> &pcChains() const { return PcChains; }
+  const llvm::DenseSet<unsigned> &dirtyHalves() const { return IntraDirtyHalf; }
 
 private:
   const MCRegisterInfo &Mri;
@@ -388,8 +382,8 @@ private:
 // Mark every SGPR-half written by `di` as dirty in `state` and drop
 // any tracked PC pair whose halves overlap. This is the generic
 // fallthrough for instructions whose semantics we did not model.
-void invalidateGeneralSgprDefs(const DecodedInst &Di,
-                               const MCRegisterInfo &MRI, State &State) {
+void invalidateGeneralSgprDefs(const DecodedInst &Di, const MCRegisterInfo &MRI,
+                               State &State) {
   for (unsigned I = 0; I < Di.NumDefs && I < Di.numOps(); ++I) {
     if (!Di.isReg(I))
       continue;
@@ -422,8 +416,8 @@ struct PairTransfer {
     Kill,
   };
   Kind TransferKind = Kind::Pass;
-  uint64_t Value = 0;       // when transferKind == Set
-  uint64_t Terminator = 0;  // when transferKind == Set
+  uint64_t Value = 0;      // when transferKind == Set
+  uint64_t Terminator = 0; // when transferKind == Set
 };
 
 // Per-block descriptor used by Phase 2 / 3 / 4. `lastIdx` is inclusive.
@@ -473,7 +467,7 @@ struct PendingB {
 // facts mention the pair; it then OR's in incomplete from any
 // predecessor that DIDN'T mention the pair.
 struct PcLatticeValue {
-  llvm::SmallVector<uint64_t, 8> Values;  // sorted, deduped
+  llvm::SmallVector<uint64_t, 8> Values; // sorted, deduped
   bool Incomplete = false;
 };
 
@@ -504,9 +498,9 @@ void joinValue(PcLatticeValue &Dst, const PcLatticeValue &Src) {
 
 } // namespace
 
-SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
-                           const std::set<uint64_t> &BlockStarts,
-                           const MCState &Mc) {
+Expected<SetPcAnalysis> analyseSetPC(ArrayRef<DecodedInst> Insts,
+                                     const std::set<uint64_t> &BlockStarts,
+                                     const MCState &Mc) {
   SetPcAnalysis Result;
   if (Insts.empty())
     return Result;
@@ -579,8 +573,8 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
     }
   }
   for (size_t Bi = 0; Bi < Blocks.size(); ++Bi) {
-    size_t End = (Bi + 1 < Blocks.size()) ? Blocks[Bi + 1].FirstIdx
-                                          : Insts.size();
+    size_t End =
+        (Bi + 1 < Blocks.size()) ? Blocks[Bi + 1].FirstIdx : Insts.size();
     Blocks[Bi].LastIdx = End - 1;
   }
 
@@ -694,10 +688,59 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
         auto Src1Imm = imm32(Di.Inst, S1);
         if (!Src1Imm)
           break;
-        State.finishHighAdd(LowIdx, Di.Offset,
-                            static_cast<uint64_t>(*Src1Imm));
+        State.finishHighAdd(LowIdx, Di.Offset, static_cast<uint64_t>(*Src1Imm));
         Result.ChainTerminators[Di.Offset] =
             SetPcCallSiteInfo{State.findPc(LowIdx)->Value, LowIdx};
+        continue;
+      }
+
+      case CanonicalOp::S_ADD_NC_U64: {
+        // Fused 64-bit getpc-chain completion (gfx12 / gfx1250). The
+        // older shape split the PC-relative displacement across
+        // `s_add_u32` (low) + `s_addc_u32` (high); newer codegen emits a
+        // single `s_add_nc_u64 sPair, sPair, imm64` that folds a signed
+        // 64-bit displacement into the whole pair at once:
+        //   s_get_pc_i64 s[0:1]
+        //   s_add_nc_u64 s[0:1], s[0:1], imm64
+        //   s_swap_pc_i64 s[30:31], s[0:1]
+        // Recognise it so the call/branch target resolves to DirectA
+        // instead of being refused as a pair dirtied without a chain.
+        if (Di.NumDefs < 1 || !Di.isReg(0))
+          break;
+        std::optional<unsigned> DstIdx = sgprIdx(MRI, Di.getReg(0));
+        if (!DstIdx)
+          break;
+        PcChain *Chain = State.findPc(*DstIdx);
+        if (!Chain || Chain->LowAddDone)
+          break;
+        // src0 must be the same pair the getpc produced; the other
+        // source must be a 64-bit immediate. The add is commutative, so
+        // accept (pair, imm) in either operand order.
+        if (Di.NumSrcs < 2)
+          break;
+        unsigned SrcA = Di.SrcMap[0];
+        unsigned SrcB = Di.SrcMap[1];
+        std::optional<unsigned> SrcAIdx;
+        if (Di.isReg(SrcA))
+          SrcAIdx = sgprIdx(MRI, Di.getReg(SrcA));
+        std::optional<unsigned> SrcBIdx;
+        if (Di.isReg(SrcB))
+          SrcBIdx = sgprIdx(MRI, Di.getReg(SrcB));
+        std::optional<int64_t> Disp;
+        if (SrcAIdx && *SrcAIdx == *DstIdx && !SrcBIdx)
+          Disp = evalOperandAsConst(Di.Inst, SrcB);
+        else if (SrcBIdx && *SrcBIdx == *DstIdx && !SrcAIdx)
+          Disp = evalOperandAsConst(Di.Inst, SrcA);
+        if (!Disp)
+          break;
+        uint64_t NewVal = Chain->Value + static_cast<uint64_t>(*Disp);
+        // The 64-bit add already folded both halves into NewVal; complete
+        // the chain in one step (low-add done, then finish the high half
+        // with zero additional carry).
+        State.markLowAddDone(*DstIdx, NewVal);
+        State.finishHighAdd(*DstIdx, Di.Offset, 0);
+        Result.ChainTerminators[Di.Offset] =
+            SetPcCallSiteInfo{State.findPc(*DstIdx)->Value, *DstIdx};
         continue;
       }
 
@@ -727,8 +770,7 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
         if (!Di.isReg(SrcOpIdx)) {
           SetPcSiteInfo Info;
           Info.SiteKind = SetPcSiteInfo::Kind::Unresolvable;
-          Info.RefusalReason =
-              "s_swap_pc_i64 source operand is not a register";
+          Info.RefusalReason = "s_swap_pc_i64 source operand is not a register";
           Result.SetpcSites[Di.Offset] = std::move(Info);
           if (DstLow) {
             State.invalidatePcAt(*DstLow);
@@ -792,8 +834,7 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
         }
         // Dst pair now holds an opaque (return-PC) value; remove from
         // PC tracking so a downstream s_set_pc_i64 reading dst falls
-        // into Pattern B (enumerated-dispatch cascade) rather than
-        // DirectA.
+        // into Pattern B (enumerated dispatch) rather than DirectA.
         if (DstLow) {
           State.invalidatePcAt(*DstLow);
           State.invalidatePcAt(*DstLow + 1);
@@ -806,8 +847,7 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
         if (!Di.isReg(SrcOpIdx)) {
           SetPcSiteInfo Info;
           Info.SiteKind = SetPcSiteInfo::Kind::Unresolvable;
-          Info.RefusalReason =
-              "s_set_pc_i64 source operand is not a register";
+          Info.RefusalReason = "s_set_pc_i64 source operand is not a register";
           Result.SetpcSites[Di.Offset] = std::move(Info);
           continue;
         }
@@ -924,7 +964,11 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
     std::optional<uint64_t> NextOff;
     if ((Bi + 1) < Blocks.size())
       NextOff = Blocks[Bi + 1].Offset;
-    Bd.Successors = computeDecodedBlockSuccessors(Insts[Bd.LastIdx], NextOff);
+    Expected<SmallVector<uint64_t>> SuccOrErr =
+        computeDecodedBlockSuccessors(Insts[Bd.LastIdx], NextOff);
+    if (!SuccOrErr)
+      return SuccOrErr.takeError();
+    Bd.Successors = std::move(*SuccOrErr);
   }
 
   // ---------------------------------------------------------------
@@ -933,11 +977,11 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
   //   entryFacts[blockIdx][pairLow] = PcLatticeValue
   //
   // Formulation: at each block B,
-  //   entryFacts[B] = JOIN over P ∈ preds(B) of exitFacts(P)
+  //   entryFacts[B] = JOIN over P in preds(B) of exitFacts(P)
   //
   // where exitFacts(P) = transfer(entryFacts[P], P.transfers):
   //   - SET overrides any incoming entry with {value, !incomplete}
-  //   - KILL overrides with {∅, incomplete}
+  //   - KILL overrides with {empty, incomplete}
   //   - PASS leaves the entry unchanged
   //
   // and JOIN is set-union of `values` + OR of `incomplete` bits, with
@@ -970,24 +1014,23 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
   // computeExit applies the per-block transfer to a given entry-fact
   // map and returns the exit-fact map. PASS pairs flow through; SET
   // and KILL pairs override.
-  auto ComputeExit =
-      [&](const llvm::DenseMap<unsigned, PcLatticeValue> &Entry,
-          const BlockData &Bd) {
-        llvm::DenseMap<unsigned, PcLatticeValue> Exit = Entry;
-        for (const auto &Kv : Bd.Transfers) {
-          if (Kv.second.TransferKind == PairTransfer::Kind::Set) {
-            PcLatticeValue V;
-            V.Values.push_back(Kv.second.Value);
-            V.Incomplete = false;
-            Exit[Kv.first] = std::move(V);
-          } else if (Kv.second.TransferKind == PairTransfer::Kind::Kill) {
-            PcLatticeValue V;
-            V.Incomplete = true;
-            Exit[Kv.first] = std::move(V);
-          }
-        }
-        return Exit;
-      };
+  auto ComputeExit = [&](const llvm::DenseMap<unsigned, PcLatticeValue> &Entry,
+                         const BlockData &Bd) {
+    llvm::DenseMap<unsigned, PcLatticeValue> Exit = Entry;
+    for (const auto &Kv : Bd.Transfers) {
+      if (Kv.second.TransferKind == PairTransfer::Kind::Set) {
+        PcLatticeValue V;
+        V.Values.push_back(Kv.second.Value);
+        V.Incomplete = false;
+        Exit[Kv.first] = std::move(V);
+      } else if (Kv.second.TransferKind == PairTransfer::Kind::Kill) {
+        PcLatticeValue V;
+        V.Incomplete = true;
+        Exit[Kv.first] = std::move(V);
+      }
+    }
+    return Exit;
+  };
 
   llvm::SmallVector<llvm::DenseMap<unsigned, PcLatticeValue>> EntryFacts(
       Blocks.size());
@@ -1045,8 +1088,7 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
       EntryFacts[Bi] = std::move(NewEntry);
       for (uint64_t SuccOff : Blocks[Bi].Successors) {
         auto Sit = OffsetToBlockIdx.find(SuccOff);
-        if (Sit != OffsetToBlockIdx.end() &&
-            !OnWorklist[Sit->second]) {
+        if (Sit != OffsetToBlockIdx.end() && !OnWorklist[Sit->second]) {
           Worklist.push_back(Sit->second);
           OnWorklist[Sit->second] = true;
         }
@@ -1063,10 +1105,9 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
       continue;
     const auto &Facts = EntryFacts[Bit->second];
     auto It = Facts.find(Pds.SrcPair);
-    bool Resolved =
-        (It != Facts.end()) && !It->second.Incomplete &&
-        !It->second.Values.empty() &&
-        It->second.Values.size() <= kMaxDispatchTargets;
+    bool Resolved = (It != Facts.end()) && !It->second.Incomplete &&
+                    !It->second.Values.empty() &&
+                    It->second.Values.size() <= kMaxDispatchTargets;
 
     if (!Resolved) {
       if (Pds.IsSwap) {
@@ -1169,7 +1210,7 @@ SetPcAnalysis analyseSetPC(ArrayRef<DecodedInst> Insts,
   // Classify PendingB sites.
   for (const struct PendingB &Pb : PendingBs) {
     if (Result.SetpcSites.count(Pb.SetpcOffset))
-      continue;  // already classified by Phase 4 (e.g. DispatchSet)
+      continue; // already classified by Phase 4 (e.g. DispatchSet)
     auto It = TargetsByPair.find(Pb.RetPairLowReg);
     if (It == TargetsByPair.end() || It->second.empty()) {
       SetPcSiteInfo Info;

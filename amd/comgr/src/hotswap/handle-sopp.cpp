@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "handlers.h"
 #include "decode.h"
+#include "handlers.h"
 
 #include "SIDefines.h"
 #include "llvm/ADT/Twine.h"
@@ -20,9 +20,8 @@ namespace COMGR::hotswap {
 
 namespace {
 
-BasicBlock *lookupDecodedBB(RaiseContext &Ctx, const DecodedInst &Di,
-                            uint64_t Addr, const llvm::Twine &Role,
-                            HandlerResult &Hr) {
+Expected<BasicBlock *> lookupDecodedBB(RaiseContext &Ctx, const DecodedInst &Di,
+                                       uint64_t Addr, const llvm::Twine &Role) {
   auto It = Ctx.OffsetToBb.find(Addr);
   if (It != Ctx.OffsetToBb.end())
     return It->second;
@@ -33,33 +32,30 @@ BasicBlock *lookupDecodedBB(RaiseContext &Ctx, const DecodedInst &Di,
   // recovery failed to decode an in-extent target.
   if (Addr < Ctx.KernelStartOffset ||
       (Ctx.KernelEndOffset != 0 && Addr >= Ctx.KernelEndOffset)) {
-    Hr.Failure = RaiseFailure::kernelBoundaryViolation(
+    return RaiseFailure::kernelBoundaryViolation(
         Ctx.Kernel->getName(), Addr,
-        Twine(Role) + " target is outside the selected kernel extent");
-    return nullptr;
+        Role + " target is outside the selected kernel extent");
   }
-  Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+  return RaiseFailure::unsupportedInstructionForm(
       Di, "SOPP",
-      Twine(Role) + " target 0x" + Twine::utohexstr(Addr) +
+      Role + " target 0x" + Twine::utohexstr(Addr) +
           " is inside the selected kernel extent but was not decoded");
-  return nullptr;
 }
 
-BasicBlock *lookupFallthroughBB(RaiseContext &Ctx, const DecodedInst &Di,
-                                llvm::StringRef Role, HandlerResult &Hr) {
+Expected<BasicBlock *> lookupFallthroughBB(RaiseContext &Ctx,
+                                           const DecodedInst &Di,
+                                           llvm::StringRef Role) {
   if (Di.Size > UINT64_MAX - Di.Offset) {
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
-        Di, "SOPP", Twine(Role) + " fallthrough overflows source offset");
-    return nullptr;
+    return RaiseFailure::unsupportedInstructionForm(
+        Di, "SOPP", Role + " fallthrough overflows source offset");
   }
-  return lookupDecodedBB(Ctx, Di, Di.Offset + Di.Size,
-                         Twine(Role) + " fallthrough", Hr);
+  return lookupDecodedBB(Ctx, Di, Di.Offset + Di.Size, Role + " fallthrough");
 }
 
 } // namespace
 
-HandlerResult handleSOPP(RaiseContext &Ctx, const DecodedInst &Di,
-                         OpResolver &Op) {
+Expected<HandlerResult> handleSOPP(RaiseContext &Ctx, const DecodedInst &Di,
+                                   OpResolver &Op) {
   (void)Op;
   HandlerResult Hr;
   CanonicalOp Sop = Di.CanonOp;
@@ -73,70 +69,97 @@ HandlerResult handleSOPP(RaiseContext &Ctx, const DecodedInst &Di,
     return Hr;
   }
   if (Sop == CanonicalOp::S_BRANCH) {
-    uint64_t Target = computeSoppBranchTarget(Di.Offset, Di.getImm(0));
-    BasicBlock *TargetBb = lookupDecodedBB(Ctx, Di, Target, "s_branch", Hr);
+    Expected<uint64_t> TargetOrErr =
+        computeSoppBranchTarget(Di.Offset, Di.getImm(0));
+    if (!TargetOrErr)
+      return TargetOrErr.takeError();
+    uint64_t Target = *TargetOrErr;
+    Expected<BasicBlock *> TargetBb =
+        lookupDecodedBB(Ctx, Di, Target, "s_branch");
     if (!TargetBb)
-      return Hr;
-    Ctx.B.CreateBr(TargetBb);
+      return TargetBb.takeError();
+
+    Ctx.B.CreateBr(*TargetBb);
     Hr.Handled = true;
     return Hr;
   }
-  if (Sop == CanonicalOp::S_CBRANCH_EXECZ || Sop == CanonicalOp::S_CBRANCH_EXECNZ) {
-    uint64_t Target = computeSoppBranchTarget(Di.Offset, Di.getImm(0));
-    BasicBlock *TargetBb = lookupDecodedBB(Ctx, Di, Target,
-                                           "s_cbranch_exec", Hr);
+  if (Sop == CanonicalOp::S_CBRANCH_EXECZ ||
+      Sop == CanonicalOp::S_CBRANCH_EXECNZ) {
+    Expected<uint64_t> TargetOrErr =
+        computeSoppBranchTarget(Di.Offset, Di.getImm(0));
+    if (!TargetOrErr)
+      return TargetOrErr.takeError();
+    uint64_t Target = *TargetOrErr;
+    Expected<BasicBlock *> TargetBb =
+        lookupDecodedBB(Ctx, Di, Target, "s_cbranch_exec");
     if (!TargetBb)
-      return Hr;
-    BasicBlock *FallthroughBb = lookupFallthroughBB(
-        Ctx, Di, "s_cbranch_exec", Hr);
+      return TargetBb.takeError();
+
+    Expected<BasicBlock *> FallthroughBb =
+        lookupFallthroughBB(Ctx, Di, "s_cbranch_exec");
     if (!FallthroughBb)
-      return Hr;
+      return FallthroughBb.takeError();
+
     Value *ExecVal = Ctx.Regs.loadExec(Ctx.B);
     Value *IsZero = Ctx.B.CreateICmpEQ(
         ExecVal, Constant::getNullValue(Ctx.Regs.ExecTy), "exec_is_zero");
     if (Sop == CanonicalOp::S_CBRANCH_EXECZ)
-      Ctx.B.CreateCondBr(IsZero, TargetBb, FallthroughBb);
+      Ctx.B.CreateCondBr(IsZero, *TargetBb, *FallthroughBb);
     else
-      Ctx.B.CreateCondBr(Ctx.B.CreateNot(IsZero, "exec_nz"), TargetBb,
-                         FallthroughBb);
+      Ctx.B.CreateCondBr(Ctx.B.CreateNot(IsZero, "exec_nz"), *TargetBb,
+                         *FallthroughBb);
     Hr.Handled = true;
     return Hr;
   }
-  if (Sop == CanonicalOp::S_CBRANCH_SCC0 || Sop == CanonicalOp::S_CBRANCH_SCC1) {
-    uint64_t Target = computeSoppBranchTarget(Di.Offset, Di.getImm(0));
-    BasicBlock *TargetBb =
-        lookupDecodedBB(Ctx, Di, Target, "s_cbranch_scc", Hr);
+  if (Sop == CanonicalOp::S_CBRANCH_SCC0 ||
+      Sop == CanonicalOp::S_CBRANCH_SCC1) {
+    Expected<uint64_t> TargetOrErr =
+        computeSoppBranchTarget(Di.Offset, Di.getImm(0));
+    if (!TargetOrErr)
+      return TargetOrErr.takeError();
+    uint64_t Target = *TargetOrErr;
+    Expected<BasicBlock *> TargetBb =
+        lookupDecodedBB(Ctx, Di, Target, "s_cbranch_scc");
     if (!TargetBb)
-      return Hr;
-    BasicBlock *FallthroughBb = lookupFallthroughBB(
-        Ctx, Di, "s_cbranch_scc", Hr);
+      return TargetBb.takeError();
+
+    Expected<BasicBlock *> FallthroughBb =
+        lookupFallthroughBB(Ctx, Di, "s_cbranch_scc");
     if (!FallthroughBb)
-      return Hr;
+      return FallthroughBb.takeError();
+
     Value *SccV = Ctx.Regs.loadSCC(Ctx.B);
     if (Sop == CanonicalOp::S_CBRANCH_SCC0)
       SccV = Ctx.B.CreateNot(SccV, "not_scc");
-    Ctx.B.CreateCondBr(SccV, TargetBb, FallthroughBb);
+    Ctx.B.CreateCondBr(SccV, *TargetBb, *FallthroughBb);
     Hr.Handled = true;
     return Hr;
   }
-  if (Sop == CanonicalOp::S_CBRANCH_VCCNZ || Sop == CanonicalOp::S_CBRANCH_VCCZ) {
-    uint64_t Target = computeSoppBranchTarget(Di.Offset, Di.getImm(0));
-    BasicBlock *TargetBb =
-        lookupDecodedBB(Ctx, Di, Target, "s_cbranch_vcc", Hr);
+  if (Sop == CanonicalOp::S_CBRANCH_VCCNZ ||
+      Sop == CanonicalOp::S_CBRANCH_VCCZ) {
+    Expected<uint64_t> TargetOrErr =
+        computeSoppBranchTarget(Di.Offset, Di.getImm(0));
+    if (!TargetOrErr)
+      return TargetOrErr.takeError();
+    uint64_t Target = *TargetOrErr;
+    Expected<BasicBlock *> TargetBb =
+        lookupDecodedBB(Ctx, Di, Target, "s_cbranch_vcc");
     if (!TargetBb)
-      return Hr;
-    BasicBlock *FallthroughBb = lookupFallthroughBB(
-        Ctx, Di, "s_cbranch_vcc", Hr);
+      return TargetBb.takeError();
+
+    Expected<BasicBlock *> FallthroughBb =
+        lookupFallthroughBB(Ctx, Di, "s_cbranch_vcc");
     if (!FallthroughBb)
-      return Hr;
+      return FallthroughBb.takeError();
+
     Value *VccMask = Ctx.Regs.readVCCAsWaveMask(Ctx.B, Ctx.Regs.ExecTy);
     Value *VccIsZero = Ctx.B.CreateICmpEQ(
         VccMask, Constant::getNullValue(VccMask->getType()), "vcc_is_zero");
     if (Sop == CanonicalOp::S_CBRANCH_VCCZ)
-      Ctx.B.CreateCondBr(VccIsZero, TargetBb, FallthroughBb);
+      Ctx.B.CreateCondBr(VccIsZero, *TargetBb, *FallthroughBb);
     else
-      Ctx.B.CreateCondBr(Ctx.B.CreateNot(VccIsZero, "vcc_nz"), TargetBb,
-                         FallthroughBb);
+      Ctx.B.CreateCondBr(Ctx.B.CreateNot(VccIsZero, "vcc_nz"), *TargetBb,
+                         *FallthroughBb);
     Hr.Handled = true;
     return Hr;
   }
@@ -172,9 +195,9 @@ HandlerResult handleSOPP(RaiseContext &Ctx, const DecodedInst &Di,
   // flips after the LDS reshape.  Cross-target counter names do not map 1:1, so
   // use the conservative gfx942-compatible wait-all form.
   if (Sop == CanonicalOp::S_WAITCNT || Sop == CanonicalOp::S_WAIT_LOADCNT ||
-      Sop == CanonicalOp::S_WAIT_STORECNT ||
-      Sop == CanonicalOp::S_WAIT_KMCNT || Sop == CanonicalOp::S_WAIT_DSCNT ||
-      Sop == CanonicalOp::S_WAIT_XCNT || Sop == CanonicalOp::S_WAIT_LOADCNT_DSCNT) {
+      Sop == CanonicalOp::S_WAIT_STORECNT || Sop == CanonicalOp::S_WAIT_KMCNT ||
+      Sop == CanonicalOp::S_WAIT_DSCNT || Sop == CanonicalOp::S_WAIT_XCNT ||
+      Sop == CanonicalOp::S_WAIT_LOADCNT_DSCNT) {
     Function *WaitFn =
         Intrinsic::getOrInsertDeclaration(&Ctx.M, Intrinsic::amdgcn_s_waitcnt);
     Ctx.B.CreateCall(WaitFn, {Ctx.B.getInt32(0)});
@@ -188,8 +211,8 @@ HandlerResult handleSOPP(RaiseContext &Ctx, const DecodedInst &Di,
   // correctness argument alongside the other SOPP branches.
   //
   // Both counters track work in dedicated gfx1250 hardware units
-  // (`ASYNCcnt`, `TENSORcnt`; programming_manual.pdf §4.9.9 and
-  // §6 respectively) that do not exist on gfx942.  The source DMAs
+  // (`ASYNCcnt`, `TENSORcnt`; programming_manual.pdf sec. 4.9.9 and
+  // sec. 6 respectively) that do not exist on gfx942.  The source DMAs
   // they gate are emulated as synchronous `load`+`store` chains on
   // the cross-target arm (see `handle-flat.cpp`'s
   // `GLOBAL_LOAD_ASYNC_TO_LDS_B*` handler and `handle-vimage.cpp`'s
@@ -208,7 +231,8 @@ HandlerResult handleSOPP(RaiseContext &Ctx, const DecodedInst &Di,
   // relevant memory dependency.  Do not merge this arm with the ordinary
   // wait-counter branch above unless the async/tensor counter semantics have a
   // target-independent wait-all lowering too.
-  if (Sop == CanonicalOp::S_WAIT_ASYNCCNT || Sop == CanonicalOp::S_WAIT_TENSORCNT) {
+  if (Sop == CanonicalOp::S_WAIT_ASYNCCNT ||
+      Sop == CanonicalOp::S_WAIT_TENSORCNT) {
     Hr.Handled = true;
     return Hr;
   }
@@ -224,11 +248,10 @@ HandlerResult handleSOPP(RaiseContext &Ctx, const DecodedInst &Di,
     bool IsDealloc = Simm16 == AMDGPU::SendMsg::ID_DEALLOC_VGPRS_GFX11Plus;
 
     if (!IsInterrupt && !IsDealloc) {
-      Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+      return RaiseFailure::unsupportedInstructionForm(
           Di, "SOPP",
-          Twine("unsupported s_sendmsg SIMM16=0x") + Twine::utohexstr(Simm16) +
+          "unsupported s_sendmsg SIMM16=0x" + Twine::utohexstr(Simm16) +
               "; only MSG_INTERRUPT (1) and MSG_DEALLOC_VGPRS (3) are lifted");
-      return Hr;
     }
 
     // DEALLOC_VGPRS is a gfx11+ early-free hint; drop it where unsupported

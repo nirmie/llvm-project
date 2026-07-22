@@ -8,9 +8,9 @@
 
 #include "handle-valu-internal.h"
 
-#include "opcode-map.h"
 #include "canonical-op-attrs.h"
 #include "canonical-op.h"
+#include "opcode-map.h"
 
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -35,8 +35,8 @@ ArrayRef<CanonicalOpAttrSpec> getHandlerValuVcmpAttrs() {
   return kAttrs;
 }
 
-HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
-                               OpResolver &Op) {
+Expected<HandlerResult> handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
+                                       OpResolver &Op) {
   HandlerResult Hr;
   CanonicalOp Sop = Di.CanonOp;
   switch (Sop) {
@@ -60,9 +60,8 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
     errs() << "transpiler: " << Mn
            << ": V_CMP/V_CMPX reached handler without VCmpMeta "
               "(OpcodeMap::build should have populated it)\n";
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    return RaiseFailure::unsupportedInstructionForm(
         Di, "VALU", "V_CMP/V_CMPX reached handler without VCmpMeta");
-    return Hr;
   }
 
   // ---- v_cmp_class_f<bits> / v_cmpx_class_f<bits> ----
@@ -93,7 +92,9 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
       Src0 = Raw0;
     } else {
       FTy = Type::getDoubleTy(Ctx.C);
-      Src0 = Ctx.B.CreateBitCast(Op.src64(0), FTy, "vclassf64");
+      // src64() is raw; apply VOP3 neg/abs like the f32 path (via srcF()).
+      Src0 =
+          Op.applyMods(0, Ctx.B.CreateBitCast(Op.src64(0), FTy, "vclassf64"));
     }
     Value *Mask = Op.src(1);
     Function *ClassFn = Intrinsic::getOrInsertDeclaration(
@@ -116,8 +117,9 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
   } else if (M->IsFloat) {
     if (M->Bits == 64) {
       auto *F64Ty = Type::getDoubleTy(Ctx.C);
-      S0 = Ctx.B.CreateBitCast(Op.src64(0), F64Ty);
-      S1 = Ctx.B.CreateBitCast(Op.src64(1), F64Ty);
+      // src64() is raw; apply VOP3 neg/abs like the f32/f16 paths (srcF()).
+      S0 = Op.applyMods(0, Ctx.B.CreateBitCast(Op.src64(0), F64Ty));
+      S1 = Op.applyMods(1, Ctx.B.CreateBitCast(Op.src64(1), F64Ty));
     } else if (M->Bits == 32) {
       S0 = Op.srcF(0);
       S1 = Op.srcF(1);
@@ -160,9 +162,8 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
   }
   if (!M->IsClass && (!S0 || !S1)) {
     errs() << "transpiler: " << Mn << ": missing operand\n";
-    Hr.Failure = RaiseFailure::unsupportedInstructionForm(
+    return RaiseFailure::unsupportedInstructionForm(
         Di, "VALU", "V_CMP/V_CMPX missing operand");
-    return Hr;
   }
 
   if (!M->IsClass)
@@ -197,9 +198,8 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
     // target-lane answer on lanes 32..63. See
     // `lit_tests/v_cmpx_ballot` for the pinned IR shape (MODREP)
     // and `lit_tests/v_cmpx_wave_native` for the wave-native shape.
-    Value *Mask = Ctx.Projection.ballotI1ToWidth(Ctx.B, Cmp,
-                                                  Ctx.Regs.ExecTy,
-                                                  "cmpx_ballot");
+    Value *Mask = Ctx.Projection.ballotI1ToWidth(Ctx.B, Cmp, Ctx.Regs.ExecTy,
+                                                 "cmpx_ballot");
     Value *CurExec = Ctx.Regs.loadExec(Ctx.B);
     Ctx.Regs.storeExec(Ctx.B, Ctx.B.CreateAnd(CurExec, Mask, "cmpx_exec"));
   } else {
@@ -211,7 +211,7 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
         // Same ballot discipline as V_CMPX: the SGPR destination
         // carries a wave-level mask, not a per-lane predicate. `sext`
         // here would make every downstream consumer that reads the
-        // SGPR as a wave mask (`s_and_b64`, `s_mov_b64 exec, …`,
+        // SGPR as a wave mask (`s_and_b64`, `s_mov_b64 exec, ...`,
         // `v_cndmask_b32`'s mask input via `readVCCAsWaveMask`) see
         // divergent SSA and silently miscompile.
         //
@@ -235,8 +235,8 @@ HandlerResult handleValuVcmp(RaiseContext &Ctx, const DecodedInst &Di,
             (Ctx.Projection.sourceWaveScopedLaneOps() && D.WidthInDwords >= 2)
                 ? Ctx.I64Ty
                 : Ctx.Projection.sourceWaveMaskTy();
-        Value *Mask = Ctx.Projection.ballotI1ToWidth(
-            Ctx.B, Cmp, SourceWidth, "vcmp_ballot");
+        Value *Mask = Ctx.Projection.ballotI1ToWidth(Ctx.B, Cmp, SourceWidth,
+                                                     "vcmp_ballot");
         Ctx.writeRegExecWidth(D, Mask);
 
         // Cache the per-lane `i1` alongside the narrow wave-mask

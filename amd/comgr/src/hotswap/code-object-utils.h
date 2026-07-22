@@ -20,8 +20,8 @@
 #define HOTSWAP_TRANSPILER_CODE_OBJECT_UTILS_H
 
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/MathExtras.h"
@@ -36,7 +36,22 @@ namespace COMGR::hotswap {
 /// `extractTextSection`. The byte buffer is owned by the `TextSection` --
 /// the underlying ELF MemoryBuffer is not borrowed across the call.
 struct TextSection {
+  /// Raw `.text` bytes, indexed by text-relative decoded instruction offsets.
   llvm::SmallVector<uint8_t> Bytes;
+  /// Runtime address of `.text`; PC-relative instructions use this source
+  /// code-object address domain.
+  uint64_t Address = 0;
+
+  /// Allocated source sections whose bytes may be read through PC-relative
+  /// SMEM.
+  struct ImageSection {
+    /// Section bytes, indexed by source code-object address minus `Address`.
+    llvm::SmallVector<uint8_t> Bytes;
+    /// Runtime address of this source code-object section.
+    uint64_t Address = 0;
+  };
+  /// Minimal source image used for literal-table materialisation.
+  llvm::SmallVector<ImageSection> ImageSections;
 };
 
 /// Resolved text-section extent for a kernel symbol. `Offset` is relative to
@@ -174,6 +189,16 @@ llvm::Expected<KernelMeta> extractKernelMeta(llvm::MemoryBufferRef ElfData,
 llvm::Expected<KernelSymbolExtent>
 findKernelSymbolExtent(llvm::MemoryBufferRef ElfData,
                        llvm::StringRef KernelName);
+
+/// List the byte extent of every function symbol in `.text`, sorted by
+/// ascending offset. Offsets are `.text`-relative (symbol address minus the
+/// section base), matching `findKernelSymbolExtent`. Zero-sized symbols are
+/// bounded by the next function symbol (or the end of `.text`). This lets the
+/// raiser resolve a call/branch target that lands in a *different* function
+/// (an outlined device helper) to that callee's extent so it can be decoded
+/// and lifted alongside the caller.
+llvm::Expected<llvm::SmallVector<KernelSymbolExtent>>
+listTextFunctionExtents(llvm::MemoryBufferRef ElfData);
 
 } // namespace COMGR::hotswap
 

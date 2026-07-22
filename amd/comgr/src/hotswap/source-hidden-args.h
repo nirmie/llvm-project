@@ -38,6 +38,7 @@ struct SourceHiddenArgContext {
   llvm::Type *I64Ty;
   llvm::ArrayRef<KernelArgMeta> Args;
   bool AssumeHipGlobalOffsetZero = false;
+  unsigned TargetCodeObjectVersion = 6;
 };
 
 // Result of attempting to synthesize a source hidden argument.
@@ -52,12 +53,11 @@ struct SourceHiddenArgValue {
 
 // Synthesize a 32-bit source hidden argument value at ByteOffset.
 SourceHiddenArgValue emitSourceHiddenDword(SourceHiddenArgContext &Ctx,
-                                           int ByteOffset);
+                                           int64_t ByteOffset);
 // Synthesize a 1-, 2-, or 4-byte source hidden integer at ByteOffset.
 SourceHiddenArgValue emitSourceHiddenInteger(SourceHiddenArgContext &Ctx,
-                                             int ByteOffset,
-                                             unsigned ByteWidth,
-                                             bool IsSigned);
+                                             int64_t ByteOffset,
+                                             unsigned ByteWidth, bool IsSigned);
 
 } // namespace COMGR::hotswap
 

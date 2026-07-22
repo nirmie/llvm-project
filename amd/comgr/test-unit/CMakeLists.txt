@@ -98,6 +98,7 @@ function(comgr_link_hotswap_transpiler target)
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/comgr-symbol.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../test-shared/standalone-init.cpp)
   target_include_directories(${target} PRIVATE
+    ${LLVM_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${CMAKE_CURRENT_BINARY_DIR}/../include)
   comgr_add_amdgpu_private_include_dirs(${target})
@@ -171,6 +172,8 @@ add_executable(HotswapMCTests
   ../src/comgr-hotswap-patch-vop3px2-src2.cpp
   ../src/comgr-hotswap-patch-wmma-hazard.cpp
   ../src/comgr-hotswap-patch-wmma-split.cpp
+  ../src/comgr-hotswap-patch-f32-to-e5m3.cpp
+  ../src/comgr-hotswap-patch-wmma-scale16.cpp
   ../src/comgr-env.cpp)
 
 llvm_map_components_to_libnames(COMGR_TEST_UNIT_MC_LIBS

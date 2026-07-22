@@ -136,12 +136,23 @@ bool isIntrinsicVGPRSafePropagator(Intrinsic::ID Id) {
   case Intrinsic::amdgcn_sqrt:
   case Intrinsic::amdgcn_trig_preop:
   case Intrinsic::amdgcn_frexp_mant:
+  case Intrinsic::amdgcn_frexp_exp:
   case Intrinsic::amdgcn_sffbh:
   case Intrinsic::amdgcn_div_fixup:
   case Intrinsic::amdgcn_div_fmas:
   case Intrinsic::amdgcn_div_scale:
   case Intrinsic::amdgcn_exp2:
   case Intrinsic::amdgcn_log:
+  // Whole-wave / whole-quad execution-mode markers: value-copy ops (VGPR
+  // in, same-type VGPR out, no SGPR-forced operand) that only constrain the
+  // EXEC mask under which the source is computed, so they are VGPR-safe.
+  // This pass emits strict.wwm itself (see forceWholeWaveGather /
+  // wrapAsWWMValue), so the classifier must walk through it.
+  case Intrinsic::amdgcn_strict_wwm:
+  case Intrinsic::amdgcn_wwm:
+  case Intrinsic::amdgcn_strict_wqm:
+  case Intrinsic::amdgcn_wqm:
+  case Intrinsic::amdgcn_softwqm:
   // Cross-lane primitives the rewrite also rewrites in this same
   // pass: their post-rewrite shape is `select` / `ds_bpermute`, both
   // VGPR-safe. We can treat them as VGPR-safe propagators pre-
@@ -157,7 +168,7 @@ bool isIntrinsicVGPRSafePropagator(Intrinsic::ID Id) {
   // accepting all-VGPR operands -- same bar as the `amdgcn_*` cases
   // above.  Unknown generic intrinsics stay SGPR-forced via the default
   // arm below, consistent with the "refuse when uncertain" rule in
-  // hotswap/docs/wave-size-translation.md §5.6.3.
+  // hotswap/docs/wave-size-translation.md sec. 5.6.3.
   //
   // Why these specifically, and why now: Triton's AMD backend emits
   // these in the fast-reciprocal / rsqrt Newton-iteration expansion
@@ -168,7 +179,7 @@ bool isIntrinsicVGPRSafePropagator(Intrinsic::ID Id) {
   // Triton kernel's readlane-result use chain.  Pre-audit, the
   // classifier over-approximated them as SGPR-forced, which disabled
   // the rewrite pass on the entire function (all-or-nothing per
-  // §5.6.3's "mix of rewritten and preserved sites recreates the
+  // sec. 5.6.3's "mix of rewritten and preserved sites recreates the
   // Matmul128x128 asymmetric-rewrite fault" rule).  The AMDGPU
   // lowerings are:
   //
@@ -414,7 +425,7 @@ bool isRawBufferAtomic(Intrinsic::ID Id) {
 // instruction `CB` at operand index `operandIdx`. Returns the call
 // site's role for the purposes of the forward walk.
 IntrinsicRole classifyIntrinsicUse(CallBase *CB, Value *V,
-                                    unsigned OperandIdx) {
+                                   unsigned OperandIdx) {
   // Inline asm: we cannot audit the constraint letters cheaply here
   // (would need to walk InlineAsm::ParseConstraints and map the
   // physical arg index to the constraint tuple). Refuse -- this is
@@ -488,7 +499,7 @@ IntrinsicRole classifyIntrinsicUse(CallBase *CB, Value *V,
 }
 
 SgprForcedConsumerKind classifySgprForcedIntrinsicUse(CallBase *CB,
-                                                       unsigned OperandIdx) {
+                                                      unsigned OperandIdx) {
   if (CB->isInlineAsm())
     return SgprForcedConsumerKind::InlineAsm;
 
@@ -588,10 +599,9 @@ UseChainVerdict classifyForwardUseChain(
         continue; // br/switch/ret consume as i1/i32; AMDGPU handles via EXEC
 
       // Pure propagators: forward-walk the instruction's result.
-      if (isa<CastInst>(I) || isa<BinaryOperator>(I) ||
-          isa<UnaryOperator>(I) || isa<ICmpInst>(I) || isa<FCmpInst>(I) ||
-          isa<SelectInst>(I) || isa<PHINode>(I) ||
-          isa<GetElementPtrInst>(I) || isa<FreezeInst>(I) ||
+      if (isa<CastInst>(I) || isa<BinaryOperator>(I) || isa<UnaryOperator>(I) ||
+          isa<ICmpInst>(I) || isa<FCmpInst>(I) || isa<SelectInst>(I) ||
+          isa<PHINode>(I) || isa<GetElementPtrInst>(I) || isa<FreezeInst>(I) ||
           isa<ExtractElementInst>(I) || isa<InsertElementInst>(I) ||
           isa<ShuffleVectorInst>(I) || isa<ExtractValueInst>(I) ||
           isa<InsertValueInst>(I)) {
@@ -642,8 +652,8 @@ UseChainVerdict classifyForwardUseChain(
       if (auto *CB = dyn_cast<CallBase>(I)) {
         unsigned OperandIdx = U.getOperandNo();
         if (Function *Callee = CB->getCalledFunction();
-            Callee && Callee->getIntrinsicID() ==
-                          Intrinsic::amdgcn_readfirstlane) {
+            Callee &&
+            Callee->getIntrinsicID() == Intrinsic::amdgcn_readfirstlane) {
           if (auto *CI = dyn_cast<CallInst>(CB)) {
             if (SourceWaveReadFirstLaneSites)
               SourceWaveReadFirstLaneSites->insert(CI);
@@ -694,10 +704,10 @@ Value *buildTargetLaneId(Function &F) {
   LLVMContext &C = F.getContext();
   Type *I32Ty = Type::getInt32Ty(C);
   IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
-  Function *MbcntLo = Intrinsic::getOrInsertDeclaration(
-      M, Intrinsic::amdgcn_mbcnt_lo);
-  Function *MbcntHi = Intrinsic::getOrInsertDeclaration(
-      M, Intrinsic::amdgcn_mbcnt_hi);
+  Function *MbcntLo =
+      Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_mbcnt_lo);
+  Function *MbcntHi =
+      Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_mbcnt_hi);
   // `ConstantInt::get(IntegerType*, uint64_t V, bool IsSigned=false)`
   // asserts `V < 2^BitWidth` when `!IsSigned`; implicit (int64_t)-1 ->
   // uint64_t produces `0xFFFF'FFFF'FFFF'FFFF` which blows that assert
@@ -707,10 +717,8 @@ Value *buildTargetLaneId(Function &F) {
   // construction.
   Value *MinusOne = ConstantInt::get(I32Ty, 0xFFFFFFFFu);
   Value *Zero = ConstantInt::get(I32Ty, 0);
-  Value *LaneLo = B.CreateCall(MbcntLo, {MinusOne, Zero},
-                                "cwd_lane_id_lo");
-  Value *LaneId = B.CreateCall(MbcntHi, {MinusOne, LaneLo},
-                                "cwd_lane_id");
+  Value *LaneLo = B.CreateCall(MbcntLo, {MinusOne, Zero}, "cwd_lane_id_lo");
+  Value *LaneId = B.CreateCall(MbcntHi, {MinusOne, LaneLo}, "cwd_lane_id");
   return LaneId;
 }
 
@@ -727,16 +735,29 @@ void rewriteWritelaneCall(CallInst *CI, Value *LaneId,
   Value *ModMask = ConstantInt::get(I32Ty, SourceWaveSize - 1);
   Value *LaneMod = B.CreateAnd(LaneId, ModMask, "cwd_wl_lane_mod");
   Value *SelMask = B.CreateICmpEQ(LaneMod, LaneIdx, "cwd_wl_mask");
-  Value *NewVal = B.CreateSelect(SelMask, Val, OldVal,
-                                  "cwd_writelane_rewritten");
+  Value *NewVal =
+      B.CreateSelect(SelMask, Val, OldVal, "cwd_writelane_rewritten");
   CI->replaceAllUsesWith(NewVal);
   CI->eraseFromParent();
 }
 
+// Force a rewritten `ds_bpermute` gather to run whole-wave unless the
+// projection already guarantees hardware EXEC = -1 kernel-wide.
+Value *forceWholeWaveGather(IRBuilder<> &B, Value *Gather,
+                            bool ProvidesFullWaveExecInvariant,
+                            const Twine &Name) {
+  if (ProvidesFullWaveExecInvariant)
+    return Gather;
+  Module *M = B.GetInsertBlock()->getModule();
+  Function *WwmFn = Intrinsic::getOrInsertDeclaration(
+      M, Intrinsic::amdgcn_strict_wwm, {Gather->getType()});
+  return B.CreateCall(WwmFn, {Gather}, Name);
+}
+
 // Rewrite one `amdgcn.readlane(src, lane)` call to
 // `ds_bpermute(((lane_id & ~(W_s-1)) | lane) << 2, src)`.
-void rewriteReadlaneCall(CallInst *CI, Value *LaneId,
-                         unsigned SourceWaveSize) {
+void rewriteReadlaneCall(CallInst *CI, Value *LaneId, unsigned SourceWaveSize,
+                         bool ProvidesFullWaveExecInvariant) {
   IRBuilder<> B(CI);
   B.SetCurrentDebugLocation(CI->getDebugLoc());
   Module *M = CI->getModule();
@@ -744,19 +765,21 @@ void rewriteReadlaneCall(CallInst *CI, Value *LaneId,
   Value *Src = CI->getArgOperand(0);
   Value *LaneIdx = CI->getArgOperand(1);
 
-  uint32_t BaseMaskImm =
-      ~(static_cast<uint32_t>(SourceWaveSize) - 1u);
+  uint32_t BaseMaskImm = ~(static_cast<uint32_t>(SourceWaveSize) - 1u);
   Value *BaseMask = ConstantInt::get(I32Ty, BaseMaskImm);
-  Value *SrcWaveBase = B.CreateAnd(LaneId, BaseMask,
-                                    "cwd_rl_src_wave_base");
-  Value *BcastLane = B.CreateOr(SrcWaveBase, LaneIdx,
-                                 "cwd_rl_bcast_lane");
-  Value *Selector = B.CreateShl(BcastLane, ConstantInt::get(I32Ty, 2),
-                                 "cwd_rl_selector");
-  Function *Bpermute = Intrinsic::getOrInsertDeclaration(
-      M, Intrinsic::amdgcn_ds_bpermute);
-  Value *Broadcast = B.CreateCall(Bpermute, {Selector, Src},
-                                   "cwd_readlane_rewritten");
+  Value *SrcWaveBase = B.CreateAnd(LaneId, BaseMask, "cwd_rl_src_wave_base");
+  Value *BcastLane = B.CreateOr(SrcWaveBase, LaneIdx, "cwd_rl_bcast_lane");
+  Value *Selector =
+      B.CreateShl(BcastLane, ConstantInt::get(I32Ty, 2), "cwd_rl_selector");
+  Function *Bpermute =
+      Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_ds_bpermute);
+  Value *Broadcast =
+      B.CreateCall(Bpermute, {Selector, Src}, "cwd_readlane_rewritten");
+  // `v_readlane_b32` ignores EXEC; force the gather whole-wave so an
+  // EXEC-inactive source lane still contributes its real VGPR value
+  // instead of `ds_bpermute`'s inactive-lane 0.
+  Broadcast = forceWholeWaveGather(B, Broadcast, ProvidesFullWaveExecInvariant,
+                                   "cwd_readlane_wwm");
   CI->replaceAllUsesWith(Broadcast);
   CI->eraseFromParent();
 }
@@ -766,24 +789,28 @@ void rewriteReadlaneCall(CallInst *CI, Value *LaneId,
 // wave64 target wave instead of collapsing both halves through a single
 // hardware SGPR.
 void rewriteReadfirstlaneCall(CallInst *CI, Value *LaneId,
-                              unsigned SourceWaveSize) {
+                              unsigned SourceWaveSize,
+                              bool ProvidesFullWaveExecInvariant) {
   IRBuilder<> B(CI);
   B.SetCurrentDebugLocation(CI->getDebugLoc());
   Module *M = CI->getModule();
   Type *I32Ty = B.getInt32Ty();
   Value *Src = CI->getArgOperand(0);
 
-  uint32_t BaseMaskImm =
-      ~(static_cast<uint32_t>(SourceWaveSize) - 1u);
+  uint32_t BaseMaskImm = ~(static_cast<uint32_t>(SourceWaveSize) - 1u);
   Value *BaseMask = ConstantInt::get(I32Ty, BaseMaskImm);
-  Value *SrcWaveBase = B.CreateAnd(LaneId, BaseMask,
-                                   "cwd_rfl_src_wave_base");
-  Value *Selector = B.CreateShl(SrcWaveBase, ConstantInt::get(I32Ty, 2),
-                                "cwd_rfl_selector");
-  Function *Bpermute = Intrinsic::getOrInsertDeclaration(
-      M, Intrinsic::amdgcn_ds_bpermute);
-  Value *Broadcast = B.CreateCall(Bpermute, {Selector, Src},
-                                  "cwd_readfirstlane_rewritten");
+  Value *SrcWaveBase = B.CreateAnd(LaneId, BaseMask, "cwd_rfl_src_wave_base");
+  Value *Selector =
+      B.CreateShl(SrcWaveBase, ConstantInt::get(I32Ty, 2), "cwd_rfl_selector");
+  Function *Bpermute =
+      Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_ds_bpermute);
+  Value *Broadcast =
+      B.CreateCall(Bpermute, {Selector, Src}, "cwd_readfirstlane_rewritten");
+  // `v_readfirstlane_b32` ignores EXEC; force the gather whole-wave so
+  // the broadcast source lane contributes its real VGPR value even when
+  // the modeled EXEC marks it inactive.
+  Broadcast = forceWholeWaveGather(B, Broadcast, ProvidesFullWaveExecInvariant,
+                                   "cwd_readfirstlane_wwm");
   CI->replaceAllUsesWith(Broadcast);
   CI->eraseFromParent();
 }
@@ -828,7 +855,17 @@ bool isDppCtrlRewritable(unsigned Ctrl) {
   // current 16-lane row.
   if (Ctrl >= ROW_XMASK_FIRST && Ctrl <= ROW_XMASK_LAST)
     return true;
-  // Every other family (ROW_ROR, WAVE_*, ROW_MIRROR /
+  // ROW_ROR:N with N in [1, 15].  Row rotate right: source within-row
+  // lane `(withinRow - N) mod 16`.  Rotation is modular within the
+  // 16-lane row, so it never crosses a row boundary and is always
+  // in-range -- the same wave-size-obliviousness property that makes
+  // ROW_SHL / ROW_SHR / ROW_XMASK safe.  ROW_ROR0 (0x120, the N=0
+  // identity the ISA marks "unused") is below ROW_ROR_FIRST, so it is
+  // not accepted here -- like any unhandled ctrl it takes the refusal
+  // path rather than being silently treated as identity.
+  if (Ctrl >= ROW_ROR_FIRST && Ctrl <= ROW_ROR_LAST)
+    return true;
+  // Every other family (WAVE_*, ROW_MIRROR /
   // ROW_HALF_MIRROR, BCAST15 / BCAST31, ROW_NEWBCAST / ROW_SHARE)
   // either crosses 16-lane row boundaries in a wave-size-dependent
   // way OR has a correctness argument this rewrite has not yet
@@ -872,7 +909,12 @@ struct DppLaneMap {
 //     Target-lane L (within-row W) reads source within-row W ^ N.
 //     Always in-range: W ^ N stays within the 16-lane row.
 //
-// All four families keep the source lane within the same 16-lane
+//   * ROW_ROR:N          (0x121..0x12F)  -- row rotate right by N.
+//     Target-lane L (within-row W) reads source within-row
+//     (W - N) mod 16.  Always in-range: the rotation wraps within
+//     the 16-lane row.
+//
+// All five families keep the source lane within the same 16-lane
 // row as the target lane.  Since a 16-lane row is a topology
 // invariant of every AMDGPU wave size >= 16, the `rowBase(L) |
 // srcWithinRow` computation produces identical source-lane indices
@@ -880,15 +922,8 @@ struct DppLaneMap {
 // obliviousness property the rewrite relies on.
 //
 // Unsupported families (filtered upstream via
-// `isDppCtrlRewritable`; reaching this function with one fires
-// `report_fatal_error` at the trailing default case):
-//
-//   * ROW_ROR:N (row rotate right).  Rotation keeps data within a
-//     16-lane row, but requires modular arithmetic this helper
-//     could easily extend to.  Left off the supported list until a
-//     corpus kernel exercises it -- adding it requires updating
-//     `isDppCtrlRewritable`, adding another case below, and a lit
-//     fixture.
+// `isDppCtrlRewritable`; reaching this function with one returns
+// an error at the trailing default case):
 //
 //   * WAVE_SHL1 / WAVE_ROL1 / WAVE_SHR1 / WAVE_ROR1 (wave-wide
 //     shifts).  These cross 16-lane row boundaries within the source
@@ -916,11 +951,11 @@ struct DppLaneMap {
 // layout and document the in-range predicate and source-lane
 // formula alongside each case -- the correctness argument is local
 // per ctrl value.  Caller MUST have verified `isDppCtrlRewritable`;
-// this function asserts the invariant and `report_fatal_error`s
-// otherwise to turn an internal-invariant violation into a loud
+// this function re-checks the invariant and returns an error
+// otherwise to turn an internal-invariant violation into a surfaced
 // failure rather than a silent "miscompile with default values".
-DppLaneMap buildDppLaneMap(IRBuilder<> &B, Value *WithinRow,
-                            unsigned Ctrl) {
+Expected<DppLaneMap> buildDppLaneMap(IRBuilder<> &B, Value *WithinRow,
+                                     unsigned Ctrl) {
   using namespace llvm::AMDGPU::DPP;
   DppLaneMap Out;
   Type *I32Ty = B.getInt32Ty();
@@ -934,15 +969,15 @@ DppLaneMap buildDppLaneMap(IRBuilder<> &B, Value *WithinRow,
     // lives at bits `[2 * (withinRow & 3) .. 2 * (withinRow & 3) + 1]`
     // of `ctrl`.
     Value *QuadBase = B.CreateAnd(WithinRow, ConstantInt::get(I32Ty, ~3u),
-                                    "cwd_dpp_quad_base");
+                                  "cwd_dpp_quad_base");
     Value *QuadWithin = B.CreateAnd(WithinRow, ConstantInt::get(I32Ty, 3),
-                                     "cwd_dpp_quad_within");
+                                    "cwd_dpp_quad_within");
     Value *Shift = B.CreateShl(QuadWithin, ConstantInt::get(I32Ty, 1),
-                                "cwd_dpp_quad_shift");
+                               "cwd_dpp_quad_shift");
     Value *CtrlVal = ConstantInt::get(I32Ty, Ctrl);
-    Value *Selector = B.CreateAnd(B.CreateLShr(CtrlVal, Shift),
-                                   ConstantInt::get(I32Ty, 3),
-                                   "cwd_dpp_quad_sel");
+    Value *Selector =
+        B.CreateAnd(B.CreateLShr(CtrlVal, Shift), ConstantInt::get(I32Ty, 3),
+                    "cwd_dpp_quad_sel");
     Out.SrcWithinRow = B.CreateOr(QuadBase, Selector, "cwd_dpp_quad_src");
     Out.InRange = ConstantInt::getTrue(B.getContext());
     return Out;
@@ -956,9 +991,8 @@ DppLaneMap buildDppLaneMap(IRBuilder<> &B, Value *WithinRow,
     unsigned N = Ctrl - ROW_SHL0;
     Value *NVal = ConstantInt::get(I32Ty, N);
     Out.SrcWithinRow = B.CreateAdd(WithinRow, NVal, "cwd_dpp_sl_src");
-    Out.InRange = B.CreateICmpULT(Out.SrcWithinRow,
-                                   ConstantInt::get(I32Ty, 16),
-                                   "cwd_dpp_sl_inrange");
+    Out.InRange = B.CreateICmpULT(Out.SrcWithinRow, ConstantInt::get(I32Ty, 16),
+                                  "cwd_dpp_sl_inrange");
     return Out;
   }
 
@@ -988,13 +1022,32 @@ DppLaneMap buildDppLaneMap(IRBuilder<> &B, Value *WithinRow,
     return Out;
   }
 
+  if (Ctrl >= ROW_ROR_FIRST && Ctrl <= ROW_ROR_LAST) {
+    // ROW_ROR:N.  Row rotate right by N within the 16-lane row:
+    // source within-row = (withinRow - N) mod 16.  Computed as
+    // `(withinRow + (16 - N)) & 15` so the result stays in [0, 16)
+    // without a negative intermediate.  The rotation wraps within the
+    // row, so every target lane maps to a valid source lane in the
+    // same row -- always in-range and wave-size-oblivious under
+    // cross-widening (the 16-lane row is a topology invariant of every
+    // AMDGPU wave size, so `rowBase | srcWithinRow` yields identical
+    // source lanes on wave32 and wave64).
+    unsigned N = Ctrl - ROW_ROR0;
+    Value *AddVal = ConstantInt::get(I32Ty, (16u - N) & 15u);
+    Value *Sum = B.CreateAdd(WithinRow, AddVal, "cwd_dpp_ror_sum");
+    Out.SrcWithinRow =
+        B.CreateAnd(Sum, ConstantInt::get(I32Ty, 15), "cwd_dpp_ror_src");
+    Out.InRange = ConstantInt::getTrue(B.getContext());
+    return Out;
+  }
+
   // Caller contract violation: `isDppCtrlRewritable` returned true
   // for this ctrl but the decode here has no matching case.  That
   // means the predicate and the decoder have drifted apart -- a
   // miscompile-by-omission shape.  Fail loudly rather than produce
   // a zero-initialised DppLaneMap that would silently short-circuit
   // the rewrite's correctness invariant.
-  report_fatal_error(
+  return createStringError(
       "buildDppLaneMap invariant: isDppCtrlRewritable said supported "
       "but the decoder has no matching case. Extend both together.");
 }
@@ -1047,16 +1100,16 @@ std::string describeDppCtrl(unsigned Ctrl) {
 // Rewrite one `amdgcn.update.dpp.i32(old, src, dpp_ctrl, row_mask,
 // bank_mask, bound_ctrl)` call.  CALLER CONTRACT: `isDppCtrlRewritable(
 // ctrl)` MUST be true -- the pre-flight pass enforces this, and this
-// function `report_fatal_error`s if the invariant is broken at the
-// call site.  This is stricter than an assert (which would no-op in
+// function returns an error if the invariant is broken at the
+// call site.  This is stronger than an assert (which would no-op in
 // release builds) because a silently-half-rewritten function is
 // exactly the "silent-fallback" shape the project rule forbids.
 //
 // Only called for i32-overloaded DPP.  i64 DPP sites are left to
 // the backend's native lowering (see the header's "@llvm.amdgcn.
 // update.dpp" paragraph for the i32-only scope rationale).
-void rewriteUpdateDppI32Call(CallInst *CI, Value *LaneId,
-                             unsigned SourceWaveSize) {
+Error rewriteUpdateDppI32Call(CallInst *CI, Value *LaneId,
+                              unsigned SourceWaveSize) {
   IRBuilder<> B(CI);
   B.SetCurrentDebugLocation(CI->getDebugLoc());
   Module *M = CI->getModule();
@@ -1083,9 +1136,9 @@ void rewriteUpdateDppI32Call(CallInst *CI, Value *LaneId,
   // on one DPP site would violate the all-or-nothing symmetry across
   // the function's cross-lane primitives.
   if (!isDppCtrlRewritable(Ctrl))
-    report_fatal_error(Twine("rewriteUpdateDppI32Call invariant: "
-                              "pre-flight missed unsupported dpp_ctrl ") +
-                        describeDppCtrl(Ctrl));
+    return createStringError(Twine("rewriteUpdateDppI32Call invariant: "
+                                   "pre-flight missed unsupported dpp_ctrl ") +
+                             describeDppCtrl(Ctrl));
 
   // Lane-topology values for the source-fetch path.  Both are
   // derived from the target-wave physical `LaneId` because DPP
@@ -1096,38 +1149,39 @@ void rewriteUpdateDppI32Call(CallInst *CI, Value *LaneId,
   // is the and/lshr chain, which instcombine folds post-pass.
   Value *WithinRow =
       B.CreateAnd(LaneId, ConstantInt::get(I32Ty, 0xF), "cwd_dpp_within_row");
-  Value *RowBase = B.CreateAnd(LaneId, ConstantInt::get(I32Ty, ~0xFu),
-                                "cwd_dpp_row_base");
+  Value *RowBase =
+      B.CreateAnd(LaneId, ConstantInt::get(I32Ty, ~0xFu), "cwd_dpp_row_base");
 
   // Per-ctrl source mapping.  `isDppCtrlRewritable` gated the call
   // site -- `buildDppLaneMap` is guaranteed to return a valid map.
-  DppLaneMap LaneMap = buildDppLaneMap(B, WithinRow, Ctrl);
+  Expected<DppLaneMap> LaneMapOrErr = buildDppLaneMap(B, WithinRow, Ctrl);
+  if (!LaneMapOrErr)
+    return LaneMapOrErr.takeError();
+  DppLaneMap LaneMap = *LaneMapOrErr;
 
   // Clamp the bogus wrap-around result on OOB so the ds_bpermute
   // selector always references a deterministic intra-row lane.  The
   // `inRange` select below discards the bpermuted value for OOB
   // lanes, so the clamp is strictly for IR clarity -- lane 0's
   // selector reads row[0] instead of row[0xFFFF_FFF8 & 0x3F].
-  Value *SrcWithinRowSafe = B.CreateSelect(
-      LaneMap.InRange, LaneMap.SrcWithinRow, ConstantInt::get(I32Ty, 0),
-      "cwd_dpp_src_safe");
-  Value *SrcLaneAbs = B.CreateOr(RowBase, SrcWithinRowSafe,
-                                  "cwd_dpp_src_abs");
-  Value *ByteAddr = B.CreateShl(SrcLaneAbs, ConstantInt::get(I32Ty, 2),
-                                 "cwd_dpp_selector");
+  Value *SrcWithinRowSafe =
+      B.CreateSelect(LaneMap.InRange, LaneMap.SrcWithinRow,
+                     ConstantInt::get(I32Ty, 0), "cwd_dpp_src_safe");
+  Value *SrcLaneAbs = B.CreateOr(RowBase, SrcWithinRowSafe, "cwd_dpp_src_abs");
+  Value *ByteAddr =
+      B.CreateShl(SrcLaneAbs, ConstantInt::get(I32Ty, 2), "cwd_dpp_selector");
 
-  Function *Bpermute = Intrinsic::getOrInsertDeclaration(
-      M, Intrinsic::amdgcn_ds_bpermute);
-  Value *Bperm = B.CreateCall(Bpermute, {ByteAddr, Src},
-                               "cwd_dpp_bperm");
+  Function *Bpermute =
+      Intrinsic::getOrInsertDeclaration(M, Intrinsic::amdgcn_ds_bpermute);
+  Value *Bperm = B.CreateCall(Bpermute, {ByteAddr, Src}, "cwd_dpp_bperm");
 
   // Out-of-range disposition.  Per the AMDGPU ISA DPP spec: an active
   // target lane whose source lane is OOB receives `0` under
   // `bound_ctrl=1` or retains `old` under `bound_ctrl=0`.
-  Value *OobVal = BoundCtrl ? static_cast<Value *>(ConstantInt::get(I32Ty, 0))
-                             : OldVal;
-  Value *DppVal = B.CreateSelect(LaneMap.InRange, Bperm, OobVal,
-                                  "cwd_dpp_inrange");
+  Value *OobVal =
+      BoundCtrl ? static_cast<Value *>(ConstantInt::get(I32Ty, 0)) : OldVal;
+  Value *DppVal =
+      B.CreateSelect(LaneMap.InRange, Bperm, OobVal, "cwd_dpp_inrange");
 
   // row_mask / bank_mask gating.  Fold the select away when both
   // masks are 0xF (the common "every lane participates" case) --
@@ -1163,20 +1217,21 @@ void rewriteUpdateDppI32Call(CallInst *CI, Value *LaneId,
         B.CreateICmpNE(B.CreateAnd(B.CreateLShr(BankMaskVal, SourceBank),
                                    ConstantInt::get(I32Ty, 1)),
                        ConstantInt::get(I32Ty, 0), "cwd_dpp_bank_active");
-    Value *LaneActive = B.CreateAnd(RowActive, BankActive,
-                                     "cwd_dpp_lane_active");
+    Value *LaneActive =
+        B.CreateAnd(RowActive, BankActive, "cwd_dpp_lane_active");
     Result = B.CreateSelect(LaneActive, DppVal, OldVal, "cwd_dpp_gated");
   }
 
   CI->replaceAllUsesWith(Result);
   CI->eraseFromParent();
+  return Error::success();
 }
 
 } // namespace
 
-CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
+Expected<CrossLaneDivergentRewriteReport> rewriteCrossLaneDivergent(
     Function &F, unsigned SourceWaveSize, unsigned TargetWaveSize,
-    TargetMachine *TM) {
+    bool ProvidesFullWaveExecInvariant, TargetMachine *TM) {
   CrossLaneDivergentRewriteReport Report;
   // `TM` is reserved for a future UA-backed classifier refinement.
   // See the header doc block for the soundness analysis of why the
@@ -1231,8 +1286,7 @@ CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
     }
   }
 
-  if (WritelaneSites.empty() && ReadlaneSites.empty() &&
-      DppI32Sites.empty())
+  if (WritelaneSites.empty() && ReadlaneSites.empty() && DppI32Sites.empty())
     return Report;
 
   // ==== Phase A: use-chain classification =================================
@@ -1247,8 +1301,7 @@ CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
   // on shared VGPRs -- a mix of rewritten and preserved sites on one
   // VGPR recreates the Matmul128x128 aperture-violation pattern
   // (hotswap/docs/learnings.md 2026-04-21 entry).
-  auto ClassifySite = [&](CallInst *CI,
-                          const char *Kind) -> bool {
+  auto ClassifySite = [&](CallInst *CI, const char *Kind) -> bool {
     std::string Detail;
     SgprForcedConsumerKind ConsumerKind = SgprForcedConsumerKind::None;
     if (classifyForwardUseChain(CI, Detail, ConsumerKind,
@@ -1258,12 +1311,11 @@ CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
     std::string Msg;
     raw_string_ostream Os(Msg);
     Os << "function '" << F.getName() << "' has a " << Kind
-       << " whose use chain reaches an SGPR-forced consumer ("
-       << Detail
+       << " whose use chain reaches an SGPR-forced consumer (" << Detail
        << "). Rewriting to `ds_bpermute` here would re-introduce "
           "`v_readfirstlane` at the SGPR boundary -- refusing rather "
           "than silently miscompiling. See "
-          "hotswap/docs/wave-size-translation.md \u00a75.6.3 (use-"
+          "hotswap/docs/wave-size-translation.md sec. 5.6.3 (use-"
           "chain constraint).";
     Report.SgprForcedDetail = Os.str();
     Report.SgprForcedKind = ConsumerKind;
@@ -1304,8 +1356,7 @@ CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
   // implicit-constant-folding assumption about IRBuilder, and makes
   // the "supported families" contract unmistakably single-sourced.
   for (CallInst *CI : DppI32Sites) {
-    unsigned Ctrl =
-        cast<ConstantInt>(CI->getArgOperand(2))->getZExtValue();
+    unsigned Ctrl = cast<ConstantInt>(CI->getArgOperand(2))->getZExtValue();
     if (!isDppCtrlRewritable(Ctrl)) {
       std::string Msg;
       raw_string_ostream Os(Msg);
@@ -1313,12 +1364,13 @@ CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
          << "' has an update.dpp site with unsupported "
          << describeDppCtrl(Ctrl)
          << ". The cross-widen rewrite only covers quad_perm, "
-            "row_shl:N, row_shr:N and row_xmask:N today (all stay "
-            "within a single 16-lane row, hence wave-size-oblivious). "
+            "row_shl:N, row_shr:N, row_xmask:N and row_ror:N today "
+            "(all stay within a single 16-lane row, hence "
+            "wave-size-oblivious). "
             "Extending the supported set requires a per-ctrl "
             "correctness argument in buildDppLaneMap and a new "
             "lit fixture; refusing rather than silently miscompiling. "
-            "See hotswap/docs/wave-size-translation.md \u00a75.3.";
+            "See hotswap/docs/wave-size-translation.md sec. 5.3.";
       Report.UnsupportedDppDetail = Os.str();
       return Report;
     }
@@ -1349,20 +1401,23 @@ CrossLaneDivergentRewriteReport rewriteCrossLaneDivergent(
     ++Report.WritelaneRewritten;
   }
   for (CallInst *CI : ReadlaneSites) {
-    rewriteReadlaneCall(CI, GetLaneId(), SourceWaveSize);
+    rewriteReadlaneCall(CI, GetLaneId(), SourceWaveSize,
+                        ProvidesFullWaveExecInvariant);
     ++Report.ReadlaneRewritten;
   }
   for (CallInst *CI : ReadfirstlaneSites)
-    rewriteReadfirstlaneCall(CI, GetLaneId(), SourceWaveSize);
+    rewriteReadfirstlaneCall(CI, GetLaneId(), SourceWaveSize,
+                             ProvidesFullWaveExecInvariant);
   for (CallInst *CI : DppI32Sites) {
     // Phase B above guaranteed `isDppCtrlRewritable(ctrl)`, and
-    // `rewriteUpdateDppI32Call` re-checks and `report_fatal_error`s
+    // `rewriteUpdateDppI32Call` re-checks and returns an error
     // on violation -- defence in depth, release-build-safe (unlike
     // `assert`, which no-ops under NDEBUG and would let a silent
     // half-rewrite through).  The counter increments only AFTER the
-    // rewriter successfully returns; a hypothetical fatal-error (which
-    // aborts the whole process) cannot leave the report lying.
-    rewriteUpdateDppI32Call(CI, GetLaneId(), SourceWaveSize);
+    // rewriter successfully returns; a returned error propagates out
+    // first, so it cannot leave the report lying.
+    if (Error E = rewriteUpdateDppI32Call(CI, GetLaneId(), SourceWaveSize))
+      return E;
     ++Report.DppRewritten;
   }
 

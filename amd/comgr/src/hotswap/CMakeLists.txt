@@ -52,14 +52,35 @@ else()
   find_package(LLVM REQUIRED CONFIG)
 endif()
 
-if(NOT DEFINED LLVM_BUILD_MAIN_SRC_DIR OR NOT LLVM_BUILD_MAIN_SRC_DIR OR
-   NOT DEFINED LLVM_BINARY_DIR OR NOT LLVM_BINARY_DIR)
+# CROSSGEN OVERLAY FIX (header/link decoupling): the transpiler needs AMDGPU
+# target-private headers (SIDefines.h, AMDGPUBaseInfo.h) + generated TableGen
+# .inc files that live only in the LLVM *build* tree. We must NOT force comgr's
+# LLVM_DIR at the build tree just to get them, because that flips comgr onto the
+# shared libLLVM.so and duplicates the AMDGPU backend (-> "amdhsa-code-object-
+# version registered more than once" crash). Instead take the AMDGPU header/.inc
+# search roots from dedicated build-tree overrides (HOTSWAP_LLVM_SOURCE_DIR /
+# HOTSWAP_LLVM_BINARY_DIR, passed by the super-project), decoupled from LLVM_DIR
+# and from link configuration.
+if(DEFINED HOTSWAP_LLVM_SOURCE_DIR AND HOTSWAP_LLVM_SOURCE_DIR)
+  set(HOTSWAP_AMDGPU_SRC_DIR "${HOTSWAP_LLVM_SOURCE_DIR}")
+else()
+  set(HOTSWAP_AMDGPU_SRC_DIR "${LLVM_BUILD_MAIN_SRC_DIR}")
+endif()
+if(DEFINED HOTSWAP_LLVM_BINARY_DIR AND HOTSWAP_LLVM_BINARY_DIR)
+  set(HOTSWAP_AMDGPU_BIN_DIR "${HOTSWAP_LLVM_BINARY_DIR}")
+else()
+  set(HOTSWAP_AMDGPU_BIN_DIR "${LLVM_BINARY_DIR}")
+endif()
+
+if(NOT HOTSWAP_AMDGPU_SRC_DIR OR NOT HOTSWAP_AMDGPU_BIN_DIR OR
+   NOT EXISTS "${HOTSWAP_AMDGPU_BIN_DIR}/lib/Target/AMDGPU/AMDGPUGenInstrInfo.inc")
   message(FATAL_ERROR
-    "hotswap-transpiler requires an LLVM build tree (not an install tree). "
-    "The install tree does not expose AMDGPU target-private headers "
-    "(SIDefines.h, AMDGPUBaseInfo.h, AMDGPUGen*.inc). "
-    "Pass -DLLVM_DIR=<llvm-build>/lib/cmake/llvm or build LLVM at "
-    "<llvm-project>/build so it can be auto-detected.")
+    "hotswap-transpiler requires AMDGPU target-private headers + generated "
+    ".inc files from an LLVM build tree (SIDefines.h, AMDGPUBaseInfo.h, "
+    "AMDGPUGen*.inc). Pass -DHOTSWAP_LLVM_SOURCE_DIR=<llvm-project>/llvm and "
+    "-DHOTSWAP_LLVM_BINARY_DIR=<llvm-build> pointing at the amd-llvm build tree. "
+    "(Do NOT set LLVM_DIR to the build tree -- that forces comgr onto the shared "
+    "libLLVM.so and duplicates the AMDGPU backend.)")
 endif()
 
 if(DEFINED LLVM_DIR AND LLVM_DIR)
@@ -162,6 +183,7 @@ add_library(hotswap-transpiler OBJECT
   reg-file.cpp
   kernarg-layout.cpp
   user-sgpr-layout.cpp
+  source-image-address.cpp
   wave-projection.cpp
   setpc-analysis.cpp
   handle-sopp.cpp
@@ -228,9 +250,12 @@ llvm_update_compile_flags(hotswap-transpiler)
 get_filename_component(HOTSWAP_COMGR_BINARY_DIR
   "${CMAKE_CURRENT_BINARY_DIR}/../.." ABSOLUTE)
 target_include_directories(hotswap-transpiler PRIVATE
-  "${LLVM_BUILD_MAIN_SRC_DIR}/lib/Target/AMDGPU"
-  "${LLVM_BUILD_MAIN_SRC_DIR}/lib/Target/AMDGPU/Utils"
-  "${LLVM_BINARY_DIR}/lib/Target/AMDGPU"
+  # CROSSGEN: AMDGPU private headers from source tree, generated .inc from build
+  # tree -- via HOTSWAP_LLVM_* overrides so comgr's LLVM_DIR stays on the dist
+  # tree (full-static comgr). See the decoupling note above.
+  "${HOTSWAP_AMDGPU_SRC_DIR}/lib/Target/AMDGPU"
+  "${HOTSWAP_AMDGPU_SRC_DIR}/lib/Target/AMDGPU/Utils"
+  "${HOTSWAP_AMDGPU_BIN_DIR}/lib/Target/AMDGPU"
   # Hotswap calls into comgr-metadata helpers (`metadata::walkElfMetadataIntoDoc`,
   # `metadata::getElfIsaNameFromBuffer`), which transitively include
   # `comgr.h` -> `amd_comgr.h`. The latter is configured from
@@ -250,73 +275,103 @@ target_include_directories(hotswap-transpiler PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
 )
 
-# `llc`, `llvm-mc`, `llvm-objdump` etc. live in the build tree's bin/.
-# ROCR's trap-handler subproject may require a ROCm Clang package even when
-# Hotswap itself is validated against a local LLVM build, so keep the tool path
-# overrideable rather than deriving it unconditionally from the LLVM package
-# used for in-process linkage.
-set(HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR "${LLVM_TOOLS_BINARY_DIR}" CACHE PATH
-  "Directory containing llc, llvm-mc, llvm-objdump, and related LLVM tools used by Hotswap")
-target_compile_definitions(hotswap-transpiler PRIVATE
-  LLVM_TOOLS_DIR="${HOTSWAP_TRANSPILER_LLVM_TOOLS_DIR}"
-)
+# The pipeline links relocatable objects into the HSACO using the in-process
+# LLD ELF driver (lld::lldMain), so it needs the lld headers and libraries.
+# The parent comgr build adds these only to amd_comgr (PRIVATE), so the
+# hotswap object library must pull them in itself.
+#
+# Skip find_package when the lld targets already exist (re-importing
+# lldELF/lldCommon would collide with the already-defined targets).
+if(NOT TARGET lldELF OR NOT TARGET lldCommon)
+  find_package(LLD REQUIRED CONFIG)
+endif()
+if(LLD_INCLUDE_DIRS)
+  target_include_directories(hotswap-transpiler PRIVATE ${LLD_INCLUDE_DIRS})
+elseif(TARGET lldELF AND TARGET lldCommon AND LLVM_MAIN_SRC_DIR)
+  # In an in-tree LLVM_ENABLE_PROJECTS=lld build, the LLD targets already exist
+  # before the install-tree LLDConfig.cmake has populated LLD_INCLUDE_DIRS.
+  target_include_directories(hotswap-transpiler PRIVATE
+    ${LLVM_MAIN_SRC_DIR}/../lld/include)
+else()
+  message(FATAL_ERROR
+    "hotswap-transpiler needs the LLD headers, but LLD_INCLUDE_DIRS is unset.")
+endif()
 
-target_link_libraries(hotswap-transpiler
-  PUBLIC
-    # LLVM AMDGPU components, sorted alphabetically.
-    LLVMAMDGPUAsmParser
-    LLVMAMDGPUCodeGen
-    LLVMAMDGPUDesc
-    LLVMAMDGPUDisassembler
-    LLVMAMDGPUInfo
-    LLVMAMDGPUUtils
-    # LLVM CodeGen
-    LLVMAsmPrinter
-    LLVMCodeGen
-    LLVMCodeGenTypes
-    LLVMGlobalISel
-    LLVMMIRParser
-    LLVMSelectionDAG
-    LLVMTarget
-    # LLVM MC
-    LLVMMC
-    LLVMMCDisassembler
-    LLVMMCParser
-    # LLVM Core + Support
-    LLVMAggressiveInstCombine
-    LLVMAnalysis
-    LLVMAsmParser
-    LLVMBinaryFormat
-    LLVMBitReader
-    LLVMBitstreamReader
-    LLVMBitWriter
-    LLVMCFGuard
-    LLVMCore
-    LLVMDebugInfoCodeView
-    LLVMDebugInfoDWARF
-    LLVMDebugInfoMSF
-    LLVMDebugInfoPDB
-    LLVMDemangle
-    LLVMFrontendOffloading
-    LLVMFrontendOpenMP
-    LLVMInstCombine
-    LLVMInstrumentation
-    LLVMipo
-    LLVMIRReader
-    LLVMLinker
-    LLVMObjCARCOpts
-    LLVMObject
-    LLVMPasses
-    LLVMProfileData
-    LLVMRemarks
-    LLVMScalarOpts
-    LLVMSupport
-    LLVMSymbolize
-    LLVMTargetParser
-    LLVMTextAPI
-    LLVMTransformUtils
-    LLVMVectorize
-)
+# CROSSGEN OVERLAY FIX (LLVM linkage): when LLVM is built with
+# LLVM_LINK_LLVM_DYLIB=ON, all of these components already live in the single
+# libLLVM.so. Naming the static component archives on TOP of the dylib pulls a
+# SECOND copy of the AMDGPU backend into libamd_comgr.so, so its cl::opt globals
+# (e.g. amdhsa-code-object-version) register twice and any process that loads
+# comgr aborts. Mirror base comgr (amd/comgr/CMakeLists.txt): consume the LLVM
+# dylib when present, fall back to the static component list otherwise. lld is
+# always static (no lld dylib is built).
+if(LLVM_LINK_LLVM_DYLIB)
+  target_link_libraries(hotswap-transpiler
+    PUBLIC
+      lldELF
+      lldCommon
+      LLVM)
+else()
+  target_link_libraries(hotswap-transpiler
+    PUBLIC
+      # LLD ELF driver (in-process linking).
+      lldELF
+      lldCommon
+      # LLVM AMDGPU components, sorted alphabetically.
+      LLVMAMDGPUAsmParser
+      LLVMAMDGPUCodeGen
+      LLVMAMDGPUDesc
+      LLVMAMDGPUDisassembler
+      LLVMAMDGPUInfo
+      LLVMAMDGPUUtils
+      # LLVM CodeGen
+      LLVMAsmPrinter
+      LLVMCodeGen
+      LLVMCodeGenTypes
+      LLVMGlobalISel
+      LLVMMIRParser
+      LLVMSelectionDAG
+      LLVMTarget
+      # LLVM MC
+      LLVMMC
+      LLVMMCDisassembler
+      LLVMMCParser
+      # LLVM Core + Support
+      LLVMAggressiveInstCombine
+      LLVMAnalysis
+      LLVMAsmParser
+      LLVMBinaryFormat
+      LLVMBitReader
+      LLVMBitstreamReader
+      LLVMBitWriter
+      LLVMCFGuard
+      LLVMCore
+      LLVMDebugInfoCodeView
+      LLVMDebugInfoDWARF
+      LLVMDebugInfoMSF
+      LLVMDebugInfoPDB
+      LLVMDemangle
+      LLVMFrontendOffloading
+      LLVMFrontendOpenMP
+      LLVMInstCombine
+      LLVMInstrumentation
+      LLVMipo
+      LLVMIRReader
+      LLVMLinker
+      LLVMObjCARCOpts
+      LLVMObject
+      LLVMPasses
+      LLVMProfileData
+      LLVMRemarks
+      LLVMScalarOpts
+      LLVMSupport
+      LLVMSymbolize
+      LLVMTargetParser
+      LLVMTextAPI
+      LLVMTransformUtils
+      LLVMVectorize
+  )
+endif()
 
 # Per-file gtests live under amd/comgr/test-unit/ and follow the 3-tier
 # llvm_gtest / find_package(GTest CONFIG) / LLVM-installed fallback discovery

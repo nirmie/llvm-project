@@ -30,7 +30,7 @@ struct MCState;
 // A *projection* maps a source-ISA wavefront onto a target-ISA wavefront
 // when the two wave widths differ. This is an abstract base; see
 // `ModuloReplicationProjection` below for the sole concrete policy in
-// use today. hotswap/docs/wave-size-translation.md §2.2 catalogues the
+// use today. hotswap/docs/wave-size-translation.md sec. 2.2 catalogues the
 // alternatives (thread-loop, scalarisation, half-wave-masking) that
 // are not yet implemented but whose implementations would each be a
 // new subclass.
@@ -79,7 +79,7 @@ public:
 
   // EXEC alloca storage width chosen by the projection. Modulo-
   // replication returns the source wave width (the long-standing
-  // default, see hotswap/docs/wave-size-translation.md §5.1); wave-
+  // default, see hotswap/docs/wave-size-translation.md sec. 5.1); wave-
   // native cross-widening returns the target hardware wave mask
   // width (`WaveMaskTy`) so a target-width ballot from a data-
   // dependent `v_cmpx` AND's directly into EXEC without losing the
@@ -118,8 +118,8 @@ public:
   // `SIPreAllocateWWMRegs` on large matmul kernels: that pass requires
   // a DEDICATED physical VGPR per vreg defined inside a WWM bracket,
   // and the WWM def-chain from an MFMA-output marker walks back
-  // through the entire accumulator initialisation (≈200 IMPLICIT_DEF
-  // / AV_MOV_B32 0 defs in a 128×128 f16 matmul tile's entry region),
+  // through the entire accumulator initialisation (~200 IMPLICIT_DEF
+  // / AV_MOV_B32 0 defs in a 128x128 f16 matmul tile's entry region),
   // which cannot fit in gfx942's 256-VGPR pool once the kernel's
   // own computation has claimed its share. Moving the EXEC=-1
   // guarantee to kernel entry sidesteps the allocator pressure
@@ -157,8 +157,9 @@ public:
 
   // Emit the workitem-id-x value that source-ISA code should observe under
   // this projection.  The default is the target hardware value.  Projections
-  // that split or re-map source waves override this hook so every raiser-created
-  // `workitem.id.x` leaf flows through one policy surface instead of open-coded
+  // that split or re-map source waves override this hook so every
+  // raiser-created `workitem.id.x` leaf flows through one policy surface
+  // instead of open-coded
   // `@llvm.amdgcn.workitem.id.x` calls.
   virtual llvm::Value *emitWorkitemIdX(llvm::IRBuilder<> &B) const;
 
@@ -176,7 +177,7 @@ public:
   // what "active" means -- modulo-replication fans each target lane onto
   // bit `lane_id mod W_src` of the source EXEC mask.
   virtual llvm::Value *emitLaneActiveBit(llvm::IRBuilder<> &B,
-                                          llvm::Value *ExecVal) const = 0;
+                                         llvm::Value *ExecVal) const = 0;
 
   // Collect a per-lane i1 predicate into a wave-level bit-mask of width
   // `resultTy`. Invariant: the ballot MUST match the target wave width
@@ -189,10 +190,9 @@ public:
   // `waveMaskTy` with a caller-requested `resultTy` of a different
   // width. Modulo-replication truncates when narrowing; other
   // projections might refuse outright or redistribute bits.
-  virtual llvm::Value *ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred,
-                                        llvm::Type *ResultTy,
-                                        const llvm::Twine &Name = "ballot")
-      const = 0;
+  virtual llvm::Value *
+  ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred, llvm::Type *ResultTy,
+                  const llvm::Twine &Name = "ballot") const = 0;
 
   // Project a wave-level bit-mask back onto the current lane's bit (i1).
   // Inverse direction of the ballot. Per-lane i1 inputs short-circuit
@@ -200,7 +200,12 @@ public:
   // per-lane i1 and route through writeReg*(VCC, i1)); those must not
   // be reinterpreted as a one-bit wave mask.
   virtual llvm::Value *extractLaneBitFromWaveMask(llvm::IRBuilder<> &B,
-                                                   llvm::Value *V) const = 0;
+                                                  llvm::Value *V) const = 0;
+
+  // Return the source-wave slice of a wave mask, e.g. for `v_mbcnt_lo`.
+  virtual llvm::Value *
+  emitCurrentSourceWaveMask(llvm::IRBuilder<> &B, llvm::Value *Mask,
+                            const llvm::Twine &Name = "source_wave_mask") const;
 
   // True iff this projection guarantees hardware EXEC = -1 between
   // `emitUnderExec` diamonds *kernel-wide*.  When this is true the
@@ -233,11 +238,20 @@ public:
   // `readfirstlane` would collapse those instances together.
   virtual bool sourceWaveScopedLaneOps() const { return false; }
 
+  // True when mbcnt-derived V_CMPX predicates remain independent for each
+  // packed source wave's EXEC mask.
+  virtual bool preservesMbcntDerivedVcmpxExec() const { return false; }
+
+  // True iff an mbcnt-derived `s_*_saveexec_b32` source mask can be projected
+  // into an independent target-width EXEC mask -- the scalar sibling of
+  // `preservesMbcntDerivedVcmpxExec`. Requires injective source-wave mapping.
+  virtual bool preservesMbcntDerivedSaveExec() const { return false; }
+
   // Number of source waves whose per-lane fragment data is present in
   // each target wave under this projection's mapping.  Callers that
   // synthesise per-source-wave passes (most notably the WMMA -> MFMA
   // redistribute / MFMA / collect pipeline in `wmma-lowering.cpp`)
-  // iterate `groupBase ∈ {0, W_src, ..., (numSourceWavesPerTarget() -
+  // iterate `groupBase in {0, W_src, ..., (numSourceWavesPerTarget() -
   // 1) * W_src}` so that each pass covers exactly one source wave's
   // worth of data.
   //
@@ -272,7 +286,7 @@ public:
   // this is an identity: returning the input unchanged avoids the
   // regalloc pressure that `SIPreAllocateWWMRegs` would impose if
   // we emitted a redundant marker (see `WaveProjection::emitInitial
-  // Exec`'s block comment for the 128×128-matmul accumulator-ring
+  // Exec`'s block comment for the 128x128-matmul accumulator-ring
   // failure mode).
   //
   // The marker tells the AMDGPU backend's `SIWholeQuadMode` pass
@@ -308,7 +322,7 @@ public:
   // SIWholeQuadMode to mark the MFMA itself as WWM, so it writes
   // every lane's destination VGPR.
   llvm::Value *wrapAsWWMValue(llvm::IRBuilder<> &B, llvm::Value *V,
-                               const llvm::Twine &Name = "wwm") const;
+                              const llvm::Twine &Name = "wwm") const;
 
 protected:
   // Combine an already-projected workitem-id-x value with the native Y/Z
@@ -346,20 +360,19 @@ protected:
 //     `lane_id mod W_src` (`extractLaneBitFromWaveMask`).
 //
 // None of that is a hardware fact -- it is a *choice*. See hotswap/
-// docs/wave-size-translation.md §6 for the correctness theorem
-// (wave-size-obliviousness) and §2.2 for the alternatives.
+// docs/wave-size-translation.md sec. 6 for the correctness theorem
+// (wave-size-obliviousness) and sec. 2.2 for the alternatives.
 class ModuloReplicationProjection final : public WaveProjection {
 public:
   using WaveProjection::WaveProjection;
 
   llvm::Value *emitLaneActiveBit(llvm::IRBuilder<> &B,
-                                  llvm::Value *ExecVal) const override;
-  llvm::Value *ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred,
-                                llvm::Type *ResultTy,
-                                const llvm::Twine &Name = "ballot")
-      const override;
+                                 llvm::Value *ExecVal) const override;
+  llvm::Value *
+  ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred, llvm::Type *ResultTy,
+                  const llvm::Twine &Name = "ballot") const override;
   llvm::Value *extractLaneBitFromWaveMask(llvm::IRBuilder<> &B,
-                                           llvm::Value *V) const override;
+                                          llvm::Value *V) const override;
 
   // Clamp the workitem id of undispatched upper target lanes so they replicate
   // a real lane's in-bounds addressing when the target wave is wider than the
@@ -414,7 +427,7 @@ public:
 // widening. Instantiating it for same-wave or narrowing directions
 // would make `broadcastNarrowExecLoWrite()` change EXEC semantics in
 // directions the source author can disambiguate, so the constructor
-// asserts. The ladder in hotswap/docs/wave-size-translation.md §2.2
+// asserts. The ladder in hotswap/docs/wave-size-translation.md sec. 2.2
 // still reserves `ThreadLoopProjection` for higher-obligation
 // rewrites; wave-native sits between the two as the first rung that
 // handles data-dependent EXEC writes correctly without restructuring
@@ -422,7 +435,7 @@ public:
 class WaveNativeProjection final : public WaveProjection {
 public:
   WaveNativeProjection(const ISAProfile &SrcIsa, const ISAProfile &TgtIsa,
-                        llvm::Type *I32Ty, llvm::Type *I64Ty);
+                       llvm::Type *I32Ty, llvm::Type *I64Ty);
 
   llvm::Type *execStorageTy() const override { return WaveMaskTy; }
   bool broadcastNarrowExecLoWrite() const override { return true; }
@@ -436,21 +449,25 @@ public:
   // target lanes 32..63).  Callers emitting per-source-wave passes
   // run two iterations under this projection.
   unsigned numSourceWavesPerTarget() const override { return 2; }
+  bool preservesMbcntDerivedVcmpxExec() const override { return true; }
+  bool preservesMbcntDerivedSaveExec() const override { return true; }
 
   llvm::Value *emitInitialExec(llvm::IRBuilder<> &B) const override;
   llvm::Value *emitLaneActiveBit(llvm::IRBuilder<> &B,
-                                  llvm::Value *ExecVal) const override;
-  llvm::Value *ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred,
-                                llvm::Type *ResultTy,
-                                const llvm::Twine &Name = "ballot")
-      const override;
+                                 llvm::Value *ExecVal) const override;
+  llvm::Value *
+  ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred, llvm::Type *ResultTy,
+                  const llvm::Twine &Name = "ballot") const override;
   llvm::Value *extractLaneBitFromWaveMask(llvm::IRBuilder<> &B,
-                                           llvm::Value *V) const override;
+                                          llvm::Value *V) const override;
+  llvm::Value *emitCurrentSourceWaveMask(
+      llvm::IRBuilder<> &B, llvm::Value *Mask,
+      const llvm::Twine &Name = "source_wave_mask") const override;
 };
 
 // ============================================================================
 // ThreadLoopProjection -- second rung of the coverage ladder described
-// in hotswap/docs/wave-size-translation.md §2.2.
+// in hotswap/docs/wave-size-translation.md sec. 2.2.
 //
 // The thread-loop rung is the coverage-ladder home for source-wave-scoped
 // execution. The current implementation is the first useful subset: it banks
@@ -458,8 +475,8 @@ public:
 // workitem id through one projection hook, so C5 equality predicates can keep
 // the two packed source waves distinct. It does NOT yet clone the full CFG into
 // a temporal `for iter in 0..R` loop, and it still does NOT dissolve Class 2
-// cross-lane obstructions (see wave-size-translation.md §7's unrewritable and
-// pending tables).
+// cross-lane obstructions (see wave-size-translation.md sec. 7's unrewritable
+// and pending tables).
 //
 // This implementation provides a conservative projection surface:
 //   * target-width EXEC storage so per-source-wave predicate masks can be
@@ -478,14 +495,14 @@ public:
 // outcome (a) under thread-loop), the steps are:
 //   1. Populate the overridden emitters with thread-loop semantics
 //      (follow the projection sketch in wave-size-translation.md
-//      §2.2's projections table).
+//      sec. 2.2's projections table).
 //   2. Add the additional correctness obligations the thread-loop
 //      projection introduces -- barrier hoisting, LDS-aliasing -- as
 //      extra checks in `buildObstructionReport` gated on the current
 //      projection choice.
 //   3. Extend `decideProjection` to try thread-loop after modulo-
 //      replication refuses, per the ladder in wave-size-
-//      translation.md §2.2.
+//      translation.md sec. 2.2.
 class ThreadLoopProjection final : public WaveProjection {
 public:
   ThreadLoopProjection(const ISAProfile &SrcIsa, const ISAProfile &TgtIsa,
@@ -500,13 +517,12 @@ public:
   llvm::Value *emitWorkitemIdX(llvm::IRBuilder<> &B) const override;
 
   llvm::Value *emitLaneActiveBit(llvm::IRBuilder<> &B,
-                                  llvm::Value *ExecVal) const override;
-  llvm::Value *ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred,
-                                llvm::Type *ResultTy,
-                                const llvm::Twine &Name = "ballot")
-      const override;
+                                 llvm::Value *ExecVal) const override;
+  llvm::Value *
+  ballotI1ToWidth(llvm::IRBuilder<> &B, llvm::Value *Pred, llvm::Type *ResultTy,
+                  const llvm::Twine &Name = "ballot") const override;
   llvm::Value *extractLaneBitFromWaveMask(llvm::IRBuilder<> &B,
-                                           llvm::Value *V) const override;
+                                          llvm::Value *V) const override;
 
   unsigned numSourceWavesPerTarget() const override;
 
@@ -536,7 +552,7 @@ private:
 //       defs always come first in the MCInst operand list) and classify
 //       each through `AMDGPU::mc2PseudoReg`, same as (a).
 //
-// (a) ∪ (b) is exhaustive for AMDGPU: an MCInst either defines a
+// (a) union (b) is exhaustive for AMDGPU: an MCInst either defines a
 // register implicitly (via TableGen `let Defs = [...]`) or explicitly
 // (as an `outs` operand). There is no third path. Both halves ground in
 // MCInstrDesc; no mnemonic parsing and no per-opcode lists.
@@ -555,8 +571,7 @@ bool instructionWritesEXEC(const DecodedInst &Di, const MCState &Mc);
 // Returns true iff a diagnostic was emitted.
 bool emitCrossWaveWarning(const WaveProjection &Proj, const MCState &Mc,
                           llvm::ArrayRef<DecodedInst> Insts,
-                          llvm::StringRef SourceIsa,
-                          llvm::StringRef TargetIsa);
+                          llvm::StringRef SourceIsa, llvm::StringRef TargetIsa);
 
 } // namespace COMGR::hotswap
 

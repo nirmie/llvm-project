@@ -14,6 +14,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Error.h"
 
 #include <memory>
 #include <string>
@@ -25,12 +26,18 @@ class Module;
 
 namespace COMGR::hotswap {
 
+// Instruction-lifting statistics collected during a raise. Passed to
+// raiseToIR by pointer; a null pointer means the caller does not want stats.
+struct RaiseStats {
+  int LiftedCount = 0;
+  int TotalCount = 0;
+};
+
 struct RaiseResult {
   std::unique_ptr<llvm::LLVMContext> Ctx;
   std::unique_ptr<llvm::Module> Module;
-  int LiftedCount = 0;
-  int TotalCount = 0;
-  std::string IrText;
+  // Source disassembly, populated only when HSA_HOTSWAP_DUMP_INPUT=1 for the
+  // `.dis` debug dump; empty on the production path.
   std::string DisasmText;
   // Predicate-chain classifier observations that the cross-widening
   // analysis accepted (rather than refused) for this kernel. Surfaced
@@ -39,36 +46,41 @@ struct RaiseResult {
   // should be replaced with a domain-meaningful name before this lands.
   int C5SuppressedCount = 0;
   std::string C5SuppressionReason;
-  // Structured failure description. `Failure.Reason == None` iff `Success`.
-  // Holds the first failure encountered.
-  RaiseFailure Failure;
-  // All failures collected during the per-instruction raising phase.
-  llvm::SmallVector<RaiseFailure> AllFailures;
-  bool Success = false;
-
   bool UsesScratchPrivateSegment = false;
   uint32_t SourcePrivateSegmentFixedSize = 0;
   bool HasDivergentExec = false;
+  bool HasEnumeratedSetpcDispatch = false;
 };
 
-RaiseResult raiseToIR(llvm::ArrayRef<uint8_t> TextBytes,
-                      llvm::StringRef SourceIsa,
-                      llvm::StringRef KernelName,
-                      const KernelMeta &Meta,
-                      llvm::StringRef CompilationTargetIsa = "",
-                      bool EnableWritelaneRewrite = true,
-                      bool EnableWaveNative = true);
+// Raise one kernel from extracted source code-object sections. `TextBytes`
+// remains the disassembly image; `TextBaseAddress` and `SourceImageSections`
+// let PC-relative SMEM literal loads resolve source code-object addresses at
+// raise time.
+llvm::Expected<RaiseResult>
+raiseToIR(llvm::ArrayRef<uint8_t> TextBytes, llvm::StringRef SourceIsa,
+          llvm::StringRef KernelName, const KernelMeta &Meta,
+          llvm::StringRef CompilationTargetIsa = "",
+          bool EnableWritelaneRewrite = true, bool EnableWaveNative = true,
+          uint64_t TextBaseAddress = 0,
+          llvm::ArrayRef<TextSection::ImageSection> SourceImageSections = {},
+          RaiseStats *Stats = nullptr);
 
-RaiseResult raiseToIR(llvm::ArrayRef<uint8_t> TextBytes,
-                      llvm::StringRef SourceIsa,
-                      llvm::StringRef KernelName,
-                      const KernelMeta &Meta,
-                      uint64_t KernelOffset,
-                      uint64_t KernelSize,
-                      llvm::StringRef CompilationTargetIsa = "",
-                      bool EnableWritelaneRewrite = true,
-                      bool EnableWaveNative = true,
-                      bool AssumeHipGlobalOffsetZero = false);
+llvm::Expected<RaiseResult>
+raiseToIR(llvm::ArrayRef<uint8_t> TextBytes, llvm::StringRef SourceIsa,
+          llvm::StringRef KernelName, const KernelMeta &Meta,
+          uint64_t KernelOffset, uint64_t KernelSize,
+          llvm::StringRef CompilationTargetIsa = "",
+          bool EnableWritelaneRewrite = true, bool EnableWaveNative = true,
+          bool AssumeHipGlobalOffsetZero = false, uint64_t TextBaseAddress = 0,
+          llvm::ArrayRef<TextSection::ImageSection> SourceImageSections = {},
+          // Text-relative extents of all function symbols in the code object
+          // (from listTextFunctionExtents). Lets the raiser follow a
+          // call/branch into an outlined helper outside the selected kernel's
+          // own extent and lift it alongside the caller. Empty (the default)
+          // keeps the legacy behavior: any out-of-extent target is a
+          // kernel-boundary violation.
+          llvm::ArrayRef<KernelSymbolExtent> FunctionExtents = {},
+          RaiseStats *Stats = nullptr);
 
 } // namespace COMGR::hotswap
 

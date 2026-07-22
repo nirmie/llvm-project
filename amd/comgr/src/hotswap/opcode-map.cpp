@@ -42,8 +42,9 @@ namespace COMGR::hotswap {
 
 namespace {
 
-// Maps a canonical AMDGPU pseudo opcode to the CanonicalOp the raiser dispatches on.
-// The canonical form is what comes out of the canonicalization chain below:
+// Maps a canonical AMDGPU pseudo opcode to the CanonicalOp the raiser
+// dispatches on. The canonical form is what comes out of the canonicalization
+// chain below:
 //   MC opcode -> pseudo
 //   pseudo    -> e64 (if VOP/VOPC has e32/e64 split)
 //   pseudo    -> base (if SDWA/DPP)
@@ -59,27 +60,22 @@ struct Entry {
 
 // Convenience macros for families with many addressing-mode variants that
 // LLVM does not expose a single canonicalization helper for.
-#define E(OP, SEM) Entry{AMDGPU::OP, CanonicalOp::SEM}
+#define E(OP, SEM)                                                             \
+  Entry { AMDGPU::OP, CanonicalOp::SEM }
 
 // MUBUF: four addressing modes (OFFSET/OFFEN/IDXEN/BOTHEN) per base opcode,
 // plus the gfx12+ VBUFFER fork that was introduced to separate the buffer
 // descriptor source.
-#define MUBUF4(BASE, SEM) \
-  E(BASE##_OFFSET, SEM), \
-  E(BASE##_OFFEN,  SEM), \
-  E(BASE##_IDXEN,  SEM), \
-  E(BASE##_BOTHEN, SEM)
-#define VBUF4(BASE, SEM) \
-  E(BASE##_VBUFFER_OFFSET, SEM), \
-  E(BASE##_VBUFFER_OFFEN,  SEM), \
-  E(BASE##_VBUFFER_IDXEN,  SEM), \
-  E(BASE##_VBUFFER_BOTHEN, SEM)
+#define MUBUF4(BASE, SEM)                                                      \
+  E(BASE##_OFFSET, SEM), E(BASE##_OFFEN, SEM), E(BASE##_IDXEN, SEM),           \
+      E(BASE##_BOTHEN, SEM)
+#define VBUF4(BASE, SEM)                                                       \
+  E(BASE##_VBUFFER_OFFSET, SEM), E(BASE##_VBUFFER_OFFEN, SEM),                 \
+      E(BASE##_VBUFFER_IDXEN, SEM), E(BASE##_VBUFFER_BOTHEN, SEM)
 
 // SMEM scalar loads: three operand-source forms (IMM / SGPR / SGPR_IMM).
-#define SMEM3(BASE, SEM) \
-  E(BASE##_IMM,      SEM), \
-  E(BASE##_SGPR,     SEM), \
-  E(BASE##_SGPR_IMM, SEM)
+#define SMEM3(BASE, SEM)                                                       \
+  E(BASE##_IMM, SEM), E(BASE##_SGPR, SEM), E(BASE##_SGPR_IMM, SEM)
 
 static const Entry kCanonTable[] = {
     // ---------------------------------------------------------------------
@@ -138,49 +134,74 @@ static const Entry kCanonTable[] = {
     // ---------------------------------------------------------------------
     // SMEM scalar loads
     // ---------------------------------------------------------------------
-    SMEM3(S_LOAD_DWORD,    S_LOAD_B32),
-    SMEM3(S_LOAD_DWORDX2,  S_LOAD_B64),
-    SMEM3(S_LOAD_DWORDX3,  S_LOAD_B96),
-    SMEM3(S_LOAD_DWORDX4,  S_LOAD_B128),
-    SMEM3(S_LOAD_DWORDX8,  S_LOAD_B256),
+    SMEM3(S_LOAD_DWORD, S_LOAD_B32),
+    SMEM3(S_LOAD_DWORDX2, S_LOAD_B64),
+    SMEM3(S_LOAD_DWORDX3, S_LOAD_B96),
+    SMEM3(S_LOAD_DWORDX4, S_LOAD_B128),
+    SMEM3(S_LOAD_DWORDX8, S_LOAD_B256),
     SMEM3(S_LOAD_DWORDX16, S_LOAD_B512),
+    SMEM3(S_BUFFER_LOAD_DWORD, S_BUFFER_LOAD_B32),
+    SMEM3(S_BUFFER_LOAD_DWORDX2, S_BUFFER_LOAD_B64),
+    SMEM3(S_BUFFER_LOAD_DWORDX3, S_BUFFER_LOAD_B96),
+    SMEM3(S_BUFFER_LOAD_DWORDX4, S_BUFFER_LOAD_B128),
+    SMEM3(S_BUFFER_LOAD_DWORDX8, S_BUFFER_LOAD_B256),
+    SMEM3(S_BUFFER_LOAD_DWORDX16, S_BUFFER_LOAD_B512),
     // gfx12+ scalar narrow loads. All four types expose the full
     // IMM/SGPR/SGPR_IMM triad so the existing SMEM3 macro applies
     // unchanged. Handler in handle-smem.cpp.
-    SMEM3(S_LOAD_U8,       S_LOAD_U8),
-    SMEM3(S_LOAD_I8,       S_LOAD_I8),
-    SMEM3(S_LOAD_U16,      S_LOAD_U16),
-    SMEM3(S_LOAD_I16,      S_LOAD_I16),
-    SMEM3(S_STORE_DWORD,   S_STORE_B32),
+    SMEM3(S_LOAD_U8, S_LOAD_U8),
+    SMEM3(S_LOAD_I8, S_LOAD_I8),
+    SMEM3(S_LOAD_U16, S_LOAD_U16),
+    SMEM3(S_LOAD_I16, S_LOAD_I16),
+    SMEM3(S_STORE_DWORD, S_STORE_B32),
     SMEM3(S_STORE_DWORDX2, S_STORE_B64),
     SMEM3(S_STORE_DWORDX4, S_STORE_B128),
 
     // ---------------------------------------------------------------------
     // SOPC
     // ---------------------------------------------------------------------
-    E(S_CMP_EQ_U32, S_CMP_EQ_U32), E(S_CMP_LG_U32, S_CMP_LG_U32),
-    E(S_CMP_GT_U32, S_CMP_GT_U32), E(S_CMP_GE_U32, S_CMP_GE_U32),
-    E(S_CMP_LT_U32, S_CMP_LT_U32), E(S_CMP_LE_U32, S_CMP_LE_U32),
-    E(S_CMP_EQ_U64, S_CMP_EQ_U64), E(S_CMP_LG_U64, S_CMP_LG_U64),
-    E(S_CMP_EQ_I32, S_CMP_EQ_I32), E(S_CMP_LG_I32, S_CMP_LG_I32),
-    E(S_CMP_GT_I32, S_CMP_GT_I32), E(S_CMP_GE_I32, S_CMP_GE_I32),
-    E(S_CMP_LT_I32, S_CMP_LT_I32), E(S_CMP_LE_I32, S_CMP_LE_I32),
-    E(S_CMP_EQ_F32, S_CMP_EQ_F32), E(S_CMP_LG_F32, S_CMP_LG_F32),
-    E(S_CMP_GT_F32, S_CMP_GT_F32), E(S_CMP_GE_F32, S_CMP_GE_F32),
-    E(S_CMP_LT_F32, S_CMP_LT_F32), E(S_CMP_LE_F32, S_CMP_LE_F32),
+    E(S_CMP_EQ_U32, S_CMP_EQ_U32),
+    E(S_CMP_LG_U32, S_CMP_LG_U32),
+    E(S_CMP_GT_U32, S_CMP_GT_U32),
+    E(S_CMP_GE_U32, S_CMP_GE_U32),
+    E(S_CMP_LT_U32, S_CMP_LT_U32),
+    E(S_CMP_LE_U32, S_CMP_LE_U32),
+    E(S_CMP_EQ_U64, S_CMP_EQ_U64),
+    E(S_CMP_LG_U64, S_CMP_LG_U64),
+    E(S_CMP_EQ_I32, S_CMP_EQ_I32),
+    E(S_CMP_LG_I32, S_CMP_LG_I32),
+    E(S_CMP_GT_I32, S_CMP_GT_I32),
+    E(S_CMP_GE_I32, S_CMP_GE_I32),
+    E(S_CMP_LT_I32, S_CMP_LT_I32),
+    E(S_CMP_LE_I32, S_CMP_LE_I32),
+    E(S_CMP_EQ_F32, S_CMP_EQ_F32),
+    E(S_CMP_LG_F32, S_CMP_LG_F32),
+    E(S_CMP_GT_F32, S_CMP_GT_F32),
+    E(S_CMP_GE_F32, S_CMP_GE_F32),
+    E(S_CMP_LT_F32, S_CMP_LT_F32),
+    E(S_CMP_LE_F32, S_CMP_LE_F32),
     E(S_CMP_NEQ_F32, S_CMP_NEQ_F32),
-    E(S_CMP_NGT_F32, S_CMP_NGT_F32), E(S_CMP_NGE_F32, S_CMP_NGE_F32),
-    E(S_CMP_NLT_F32, S_CMP_NLT_F32), E(S_CMP_NLE_F32, S_CMP_NLE_F32),
+    E(S_CMP_NGT_F32, S_CMP_NGT_F32),
+    E(S_CMP_NGE_F32, S_CMP_NGE_F32),
+    E(S_CMP_NLT_F32, S_CMP_NLT_F32),
+    E(S_CMP_NLE_F32, S_CMP_NLE_F32),
     E(S_CMP_NLG_F32, S_CMP_NLG_F32),
-    E(S_CMP_O_F32, S_CMP_O_F32), E(S_CMP_U_F32, S_CMP_U_F32),
-    E(S_CMP_EQ_F16, S_CMP_EQ_F16), E(S_CMP_LG_F16, S_CMP_LG_F16),
-    E(S_CMP_GT_F16, S_CMP_GT_F16), E(S_CMP_GE_F16, S_CMP_GE_F16),
-    E(S_CMP_LT_F16, S_CMP_LT_F16), E(S_CMP_LE_F16, S_CMP_LE_F16),
+    E(S_CMP_O_F32, S_CMP_O_F32),
+    E(S_CMP_U_F32, S_CMP_U_F32),
+    E(S_CMP_EQ_F16, S_CMP_EQ_F16),
+    E(S_CMP_LG_F16, S_CMP_LG_F16),
+    E(S_CMP_GT_F16, S_CMP_GT_F16),
+    E(S_CMP_GE_F16, S_CMP_GE_F16),
+    E(S_CMP_LT_F16, S_CMP_LT_F16),
+    E(S_CMP_LE_F16, S_CMP_LE_F16),
     E(S_CMP_NEQ_F16, S_CMP_NEQ_F16),
-    E(S_CMP_NGT_F16, S_CMP_NGT_F16), E(S_CMP_NGE_F16, S_CMP_NGE_F16),
-    E(S_CMP_NLT_F16, S_CMP_NLT_F16), E(S_CMP_NLE_F16, S_CMP_NLE_F16),
+    E(S_CMP_NGT_F16, S_CMP_NGT_F16),
+    E(S_CMP_NGE_F16, S_CMP_NGE_F16),
+    E(S_CMP_NLT_F16, S_CMP_NLT_F16),
+    E(S_CMP_NLE_F16, S_CMP_NLE_F16),
     E(S_CMP_NLG_F16, S_CMP_NLG_F16),
-    E(S_CMP_O_F16, S_CMP_O_F16), E(S_CMP_U_F16, S_CMP_U_F16),
+    E(S_CMP_O_F16, S_CMP_O_F16),
+    E(S_CMP_U_F16, S_CMP_U_F16),
 
     // ---------------------------------------------------------------------
     // SOPK
@@ -188,12 +209,18 @@ static const Entry kCanonTable[] = {
     E(S_MOVK_I32, S_MOVK_I32),
     E(S_ADDK_I32, S_ADDK_I32),
     E(S_MULK_I32, S_MULK_I32),
-    E(S_CMPK_GE_I32, S_CMPK_GE_I32), E(S_CMPK_GT_I32, S_CMPK_GT_I32),
-    E(S_CMPK_LE_I32, S_CMPK_LE_I32), E(S_CMPK_LT_I32, S_CMPK_LT_I32),
-    E(S_CMPK_GE_U32, S_CMPK_GE_U32), E(S_CMPK_GT_U32, S_CMPK_GT_U32),
-    E(S_CMPK_LE_U32, S_CMPK_LE_U32), E(S_CMPK_LT_U32, S_CMPK_LT_U32),
-    E(S_CMPK_EQ_I32, S_CMPK_EQ_I32), E(S_CMPK_EQ_U32, S_CMPK_EQ_U32),
-    E(S_CMPK_LG_I32, S_CMPK_LG_I32), E(S_CMPK_LG_U32, S_CMPK_LG_U32),
+    E(S_CMPK_GE_I32, S_CMPK_GE_I32),
+    E(S_CMPK_GT_I32, S_CMPK_GT_I32),
+    E(S_CMPK_LE_I32, S_CMPK_LE_I32),
+    E(S_CMPK_LT_I32, S_CMPK_LT_I32),
+    E(S_CMPK_GE_U32, S_CMPK_GE_U32),
+    E(S_CMPK_GT_U32, S_CMPK_GT_U32),
+    E(S_CMPK_LE_U32, S_CMPK_LE_U32),
+    E(S_CMPK_LT_U32, S_CMPK_LT_U32),
+    E(S_CMPK_EQ_I32, S_CMPK_EQ_I32),
+    E(S_CMPK_EQ_U32, S_CMPK_EQ_U32),
+    E(S_CMPK_LG_I32, S_CMPK_LG_I32),
+    E(S_CMPK_LG_U32, S_CMPK_LG_U32),
     E(S_GETREG_B32, S_GETREG_B32),
     E(S_SETREG_B32, S_SETREG_B32),
     E(S_SETREG_IMM32_B32, S_SETREG_IMM32_B32),
@@ -201,26 +228,37 @@ static const Entry kCanonTable[] = {
     // ---------------------------------------------------------------------
     // SOP1
     // ---------------------------------------------------------------------
-    E(S_MOV_B32, S_MOV_B32), E(S_MOV_B64, S_MOV_B64),
-    E(S_NOT_B32, S_NOT_B32), E(S_NOT_B64, S_NOT_B64),
+    E(S_MOV_B32, S_MOV_B32),
+    E(S_MOV_B64, S_MOV_B64),
+    E(S_NOT_B32, S_NOT_B32),
+    E(S_NOT_B64, S_NOT_B64),
     E(S_BREV_B32, S_BREV_B32),
-    E(S_FF0_I32_B32, S_FF0_I32_B32), E(S_FF0_I32_B64, S_FF0_I32_B64),
-    E(S_FF1_I32_B32, S_FF1_I32_B32), E(S_FF1_I32_B64, S_FF1_I32_B64),
+    E(S_FF0_I32_B32, S_FF0_I32_B32),
+    E(S_FF0_I32_B64, S_FF0_I32_B64),
+    E(S_FF1_I32_B32, S_FF1_I32_B32),
+    E(S_FF1_I32_B64, S_FF1_I32_B64),
     E(S_BCNT1_I32_B32, S_BCNT1_I32_B32),
     E(S_BCNT1_I32_B64, S_BCNT1_I32_B64),
-    E(S_FLBIT_I32_B32, S_FLBIT_I32_B32), E(S_FLBIT_I32_B64, S_FLBIT_I32_B64),
-    E(S_FLBIT_I32, S_FLBIT_I32), E(S_FLBIT_I32_I64, S_FLBIT_I32_I64),
-    E(S_SEXT_I32_I8, S_SEXT_I32_I8), E(S_SEXT_I32_I16, S_SEXT_I32_I16),
+    E(S_FLBIT_I32_B32, S_FLBIT_I32_B32),
+    E(S_FLBIT_I32_B64, S_FLBIT_I32_B64),
+    E(S_FLBIT_I32, S_FLBIT_I32),
+    E(S_FLBIT_I32_I64, S_FLBIT_I32_I64),
+    E(S_SEXT_I32_I8, S_SEXT_I32_I8),
+    E(S_SEXT_I32_I16, S_SEXT_I32_I16),
     E(S_CVT_F16_F32, S_CVT_F16_F32),
     E(S_CVT_F32_F16, S_CVT_F32_F16),
     E(S_CVT_HI_F32_F16, S_CVT_HI_F32_F16),
-    E(S_CVT_F32_U32, S_CVT_F32_U32), E(S_CVT_F32_I32, S_CVT_F32_I32),
-    E(S_CVT_U32_F32, S_CVT_U32_F32), E(S_CVT_I32_F32, S_CVT_I32_F32),
+    E(S_CVT_F32_U32, S_CVT_F32_U32),
+    E(S_CVT_F32_I32, S_CVT_F32_I32),
+    E(S_CVT_U32_F32, S_CVT_U32_F32),
+    E(S_CVT_I32_F32, S_CVT_I32_F32),
     // Scalar F32-to-F32 integral rounding. LLVM TableGen declares these
     // SOP1_F32_Inst forms with fceil/ffloor/ftrunc/froundeven, and the AMD
     // ISA manual records 32-bit F32 source and destination operands.
-    E(S_CEIL_F32, S_CEIL_F32), E(S_FLOOR_F32, S_FLOOR_F32),
-    E(S_TRUNC_F32, S_TRUNC_F32), E(S_RNDNE_F32, S_RNDNE_F32),
+    E(S_CEIL_F32, S_CEIL_F32),
+    E(S_FLOOR_F32, S_FLOOR_F32),
+    E(S_TRUNC_F32, S_TRUNC_F32),
+    E(S_RNDNE_F32, S_RNDNE_F32),
     E(S_AND_SAVEEXEC_B32, S_AND_SAVEEXEC_B32),
     E(S_OR_SAVEEXEC_B32, S_OR_SAVEEXEC_B32),
     E(S_XOR_SAVEEXEC_B32, S_XOR_SAVEEXEC_B32),
@@ -282,9 +320,11 @@ static const Entry kCanonTable[] = {
     // ---------------------------------------------------------------------
     // SOP2
     // ---------------------------------------------------------------------
-    E(S_ADD_U32, S_ADD_U32), E(S_ADD_I32, S_ADD_U32),
+    E(S_ADD_U32, S_ADD_U32),
+    E(S_ADD_I32, S_ADD_U32),
     E(S_ADDC_U32, S_ADDC_U32),
-    E(S_SUB_U32, S_SUB_U32), E(S_SUB_I32, S_SUB_U32),
+    E(S_SUB_U32, S_SUB_U32),
+    E(S_SUB_I32, S_SUB_U32),
     E(S_SUBB_U32, S_SUBB_U32),
     // S_ADD_U64 is intentionally mapped below in the gfx12-rename block
     // alongside S_SUB_U64 -- both surface as `CanonicalOp::S_{ADD,SUB}_NC_U64`
@@ -299,22 +339,36 @@ static const Entry kCanonTable[] = {
     // miscompile into a "same behavior either way" no-op -- which is
     // the exact pattern a diligent reviewer catches as dead code.
     // Cleaned up in the same commit that adds this comment.
-    E(S_AND_B32, S_AND_B32), E(S_AND_B64, S_AND_B64),
-    E(S_OR_B32, S_OR_B32), E(S_OR_B64, S_OR_B64),
-    E(S_XOR_B32, S_XOR_B32), E(S_XOR_B64, S_XOR_B64),
-    E(S_ANDN2_B32, S_ANDN2_B32), E(S_ANDN2_B64, S_ANDN2_B64),
-    E(S_ORN2_B32, S_ORN2_B32), E(S_ORN2_B64, S_ORN2_B64),
-    E(S_NAND_B32, S_NAND_B32), E(S_NAND_B64, S_NAND_B64),
-    E(S_NOR_B32, S_NOR_B32), E(S_NOR_B64, S_NOR_B64),
-    E(S_XNOR_B32, S_XNOR_B32), E(S_XNOR_B64, S_XNOR_B64),
+    E(S_AND_B32, S_AND_B32),
+    E(S_AND_B64, S_AND_B64),
+    E(S_OR_B32, S_OR_B32),
+    E(S_OR_B64, S_OR_B64),
+    E(S_XOR_B32, S_XOR_B32),
+    E(S_XOR_B64, S_XOR_B64),
+    E(S_ANDN2_B32, S_ANDN2_B32),
+    E(S_ANDN2_B64, S_ANDN2_B64),
+    E(S_ORN2_B32, S_ORN2_B32),
+    E(S_ORN2_B64, S_ORN2_B64),
+    E(S_NAND_B32, S_NAND_B32),
+    E(S_NAND_B64, S_NAND_B64),
+    E(S_NOR_B32, S_NOR_B32),
+    E(S_NOR_B64, S_NOR_B64),
+    E(S_XNOR_B32, S_XNOR_B32),
+    E(S_XNOR_B64, S_XNOR_B64),
     E(S_ABSDIFF_I32, S_ABSDIFF_I32),
-    E(S_LSHL_B32, S_LSHL_B32), E(S_LSHL_B64, S_LSHL_B64),
-    E(S_LSHR_B32, S_LSHR_B32), E(S_LSHR_B64, S_LSHR_B64),
-    E(S_ASHR_I32, S_ASHR_I32), E(S_ASHR_I64, S_ASHR_I64),
-    E(S_MUL_I32, S_MUL_I32), E(S_MUL_HI_U32, S_MUL_HI_U32),
+    E(S_LSHL_B32, S_LSHL_B32),
+    E(S_LSHL_B64, S_LSHL_B64),
+    E(S_LSHR_B32, S_LSHR_B32),
+    E(S_LSHR_B64, S_LSHR_B64),
+    E(S_ASHR_I32, S_ASHR_I32),
+    E(S_ASHR_I64, S_ASHR_I64),
+    E(S_MUL_I32, S_MUL_I32),
+    E(S_MUL_HI_U32, S_MUL_HI_U32),
     E(S_MUL_HI_I32, S_MUL_HI_I32),
-    E(S_MUL_U64, S_MUL_U64), E(S_MUL_F32, S_MUL_F32),
-    E(S_ADD_F32, S_ADD_F32), E(S_SUB_F32, S_SUB_F32),
+    E(S_MUL_U64, S_MUL_U64),
+    E(S_MUL_F32, S_MUL_F32),
+    E(S_ADD_F32, S_ADD_F32),
+    E(S_SUB_F32, S_SUB_F32),
     E(S_FMAAK_F32, S_FMAAK_F32),
     E(S_FMAMK_F32, S_FMAMK_F32),
     E(S_FMAC_F32, S_FMAC_F32),
@@ -323,21 +377,31 @@ static const Entry kCanonTable[] = {
     // subtarget-specific real rename). Route it through NUM CanonicalOps so the
     // handler cannot be confused with the IEEE-2019 NaN-propagating
     // `S_{MINIMUM,MAXIMUM}_F32` family.
-    E(S_MAX_F32, S_MAX_NUM_F32), E(S_MIN_F32, S_MIN_NUM_F32),
+    E(S_MAX_F32, S_MAX_NUM_F32),
+    E(S_MIN_F32, S_MIN_NUM_F32),
     // gfx12+ scalar IEEE-2019 NaN-propagating f16/f32 extrema, distinct from
     // the NUM family above; lower to `llvm.{maximum,minimum}.{f16,f32}`.
-    E(S_MAXIMUM_F16, S_MAXIMUM_F16), E(S_MINIMUM_F16, S_MINIMUM_F16),
-    E(S_MAXIMUM_F32, S_MAXIMUM_F32), E(S_MINIMUM_F32, S_MINIMUM_F32),
-    E(S_BFE_U32, S_BFE_U32), E(S_BFE_I32, S_BFE_I32),
+    E(S_MAXIMUM_F16, S_MAXIMUM_F16),
+    E(S_MINIMUM_F16, S_MINIMUM_F16),
+    E(S_MAXIMUM_F32, S_MAXIMUM_F32),
+    E(S_MINIMUM_F32, S_MINIMUM_F32),
+    E(S_BFE_U32, S_BFE_U32),
+    E(S_BFE_I32, S_BFE_I32),
     E(S_BFE_I64, S_BFE_I64),
-    E(S_BFM_B32, S_BFM_B32), E(S_BFM_B64, S_BFM_B64),
-    E(S_CSELECT_B32, S_CSELECT_B32), E(S_CSELECT_B64, S_CSELECT_B64),
-    E(S_MIN_I32, S_MIN_I32), E(S_MIN_U32, S_MIN_U32),
-    E(S_MAX_I32, S_MAX_I32), E(S_MAX_U32, S_MAX_U32),
+    E(S_BFM_B32, S_BFM_B32),
+    E(S_BFM_B64, S_BFM_B64),
+    E(S_CSELECT_B32, S_CSELECT_B32),
+    E(S_CSELECT_B64, S_CSELECT_B64),
+    E(S_MIN_I32, S_MIN_I32),
+    E(S_MIN_U32, S_MIN_U32),
+    E(S_MAX_I32, S_MAX_I32),
+    E(S_MAX_U32, S_MAX_U32),
     E(S_PACK_LL_B32_B16, S_PACK_LL_B32_B16),
     E(S_PACK_LH_B32_B16, S_PACK_LH_B32_B16),
-    E(S_LSHL1_ADD_U32, S_LSHL1_ADD_U32), E(S_LSHL2_ADD_U32, S_LSHL2_ADD_U32),
-    E(S_LSHL3_ADD_U32, S_LSHL3_ADD_U32), E(S_LSHL4_ADD_U32, S_LSHL4_ADD_U32),
+    E(S_LSHL1_ADD_U32, S_LSHL1_ADD_U32),
+    E(S_LSHL2_ADD_U32, S_LSHL2_ADD_U32),
+    E(S_LSHL3_ADD_U32, S_LSHL3_ADD_U32),
+    E(S_LSHL4_ADD_U32, S_LSHL4_ADD_U32),
     // gfx12 `s_add_nc_u64` (renamed from `s_add_u64` in the
     // assembler -- see SOPInstructions.td 2300-ish range, same
     // pattern as `s_sub_u64 ... "s_sub_nc_u64"` below).  LLVM's
@@ -371,6 +435,16 @@ static const Entry kCanonTable[] = {
     // needs an entry here.
     E(V_MOV_B16_e64, V_MOV_B16),
     E(V_SWAP_B32, V_SWAP_B32),
+    // Register-relative moves. Both e32 and e64 base pseudos are mapped
+    // (the suffix-stripping canonicalizer collapses subtarget/_dpp forms
+    // onto these). M0 supplies the relative index; see handle-valu-small-
+    // ops.cpp for the lowering.
+    E(V_MOVRELD_B32_e32, V_MOVRELD_B32),
+    E(V_MOVRELD_B32_e64, V_MOVRELD_B32),
+    E(V_MOVRELS_B32_e32, V_MOVRELS_B32),
+    E(V_MOVRELS_B32_e64, V_MOVRELS_B32),
+    E(V_MOVRELSD_B32_e32, V_MOVRELSD_B32),
+    E(V_MOVRELSD_B32_e64, V_MOVRELSD_B32),
     E(V_NOP_e64, V_NOP),
     E(V_NOT_B32_e64, V_NOT_B32),
     E(V_BFREV_B32_e64, V_BFREV_B32),
@@ -423,6 +497,10 @@ static const Entry kCanonTable[] = {
     E(V_SQRT_F32_e64, V_SQRT_F32),
     E(V_EXP_F32_e64, V_EXP_F32),
     E(V_LOG_F32_e64, V_LOG_F32),
+    E(V_SIN_F32_e64, V_SIN_F32),
+    E(V_COS_F32_e64, V_COS_F32),
+    E(V_FREXP_EXP_I32_F32_e32, V_FREXP_EXP_I32_F32),
+    E(V_FREXP_EXP_I32_F32_e64, V_FREXP_EXP_I32_F32),
     E(V_FREXP_EXP_I32_F64_e64, V_FREXP_EXP_I32_F64),
     // Targets with native tanh support use `llvm.amdgcn.tanh.*`; targets
     // without native support lower through matching OCML entry points.
@@ -455,8 +533,15 @@ static const Entry kCanonTable[] = {
     E(V_FREXP_MANT_F64_e64, V_FREXP_MANT_F64),
     E(V_READFIRSTLANE_B32, V_READFIRSTLANE_B32),
     E(V_FLOOR_F16_e64, V_FLOOR_F16),
+    // f16 rounding + reciprocal (t16/fake16 variants collapse to _e64).
+    E(V_CEIL_F16_e64, V_CEIL_F16),
+    E(V_TRUNC_F16_e64, V_TRUNC_F16),
+    E(V_RNDNE_F16_e64, V_RNDNE_F16),
+    E(V_RCP_F16_e64, V_RCP_F16),
     E(V_CVT_F16_U16_e64, V_CVT_F16_U16),
+    E(V_CVT_F16_I16_e64, V_CVT_F16_I16),
     E(V_CVT_U16_F16_e64, V_CVT_U16_F16),
+    E(V_CVT_I16_F16_e64, V_CVT_I16_F16),
 
     // ---------------------------------------------------------------------
     // VOP2 / VOP3
@@ -465,6 +550,8 @@ static const Entry kCanonTable[] = {
     E(V_SUB_F32_e64, V_SUB_F32),
     E(V_SUBREV_F32_e64, V_SUBREV_F32),
     E(V_MUL_F32_e64, V_MUL_F32),
+    E(V_MUL_LEGACY_F32_e32, V_MUL_LEGACY_F32),
+    E(V_MUL_LEGACY_F32_e64, V_MUL_LEGACY_F32),
     E(V_FMAC_F32_e64, V_FMAC_F32),
     E(V_FMA_F32_e64, V_FMA_F32),
     E(V_FMAMK_F32, V_FMAMK_F32),
@@ -490,6 +577,10 @@ static const Entry kCanonTable[] = {
     E(V_MINIMUMMAXIMUM_F32_e64, V_MINIMUMMAXIMUM_F32),
     E(V_DIV_FIXUP_F32_e64, V_DIV_FIXUP_F32),
     E(V_DIV_FIXUP_F64_e64, V_DIV_FIXUP_F64),
+    // f16 div fixup: gfx8 base + gfx9 op_sel base (t16/fake16 collapse onto
+    // the gfx9 form via the suffix-stripping canonicalizer), like V_FMA_F16.
+    E(V_DIV_FIXUP_F16_e64, V_DIV_FIXUP_F16),
+    E(V_DIV_FIXUP_F16_gfx9_e64, V_DIV_FIXUP_F16),
     E(V_DIV_FMAS_F32_e64, V_DIV_FMAS_F32),
     E(V_DIV_FMAS_F64_e64, V_DIV_FMAS_F64),
     E(V_DIV_SCALE_F32_e64, V_DIV_SCALE_F32),
@@ -497,6 +588,8 @@ static const Entry kCanonTable[] = {
     // LLVM's no-carry 32-bit add/sub pseudos are just `V_ADD_U32` etc.; the
     // carry-in-carry-out form is the older `V_ADDC_U32`/`V_SUBB_U32` family.
     E(V_ADD_U32_e64, V_ADD_NC_U32),
+    E(V_BCNT_U32_B32_e64, V_BCNT_U32_B32),
+    E(V_BCNT_U32_B32_e32, V_BCNT_U32_B32),
     E(V_SUB_U32_e64, V_SUB_NC_U32),
     E(V_SUBREV_U32_e64, V_SUBREV_NC_U32),
     // GFX9 VOP3-only signed add/sub (saddsat/ssubsat when clamp is set,
@@ -517,6 +610,22 @@ static const Entry kCanonTable[] = {
     E(V_LSHRREV_B32_e64, V_LSHRREV_B32),
     E(V_ASHRREV_I32_e64, V_ASHRREV_I32),
     E(V_CNDMASK_B32_e64, V_CNDMASK_B32),
+    // V_CNDMASK_B16 is gfx11+ true16 / fake16 and is VOP3-only, so -- unlike
+    // V_MOV_B16 -- LLVM has NO bare `V_CNDMASK_B16_e64` pseudo for the
+    // `_t16_`/`_fake16_` alias-strip pass to collapse onto. Map both encoding
+    // pseudos directly to the shared 16-bit cndmask handler.
+    E(V_CNDMASK_B16_t16_e64, V_CNDMASK_B16),
+    E(V_CNDMASK_B16_fake16_e64, V_CNDMASK_B16),
+    // true16 16-bit bitwise ops. AND/OR/XOR are VOP3-only with no bare e64
+    // pseudo (map both encoding variants); V_NOT_B16 has a bare e64 form that
+    // the alias-strip pass collapses onto.
+    E(V_AND_B16_t16_e64, V_AND_B16),
+    E(V_AND_B16_fake16_e64, V_AND_B16),
+    E(V_OR_B16_t16_e64, V_OR_B16),
+    E(V_OR_B16_fake16_e64, V_OR_B16),
+    E(V_XOR_B16_t16_e64, V_XOR_B16),
+    E(V_XOR_B16_fake16_e64, V_XOR_B16),
+    E(V_NOT_B16_e64, V_NOT_B16),
     E(V_MUL_LO_U32_e64, V_MUL_LO_U32),
     E(V_MUL_HI_U32_e64, V_MUL_HI_U32),
     E(V_MUL_HI_I32_e64, V_MUL_HI_I32),
@@ -594,6 +703,10 @@ static const Entry kCanonTable[] = {
     E(V_MAX3_I32_e64, V_MAX3_I32),
     E(V_MIN3_I32_e64, V_MIN3_I32),
     E(V_MED3_I32_e64, V_MED3_I32),
+    E(V_MAXMIN_I32_e64, V_MAXMIN_I32),
+    E(V_MINMAX_I32_e64, V_MINMAX_I32),
+    E(V_MAXMIN_U32_e64, V_MAXMIN_U32),
+    E(V_MINMAX_U32_e64, V_MINMAX_U32),
     E(V_MAX3_I16_e64, V_MAX3_I16),
     E(V_BITOP3_B32_e64, V_BITOP3_B32),
     E(V_BITOP3_B16_e64, V_BITOP3_B16),
@@ -750,7 +863,9 @@ static const Entry kCanonTable[] = {
     // Packed `<2 x i16>` int family.
     E(V_PK_MAD_U16, V_PK_MAD_U16),
     E(V_PK_ADD_U16, V_PK_ADD_U16),
+    E(V_PK_SUB_I16, V_PK_SUB_I16),
     E(V_PK_LSHLREV_B16, V_PK_LSHLREV_B16),
+    E(V_PK_LSHRREV_B16, V_PK_LSHRREV_B16),
     E(V_PK_ASHRREV_I16, V_PK_ASHRREV_I16),
     E(V_PK_MUL_LO_U16, V_PK_MUL_LO_U16),
     E(V_PK_MAX_I16, V_PK_MAX_I16),
@@ -807,25 +922,43 @@ static const Entry kCanonTable[] = {
     // ---------------------------------------------------------------------
     // FLAT
     // ---------------------------------------------------------------------
-    E(FLAT_LOAD_UBYTE, FLAT_LOAD_UBYTE), E(FLAT_LOAD_SBYTE, FLAT_LOAD_SBYTE),
-    E(FLAT_LOAD_USHORT, FLAT_LOAD_USHORT), E(FLAT_LOAD_SSHORT, FLAT_LOAD_SSHORT),
-    E(FLAT_LOAD_DWORD, FLAT_LOAD_DWORD), E(FLAT_LOAD_DWORDX2, FLAT_LOAD_DWORDX2),
-    E(FLAT_LOAD_DWORDX3, FLAT_LOAD_DWORDX3), E(FLAT_LOAD_DWORDX4, FLAT_LOAD_DWORDX4),
-    E(FLAT_STORE_BYTE, FLAT_STORE_BYTE), E(FLAT_STORE_SHORT, FLAT_STORE_SHORT),
+    E(FLAT_LOAD_UBYTE, FLAT_LOAD_UBYTE),
+    E(FLAT_LOAD_SBYTE, FLAT_LOAD_SBYTE),
+    E(FLAT_LOAD_USHORT, FLAT_LOAD_USHORT),
+    E(FLAT_LOAD_SSHORT, FLAT_LOAD_SSHORT),
+    E(FLAT_LOAD_DWORD, FLAT_LOAD_DWORD),
+    E(FLAT_LOAD_DWORDX2, FLAT_LOAD_DWORDX2),
+    E(FLAT_LOAD_DWORDX3, FLAT_LOAD_DWORDX3),
+    E(FLAT_LOAD_DWORDX4, FLAT_LOAD_DWORDX4),
+    E(FLAT_STORE_BYTE, FLAT_STORE_BYTE),
+    E(FLAT_STORE_BYTE_D16_HI, FLAT_STORE_BYTE_D16_HI),
+    E(FLAT_STORE_SHORT, FLAT_STORE_SHORT),
     E(FLAT_STORE_SHORT_D16_HI, FLAT_STORE_SHORT_D16_HI),
-    E(FLAT_STORE_DWORD, FLAT_STORE_DWORD), E(FLAT_STORE_DWORDX2, FLAT_STORE_DWORDX2),
-    E(FLAT_STORE_DWORDX3, FLAT_STORE_DWORDX3), E(FLAT_STORE_DWORDX4, FLAT_STORE_DWORDX4),
-    E(GLOBAL_LOAD_UBYTE, GLOBAL_LOAD_UBYTE), E(GLOBAL_LOAD_SBYTE, GLOBAL_LOAD_SBYTE),
-    E(GLOBAL_LOAD_USHORT, GLOBAL_LOAD_USHORT), E(GLOBAL_LOAD_SSHORT, GLOBAL_LOAD_SSHORT),
+    E(FLAT_STORE_DWORD, FLAT_STORE_DWORD),
+    E(FLAT_STORE_DWORDX2, FLAT_STORE_DWORDX2),
+    E(FLAT_STORE_DWORDX3, FLAT_STORE_DWORDX3),
+    E(FLAT_STORE_DWORDX4, FLAT_STORE_DWORDX4),
+    E(GLOBAL_LOAD_UBYTE, GLOBAL_LOAD_UBYTE),
+    E(GLOBAL_LOAD_SBYTE, GLOBAL_LOAD_SBYTE),
+    E(GLOBAL_LOAD_USHORT, GLOBAL_LOAD_USHORT),
+    E(GLOBAL_LOAD_SSHORT, GLOBAL_LOAD_SSHORT),
     E(GLOBAL_LOAD_SHORT_D16_HI, GLOBAL_LOAD_SHORT_D16_HI),
-    E(GLOBAL_LOAD_DWORD, GLOBAL_LOAD_DWORD), E(GLOBAL_LOAD_DWORDX2, GLOBAL_LOAD_DWORDX2),
-    E(GLOBAL_LOAD_DWORDX3, GLOBAL_LOAD_DWORDX3), E(GLOBAL_LOAD_DWORDX4, GLOBAL_LOAD_DWORDX4),
-    E(GLOBAL_STORE_BYTE, GLOBAL_STORE_BYTE), E(GLOBAL_STORE_SHORT, GLOBAL_STORE_SHORT),
+    E(GLOBAL_LOAD_DWORD, GLOBAL_LOAD_DWORD),
+    E(GLOBAL_LOAD_DWORDX2, GLOBAL_LOAD_DWORDX2),
+    E(GLOBAL_LOAD_DWORDX3, GLOBAL_LOAD_DWORDX3),
+    E(GLOBAL_LOAD_DWORDX4, GLOBAL_LOAD_DWORDX4),
+    E(GLOBAL_STORE_BYTE, GLOBAL_STORE_BYTE),
+    E(GLOBAL_STORE_SHORT, GLOBAL_STORE_SHORT),
     E(GLOBAL_STORE_BYTE_D16_HI, GLOBAL_STORE_BYTE_D16_HI),
     E(GLOBAL_STORE_SHORT_D16_HI, GLOBAL_STORE_SHORT_D16_HI),
-    E(GLOBAL_STORE_DWORD, GLOBAL_STORE_DWORD), E(GLOBAL_STORE_DWORDX2, GLOBAL_STORE_DWORDX2),
-    E(GLOBAL_STORE_DWORDX3, GLOBAL_STORE_DWORDX3), E(GLOBAL_STORE_DWORDX4, GLOBAL_STORE_DWORDX4),
-    // Scratch/private-segment VMEM. Keep these as explicit CanonicalOps rather than
+    E(GLOBAL_STORE_DWORD, GLOBAL_STORE_DWORD),
+    E(GLOBAL_STORE_DWORDX2, GLOBAL_STORE_DWORDX2),
+    E(GLOBAL_STORE_DWORDX3, GLOBAL_STORE_DWORDX3),
+    E(GLOBAL_STORE_DWORDX4, GLOBAL_STORE_DWORDX4),
+    E(GLOBAL_WB, GLOBAL_WB),
+    E(GLOBAL_INV, GLOBAL_INV),
+    // Scratch/private-segment VMEM. Keep these as explicit CanonicalOps rather
+    // than
     // routing through GLOBAL_*: the handler must preserve scratch swizzling and
     // KD private-segment ABI semantics, not global address-space semantics.
     E(SCRATCH_LOAD_DWORD_ST, SCRATCH_LOAD_DWORD),
@@ -885,8 +1018,109 @@ static const Entry kCanonTable[] = {
     E(SCRATCH_STORE_DWORD_SVS_gfx12, SCRATCH_STORE_DWORD),
     E(SCRATCH_STORE_DWORD_SVS_gfx13, SCRATCH_STORE_DWORD),
 
+    // Sub-dword scratch load/store (byte/short). Same addressing-mode
+    // variants (ST/SADDR/SVS + gfx11/12/13 reals) as the DWORD family above;
+    // canonicalize() folds the subtarget reals onto these pseudos.
+    E(SCRATCH_LOAD_UBYTE_ST, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SADDR, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SVS, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_ST_gfx11, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SADDR_gfx11, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_gfx11, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SVS_gfx11, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_ST_gfx12, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SADDR_gfx12, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_gfx12, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SVS_gfx12, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_ST_gfx13, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SADDR_gfx13, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_gfx13, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_UBYTE_SVS_gfx13, SCRATCH_LOAD_UBYTE),
+    E(SCRATCH_LOAD_SBYTE_ST, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SADDR, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SVS, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_ST_gfx11, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SADDR_gfx11, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_gfx11, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SVS_gfx11, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_ST_gfx12, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SADDR_gfx12, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_gfx12, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SVS_gfx12, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_ST_gfx13, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SADDR_gfx13, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_gfx13, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_SBYTE_SVS_gfx13, SCRATCH_LOAD_SBYTE),
+    E(SCRATCH_LOAD_USHORT_ST, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SADDR, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SVS, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_ST_gfx11, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SADDR_gfx11, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_gfx11, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SVS_gfx11, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_ST_gfx12, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SADDR_gfx12, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_gfx12, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SVS_gfx12, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_ST_gfx13, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SADDR_gfx13, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_gfx13, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_USHORT_SVS_gfx13, SCRATCH_LOAD_USHORT),
+    E(SCRATCH_LOAD_SSHORT_ST, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SADDR, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SVS, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_ST_gfx11, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SADDR_gfx11, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_gfx11, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SVS_gfx11, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_ST_gfx12, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SADDR_gfx12, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_gfx12, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SVS_gfx12, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_ST_gfx13, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SADDR_gfx13, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_gfx13, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_LOAD_SSHORT_SVS_gfx13, SCRATCH_LOAD_SSHORT),
+    E(SCRATCH_STORE_BYTE_ST, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SADDR, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SVS, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_ST_gfx11, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SADDR_gfx11, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_gfx11, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SVS_gfx11, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_ST_gfx12, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SADDR_gfx12, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_gfx12, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SVS_gfx12, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_ST_gfx13, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SADDR_gfx13, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_gfx13, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_BYTE_SVS_gfx13, SCRATCH_STORE_BYTE),
+    E(SCRATCH_STORE_SHORT_ST, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SADDR, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SVS, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_ST_gfx11, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SADDR_gfx11, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_gfx11, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SVS_gfx11, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_ST_gfx12, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SADDR_gfx12, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_gfx12, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SVS_gfx12, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_ST_gfx13, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SADDR_gfx13, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_gfx13, SCRATCH_STORE_SHORT),
+    E(SCRATCH_STORE_SHORT_SVS_gfx13, SCRATCH_STORE_SHORT),
+
     // ---------------------------------------------------------------------
-    // FLAT atomics (canonicalized to non-SADDR via getGlobalVaddrOp; no-return form)
+    // FLAT atomics (canonicalized to non-SADDR via getGlobalVaddrOp; no-return
+    // form)
     // ---------------------------------------------------------------------
     E(FLAT_ATOMIC_ADD, FLAT_ATOMIC_ADD),
     E(FLAT_ATOMIC_SUB, FLAT_ATOMIC_SUB),
@@ -899,23 +1133,35 @@ static const Entry kCanonTable[] = {
     E(FLAT_ATOMIC_UMAX, FLAT_ATOMIC_UMAX),
     E(FLAT_ATOMIC_SWAP, FLAT_ATOMIC_SWAP),
     E(FLAT_ATOMIC_CMPSWAP, FLAT_ATOMIC_CMPSWAP),
+    E(FLAT_ATOMIC_ADD_X2, FLAT_ATOMIC_ADD_X2),
+    E(FLAT_ATOMIC_SUB_X2, FLAT_ATOMIC_SUB_X2),
+    E(FLAT_ATOMIC_AND_X2, FLAT_ATOMIC_AND_X2),
+    E(FLAT_ATOMIC_OR_X2, FLAT_ATOMIC_OR_X2),
+    E(FLAT_ATOMIC_XOR_X2, FLAT_ATOMIC_XOR_X2),
+    E(FLAT_ATOMIC_SMIN_X2, FLAT_ATOMIC_SMIN_X2),
+    E(FLAT_ATOMIC_SMAX_X2, FLAT_ATOMIC_SMAX_X2),
+    E(FLAT_ATOMIC_UMIN_X2, FLAT_ATOMIC_UMIN_X2),
+    E(FLAT_ATOMIC_UMAX_X2, FLAT_ATOMIC_UMAX_X2),
+    E(FLAT_ATOMIC_SWAP_X2, FLAT_ATOMIC_SWAP_X2),
+    E(FLAT_ATOMIC_CMPSWAP_X2, FLAT_ATOMIC_CMPSWAP_X2),
     E(FLAT_ATOMIC_ADD_F32, FLAT_ATOMIC_ADD_F32),
     // FP64 FLAT atomics. `_SADDR` is a distinct pseudo (not alias-stripped),
     // so list both; `_RTN` suffixes collapse via the strip rules below.
-    E(FLAT_ATOMIC_ADD_F64,         FLAT_ATOMIC_ADD_F64),
+    E(FLAT_ATOMIC_ADD_F64, FLAT_ATOMIC_ADD_F64),
     E(FLAT_ATOMIC_ADD_F64_gfx1250, FLAT_ATOMIC_ADD_F64),
-    E(FLAT_ATOMIC_ADD_F64_SADDR,   FLAT_ATOMIC_ADD_F64),
-    E(FLAT_ATOMIC_MIN_F64,         FLAT_ATOMIC_MIN_NUM_F64),
+    E(FLAT_ATOMIC_ADD_F64_SADDR, FLAT_ATOMIC_ADD_F64),
+    E(FLAT_ATOMIC_MIN_F64, FLAT_ATOMIC_MIN_NUM_F64),
     E(FLAT_ATOMIC_MIN_F64_gfx1250, FLAT_ATOMIC_MIN_NUM_F64),
-    E(FLAT_ATOMIC_MIN_F64_SADDR,   FLAT_ATOMIC_MIN_NUM_F64),
-    E(FLAT_ATOMIC_MAX_F64,         FLAT_ATOMIC_MAX_NUM_F64),
+    E(FLAT_ATOMIC_MIN_F64_SADDR, FLAT_ATOMIC_MIN_NUM_F64),
+    E(FLAT_ATOMIC_MAX_F64, FLAT_ATOMIC_MAX_NUM_F64),
     E(FLAT_ATOMIC_MAX_F64_gfx1250, FLAT_ATOMIC_MAX_NUM_F64),
-    E(FLAT_ATOMIC_MAX_F64_SADDR,   FLAT_ATOMIC_MAX_NUM_F64),
+    E(FLAT_ATOMIC_MAX_F64_SADDR, FLAT_ATOMIC_MAX_NUM_F64),
 
     // ---------------------------------------------------------------------
     // GLOBAL atomics
     // ---------------------------------------------------------------------
     E(GLOBAL_ATOMIC_ADD, GLOBAL_ATOMIC_ADD),
+    E(GLOBAL_ATOMIC_ADD_X2, GLOBAL_ATOMIC_ADD_X2),
     E(GLOBAL_ATOMIC_SUB, GLOBAL_ATOMIC_SUB),
     E(GLOBAL_ATOMIC_AND, GLOBAL_ATOMIC_AND),
     E(GLOBAL_ATOMIC_OR, GLOBAL_ATOMIC_OR),
@@ -925,21 +1171,25 @@ static const Entry kCanonTable[] = {
     E(GLOBAL_ATOMIC_UMIN, GLOBAL_ATOMIC_UMIN),
     E(GLOBAL_ATOMIC_UMAX, GLOBAL_ATOMIC_UMAX),
     E(GLOBAL_ATOMIC_SWAP, GLOBAL_ATOMIC_SWAP),
+    // b64 (X2) swap: reuse the GLOBAL_ATOMIC_SWAP canonical op; the
+    // handler detects 64-bit width from the MC opcode.
+    E(GLOBAL_ATOMIC_SWAP_X2, GLOBAL_ATOMIC_SWAP),
+    E(GLOBAL_ATOMIC_SWAP_X2_SADDR, GLOBAL_ATOMIC_SWAP),
     E(GLOBAL_ATOMIC_CMPSWAP, GLOBAL_ATOMIC_CMPSWAP),
     E(GLOBAL_ATOMIC_ADD_F32, GLOBAL_ATOMIC_ADD_F32),
     E(GLOBAL_ATOMIC_PK_ADD_BF16, GLOBAL_ATOMIC_PK_ADD_BF16),
     E(GLOBAL_ATOMIC_PK_ADD_F16, GLOBAL_ATOMIC_PK_ADD_F16),
     // FP64 GLOBAL atomics. Same SADDR / mnemonic-rename considerations
     // as the FLAT block above.
-    E(GLOBAL_ATOMIC_ADD_F64,         GLOBAL_ATOMIC_ADD_F64),
+    E(GLOBAL_ATOMIC_ADD_F64, GLOBAL_ATOMIC_ADD_F64),
     E(GLOBAL_ATOMIC_ADD_F64_gfx1250, GLOBAL_ATOMIC_ADD_F64),
-    E(GLOBAL_ATOMIC_ADD_F64_SADDR,   GLOBAL_ATOMIC_ADD_F64),
-    E(GLOBAL_ATOMIC_MIN_F64,         GLOBAL_ATOMIC_MIN_NUM_F64),
+    E(GLOBAL_ATOMIC_ADD_F64_SADDR, GLOBAL_ATOMIC_ADD_F64),
+    E(GLOBAL_ATOMIC_MIN_F64, GLOBAL_ATOMIC_MIN_NUM_F64),
     E(GLOBAL_ATOMIC_MIN_F64_gfx1250, GLOBAL_ATOMIC_MIN_NUM_F64),
-    E(GLOBAL_ATOMIC_MIN_F64_SADDR,   GLOBAL_ATOMIC_MIN_NUM_F64),
-    E(GLOBAL_ATOMIC_MAX_F64,         GLOBAL_ATOMIC_MAX_NUM_F64),
+    E(GLOBAL_ATOMIC_MIN_F64_SADDR, GLOBAL_ATOMIC_MIN_NUM_F64),
+    E(GLOBAL_ATOMIC_MAX_F64, GLOBAL_ATOMIC_MAX_NUM_F64),
     E(GLOBAL_ATOMIC_MAX_F64_gfx1250, GLOBAL_ATOMIC_MAX_NUM_F64),
-    E(GLOBAL_ATOMIC_MAX_F64_SADDR,   GLOBAL_ATOMIC_MAX_NUM_F64),
+    E(GLOBAL_ATOMIC_MAX_F64_SADDR, GLOBAL_ATOMIC_MAX_NUM_F64),
 
     // ---------------------------------------------------------------------
     // SMEM atomics (enumerate addressing forms: IMM / SGPR / SGPR_IMM)
@@ -972,7 +1222,8 @@ static const Entry kCanonTable[] = {
     // CanonicalOp on the gfx1250 spelling matches the disassembly the
     // raise_cli operator sees.
     E(DS_LOAD_TR8_B64, DS_LOAD_TR8_B64),
-    E(DS_READ_B32, DS_READ_B32), E(DS_READ_B64, DS_READ_B64),
+    E(DS_READ_B32, DS_READ_B32),
+    E(DS_READ_B64, DS_READ_B64),
     // 96-bit LDS load. LLVM MC keeps the legacy `DS_READ_B96`
     // pseudo name for what gfx11+ disassembles as `ds_load_b96`
     // (DSInstructions.td:1578); we canonicalise on the gfx11+
@@ -982,7 +1233,8 @@ static const Entry kCanonTable[] = {
     // {dwords=3, loadBits=96} entry.
     E(DS_READ_B96, DS_READ_B96),
     E(DS_READ_B128, DS_READ_B128),
-    E(DS_READ2_B32, DS_READ2_B32), E(DS_READ2_B64, DS_READ2_B64),
+    E(DS_READ2_B32, DS_READ2_B32),
+    E(DS_READ2_B64, DS_READ2_B64),
     // gfx11+ stride-64 two-address LDS loads (DSInstructions.td:1529,
     // 1542 -- `ds_load_2addr_stride64_b{32,64}`). Same two-offset MC
     // shape as the non-ST64 siblings; the canonicalization chain
@@ -990,22 +1242,27 @@ static const Entry kCanonTable[] = {
     // forms here, mirroring the DS_READ2_B{32,64} entries above.
     E(DS_READ2ST64_B32, DS_READ2ST64_B32),
     E(DS_READ2ST64_B64, DS_READ2ST64_B64),
-    E(DS_READ_U16, DS_READ_U16), E(DS_READ_I16, DS_READ_I16),
-    E(DS_READ_U8, DS_READ_U8), E(DS_READ_I8, DS_READ_I8),
-    E(DS_WRITE_B32, DS_WRITE_B32), E(DS_WRITE_B64, DS_WRITE_B64),
+    E(DS_READ_U16, DS_READ_U16),
+    E(DS_READ_I16, DS_READ_I16),
+    E(DS_READ_U8, DS_READ_U8),
+    E(DS_READ_I8, DS_READ_I8),
+    E(DS_WRITE_B32, DS_WRITE_B32),
+    E(DS_WRITE_B64, DS_WRITE_B64),
     // Symmetric 96-bit LDS store. gfx11+ asm spelling is
     // `ds_store_b96` (DSInstructions.td:1576); the LLVM MC opcode
     // remains `DS_WRITE_B96`.
     E(DS_WRITE_B96, DS_WRITE_B96),
     E(DS_WRITE_B128, DS_WRITE_B128),
-    E(DS_WRITE2_B32, DS_WRITE2_B32), E(DS_WRITE2_B64, DS_WRITE2_B64),
+    E(DS_WRITE2_B32, DS_WRITE2_B32),
+    E(DS_WRITE2_B64, DS_WRITE2_B64),
     // gfx11+ stride-64 two-address LDS stores -- mirror of the
     // DS_READ2ST64 read-side entries above.
     E(DS_WRITE2ST64_B32, DS_WRITE2ST64_B32),
     E(DS_WRITE2ST64_B64, DS_WRITE2ST64_B64),
-    E(DS_WRITE_B16, DS_WRITE_B16), E(DS_WRITE_B8, DS_WRITE_B8),
+    E(DS_WRITE_B16, DS_WRITE_B16),
+    E(DS_WRITE_B8, DS_WRITE_B8),
     // gfx8+ HasD16LoadStore D16_HI store family (DSInstructions.td
-    // §604-606). Stores bits [31:16] (B16_HI) or bits [23:16] (B8_HI)
+    // sec. 604-606). Stores bits [31:16] (B16_HI) or bits [23:16] (B8_HI)
     // of the source VGPR to LDS -- same VGPR/i32 source operand
     // shape as their non-_HI siblings, so the canonical-table macro
     // routes both encoding forks (gfx10 m0-based vs gfx11+ no-m0)
@@ -1013,23 +1270,30 @@ static const Entry kCanonTable[] = {
     E(DS_WRITE_B16_D16_HI, DS_WRITE_B16_D16_HI),
     E(DS_WRITE_B8_D16_HI, DS_WRITE_B8_D16_HI),
     E(DS_BPERMUTE_B32, DS_BPERMUTE_B32),
+    // ds_permute_b32 -- forward cross-lane PUSH permute, mirror of the
+    // PULL ds_bpermute_b32 above. Lifted through llvm.amdgcn.ds.permute
+    // in handle-ds.cpp (see the DS_PERMUTE_B32 handler).
+    E(DS_PERMUTE_B32, DS_PERMUTE_B32),
     // ds_swizzle_b32 -- wave-width-specific cross-lane shuffle. The
     // handler refuses with `unsupportedInstructionForm` until the P6 rewrite
     // lands (see the ds_swizzle_b32 row of hotswap/docs/wave-size-
-    // translation.md §5.3); the wave-size classifier (Phase 1.4.5)
+    // translation.md sec. 5.3); the wave-size classifier (Phase 1.4.5)
     // flags it as a Class 2 obstruction (wave-size-translation.md
-    // §6) in the cross-wave case.
+    // sec. 6) in the cross-wave case.
     E(DS_SWIZZLE_B32, DS_SWIZZLE_B32),
 
     // DS atomics carry `_RTN` as an infix (`DS_ADD_RTN_F64`), so the
     // trailing-suffix strip rule doesn't fire; alias it explicitly.
-    E(DS_ADD_F64,     DS_ADD_F64),
+    E(DS_ADD_F64, DS_ADD_F64),
     E(DS_ADD_RTN_F64, DS_ADD_F64),
+    E(DS_ADD_U32, DS_ADD_U32),
+    E(DS_ADD_RTN_U32, DS_ADD_U32),
 
     // ---------------------------------------------------------------------
     // MUBUF direct-to-LDS loads (distinct semantics from VGPR-dest loads)
     // ---------------------------------------------------------------------
-    // LLVM only ships DWORD and DWORDX4 LDS pseudos -- the DWORDX2_LDS CanonicalOp
+    // LLVM only ships DWORD and DWORDX4 LDS pseudos -- the DWORDX2_LDS
+    // CanonicalOp
     // stays unmapped until an LLVM pseudo exists for it.
     MUBUF4(BUFFER_LOAD_DWORD_LDS, BUFFER_LOAD_DWORD_LDS),
     MUBUF4(BUFFER_LOAD_DWORDX4_LDS, BUFFER_LOAD_DWORDX4_LDS),
@@ -1092,7 +1356,7 @@ static const Entry kCanonTable[] = {
     MUBUF4(BUFFER_ATOMIC_OR, BUFFER_ATOMIC_OR),
     MUBUF4(BUFFER_ATOMIC_XOR, BUFFER_ATOMIC_XOR),
     // Class 3 non-commutative atomics (hotswap/docs/wave-size-
-    // translation.md §6). The wave-size classifier flags them in
+    // translation.md sec. 6). The wave-size classifier flags them in
     // the cross-wave case before
     // dispatch ever reaches handle-mubuf.cpp's switch. Same-wave and
     // same-target lifts are still modeled with raw-buffer atomics there.
@@ -1136,33 +1400,33 @@ static const Entry kCanonTable[] = {
     // `_e64` via pseudoAlias, so we only list the base pseudo here.
     // ---------------------------------------------------------------------
     E(V_MFMA_F32_16X16X16F16_e64, V_MFMA_F32_16x16x16_F16),
-    E(V_MFMA_F32_32X32X8F16_e64,  V_MFMA_F32_32x32x8_F16),
-    E(V_MFMA_F32_16X16X4F32_e64,  V_MFMA_F32_16x16x4_F32),
-    E(V_MFMA_F32_32X32X1F32_e64,  V_MFMA_F32_32x32x1_F32),
-    E(V_MFMA_F32_32X32X2F32_e64,  V_MFMA_F32_32x32x2_F32),
-    E(V_MFMA_F32_4X4X1F32_e64,    V_MFMA_F32_4x4x1_F32),
-    E(V_MFMA_F32_16X16X1F32_e64,  V_MFMA_F32_16x16x1_F32),
-    E(V_MFMA_F32_32X32X4F16_e64,  V_MFMA_F32_32x32x4_F16),
-    E(V_MFMA_F32_16X16X4F16_e64,  V_MFMA_F32_16x16x4_F16),
-    E(V_MFMA_F32_4X4X4F16_e64,    V_MFMA_F32_4x4x4_F16),
-    E(V_MFMA_I32_16X16X32I8_e64,  V_MFMA_I32_16x16x32_I8),
-    E(V_MFMA_I32_32X32X16I8_e64,  V_MFMA_I32_32x32x16_I8),
-    E(V_MFMA_I32_32X32X4I8_e64,   V_MFMA_I32_32x32x4_I8),
-    E(V_MFMA_I32_16X16X4I8_e64,   V_MFMA_I32_16x16x4_I8),
-    E(V_MFMA_I32_4X4X4I8_e64,     V_MFMA_I32_4x4x4_I8),
+    E(V_MFMA_F32_32X32X8F16_e64, V_MFMA_F32_32x32x8_F16),
+    E(V_MFMA_F32_16X16X4F32_e64, V_MFMA_F32_16x16x4_F32),
+    E(V_MFMA_F32_32X32X1F32_e64, V_MFMA_F32_32x32x1_F32),
+    E(V_MFMA_F32_32X32X2F32_e64, V_MFMA_F32_32x32x2_F32),
+    E(V_MFMA_F32_4X4X1F32_e64, V_MFMA_F32_4x4x1_F32),
+    E(V_MFMA_F32_16X16X1F32_e64, V_MFMA_F32_16x16x1_F32),
+    E(V_MFMA_F32_32X32X4F16_e64, V_MFMA_F32_32x32x4_F16),
+    E(V_MFMA_F32_16X16X4F16_e64, V_MFMA_F32_16x16x4_F16),
+    E(V_MFMA_F32_4X4X4F16_e64, V_MFMA_F32_4x4x4_F16),
+    E(V_MFMA_I32_16X16X32I8_e64, V_MFMA_I32_16x16x32_I8),
+    E(V_MFMA_I32_32X32X16I8_e64, V_MFMA_I32_32x32x16_I8),
+    E(V_MFMA_I32_32X32X4I8_e64, V_MFMA_I32_32x32x4_I8),
+    E(V_MFMA_I32_16X16X4I8_e64, V_MFMA_I32_16x16x4_I8),
+    E(V_MFMA_I32_4X4X4I8_e64, V_MFMA_I32_4x4x4_I8),
     E(V_MFMA_F32_16X16X8XF32_e64, V_MFMA_F32_16x16x8_XF32),
     E(V_MFMA_F32_32X32X4XF32_e64, V_MFMA_F32_32x32x4_XF32),
     E(V_MFMA_F32_32X32X2BF16_e64, V_MFMA_F32_32x32x2_BF16),
     E(V_MFMA_F32_16X16X2BF16_e64, V_MFMA_F32_16x16x2_BF16),
-    E(V_MFMA_F32_4X4X2BF16_e64,   V_MFMA_F32_4x4x2_BF16),
+    E(V_MFMA_F32_4X4X2BF16_e64, V_MFMA_F32_4x4x2_BF16),
     // Only the 16x16x16 and 32x32x8 1K shapes were in the legacy mnemonic
     // table; the 4x4x4/16x16x4/32x32x4 1K variants are distinct intrinsics
     // that the raiser does not (yet) model and therefore stay unmapped.
     E(V_MFMA_F32_16X16X16BF16_1K_e64, V_MFMA_F32_16x16x16_BF16_1K),
-    E(V_MFMA_F32_32X32X8BF16_1K_e64,  V_MFMA_F32_32x32x8_BF16_1K),
+    E(V_MFMA_F32_32X32X8BF16_1K_e64, V_MFMA_F32_32x32x8_BF16_1K),
     E(V_MFMA_F32_16X16X32_BF16_e64, V_MFMA_F32_16x16x32_BF16),
     E(V_MFMA_F32_32X32X16_BF16_e64, V_MFMA_F32_32x32x16_BF16),
-    E(V_MFMA_F32_16X16X32_F16_e64,  V_MFMA_F32_16x16x32_F16),
+    E(V_MFMA_F32_16X16X32_F16_e64, V_MFMA_F32_16x16x32_F16),
     E(V_MFMA_F32_16X16X32_FP8_FP8_e64, V_MFMA_F32_16x16x32_FP8_FP8),
     E(V_MFMA_F32_16X16X32_FP8_BF8_e64, V_MFMA_F32_16x16x32_FP8_BF8),
     E(V_MFMA_F32_16X16X32_BF8_FP8_e64, V_MFMA_F32_16x16x32_BF8_FP8),
@@ -1186,15 +1450,24 @@ static const Entry kCanonTable[] = {
     E(V_MFMA_F32_16X16X128_F8F6F4_f8_f6_e64, V_MFMA_F32_16x16x128_F8F6F4),
     E(V_MFMA_F32_16X16X128_F8F6F4_f8_f8_e64, V_MFMA_F32_16x16x128_F8F6F4),
 
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f6_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f8_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f6_f4_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f6_f6_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f6_f8_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f8_f4_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f8_f6_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f8_f8_e64, V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f6_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f4_f8_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f6_f4_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f6_f6_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f6_f8_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f8_f4_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f8_f6_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_MFMA_SCALE_F32_16X16X128_F8F6F4_f8_f8_e64,
+      V_MFMA_SCALE_F32_16x16x128_F8F6F4),
 
     E(V_MFMA_F32_32X32X64_F8F6F4_f4_f4_e64, V_MFMA_F32_32x32x64_F8F6F4),
     E(V_MFMA_F32_32X32X64_F8F6F4_f4_f6_e64, V_MFMA_F32_32x32x64_F8F6F4),
@@ -1206,15 +1479,24 @@ static const Entry kCanonTable[] = {
     E(V_MFMA_F32_32X32X64_F8F6F4_f8_f6_e64, V_MFMA_F32_32x32x64_F8F6F4),
     E(V_MFMA_F32_32X32X64_F8F6F4_f8_f8_e64, V_MFMA_F32_32x32x64_F8F6F4),
 
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f4_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f6_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f8_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f6_f4_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f6_f6_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f6_f8_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f8_f4_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f8_f6_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
-    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f8_f8_e64, V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f4_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f6_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f4_f8_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f6_f4_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f6_f6_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f6_f8_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f8_f4_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f8_f6_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
+    E(V_MFMA_SCALE_F32_32X32X64_F8F6F4_f8_f8_e64,
+      V_MFMA_SCALE_F32_32x32x64_F8F6F4),
 
     // ---------------------------------------------------------------------
     // WMMA (gfx1250): twoaddr/threeaddr pseudo variants both mean the same
@@ -1244,13 +1526,13 @@ static const Entry kCanonTable[] = {
     // (see `runGroupPass` in wmma-lowering.cpp). Both `_twoaddr` and
     // `_threeaddr` MC pseudo variants represent the same semantic op,
     // mirroring the F16/BF16 mapping above.
-    E(V_WMMA_F32_16X16X64_FP8_FP8_w32_twoaddr,   V_WMMA_F32_16x16x64_FP8_FP8),
+    E(V_WMMA_F32_16X16X64_FP8_FP8_w32_twoaddr, V_WMMA_F32_16x16x64_FP8_FP8),
     E(V_WMMA_F32_16X16X64_FP8_FP8_w32_threeaddr, V_WMMA_F32_16x16x64_FP8_FP8),
-    E(V_WMMA_F32_16X16X64_FP8_BF8_w32_twoaddr,   V_WMMA_F32_16x16x64_FP8_BF8),
+    E(V_WMMA_F32_16X16X64_FP8_BF8_w32_twoaddr, V_WMMA_F32_16x16x64_FP8_BF8),
     E(V_WMMA_F32_16X16X64_FP8_BF8_w32_threeaddr, V_WMMA_F32_16x16x64_FP8_BF8),
-    E(V_WMMA_F32_16X16X64_BF8_FP8_w32_twoaddr,   V_WMMA_F32_16x16x64_BF8_FP8),
+    E(V_WMMA_F32_16X16X64_BF8_FP8_w32_twoaddr, V_WMMA_F32_16x16x64_BF8_FP8),
     E(V_WMMA_F32_16X16X64_BF8_FP8_w32_threeaddr, V_WMMA_F32_16x16x64_BF8_FP8),
-    E(V_WMMA_F32_16X16X64_BF8_BF8_w32_twoaddr,   V_WMMA_F32_16x16x64_BF8_BF8),
+    E(V_WMMA_F32_16X16X64_BF8_BF8_w32_twoaddr, V_WMMA_F32_16x16x64_BF8_BF8),
     E(V_WMMA_F32_16X16X64_BF8_BF8_w32_threeaddr, V_WMMA_F32_16x16x64_BF8_BF8),
     // 16x16x64 WMMA, IU8 (signed/unsigned 8-bit integer inputs, i32
     // accumulator; gfx1250 RDNA4 VOP3P opcode 0x072). The MC opcode
@@ -1261,12 +1543,12 @@ static const Entry kCanonTable[] = {
     // accumulator). Both `_twoaddr` and `_threeaddr` MC pseudo
     // variants represent the same semantic op, mirroring the
     // F16/BF16 / FP8/BF8 mappings above.
-    E(V_WMMA_I32_16X16X64_IU8_w32_twoaddr,   V_WMMA_I32_16x16x64_IU8),
+    E(V_WMMA_I32_16X16X64_IU8_w32_twoaddr, V_WMMA_I32_16x16x64_IU8),
     E(V_WMMA_I32_16X16X64_IU8_w32_threeaddr, V_WMMA_I32_16x16x64_IU8),
     // ---------------------------------------------------------------------
     // Scaled WMMA F8F6F4 (gfx1250 RDNA4 -- VOP3PX2 paired form, real opcode
     // 0x033 + 0x35 / 0x3a, FLATInstructions / VOP3PInstructions.td:1987).
-    // The 9 mantissa-pair pseudos (`f4_f4`, `f4_f6`, …, `f8_f8`) all share
+    // The 9 mantissa-pair pseudos (`f4_f4`, `f4_f6`, ..., `f8_f8`) all share
     // the same CanonicalOp because the per-format element distinction (BF8 vs
     // FP8 within f8, etc.) travels as the `matrix_a_fmt` /
     // `matrix_b_fmt` named-immediate operands rather than the opcode
@@ -1285,24 +1567,42 @@ static const Entry kCanonTable[] = {
     // currently observed in the kerneldex corpus; it can be added
     // alongside this entry when a kernel surfaces it.
     // ---------------------------------------------------------------------
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f6_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f6_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f8_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f8_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f4_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f4_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f6_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f6_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f8_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f8_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f4_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f4_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f6_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f6_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f8_w32_twoaddr,   V_WMMA_SCALE_F32_16x16x128_F8F6F4),
-    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f8_w32_threeaddr, V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f4_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f6_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f6_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f8_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f4_f8_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f4_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f4_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f6_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f6_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f8_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f6_f8_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f4_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f4_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f6_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f6_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f8_w32_twoaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
+    E(V_WMMA_SCALE_F32_16X16X128_F8F6F4_f8_f8_w32_threeaddr,
+      V_WMMA_SCALE_F32_16x16x128_F8F6F4),
     // ---------------------------------------------------------------------
     // VIMAGE TENSOR (gfx1250 RDNA4 -- VIMAGE 0xc4 / 0xc5).
     // The disassembler's MC opcodes are the `_gfx1250` reals
@@ -1318,8 +1618,8 @@ static const Entry kCanonTable[] = {
     // needs to discriminate (e.g., a future native-target intrinsic
     // lowering that zero-fills D# group 2/3 for the `_d2` form).
     // ---------------------------------------------------------------------
-    E(TENSOR_LOAD_TO_LDS_d2,    TENSOR_LOAD_TO_LDS),
-    E(TENSOR_LOAD_TO_LDS_d4,    TENSOR_LOAD_TO_LDS),
+    E(TENSOR_LOAD_TO_LDS_d2, TENSOR_LOAD_TO_LDS),
+    E(TENSOR_LOAD_TO_LDS_d4, TENSOR_LOAD_TO_LDS),
     E(TENSOR_STORE_FROM_LDS_d2, TENSOR_STORE_FROM_LDS),
     E(TENSOR_STORE_FROM_LDS_d4, TENSOR_STORE_FROM_LDS),
     // ---------------------------------------------------------------------
@@ -1327,7 +1627,7 @@ static const Entry kCanonTable[] = {
     // The disassembler's MC opcodes are the `_gfx1250` (or
     // `_SADDR_gfx1250`) reals declared by
     // `VFLAT_Real_AllAddr_gfx1250` (FLATInstructions.td:2003-2018)
-    // off the `FLAT_Global_Load_LDS_Pseudo<…, IsAsync=1>` family
+    // off the `FLAT_Global_Load_LDS_Pseudo<..., IsAsync=1>` family
     // (FLATInstructions.td:391-417). The canonicalization chain in
     // `OpcodeMap::canonicalize` collapses each real onto its pseudo
     // (`GLOBAL_LOAD_ASYNC_TO_LDS_B{8,32,64,128}` / `_SADDR`
@@ -1339,14 +1639,14 @@ static const Entry kCanonTable[] = {
     // exactly mirroring how `handleVIMAGE` discriminates
     // `tensor_load_to_lds_d2` vs `_d4`.
     // ---------------------------------------------------------------------
-    E(GLOBAL_LOAD_ASYNC_TO_LDS_B8,        GLOBAL_LOAD_ASYNC_TO_LDS_B8),
-    E(GLOBAL_LOAD_ASYNC_TO_LDS_B8_SADDR,  GLOBAL_LOAD_ASYNC_TO_LDS_B8),
-    E(GLOBAL_LOAD_ASYNC_TO_LDS_B32,       GLOBAL_LOAD_ASYNC_TO_LDS_B32),
+    E(GLOBAL_LOAD_ASYNC_TO_LDS_B8, GLOBAL_LOAD_ASYNC_TO_LDS_B8),
+    E(GLOBAL_LOAD_ASYNC_TO_LDS_B8_SADDR, GLOBAL_LOAD_ASYNC_TO_LDS_B8),
+    E(GLOBAL_LOAD_ASYNC_TO_LDS_B32, GLOBAL_LOAD_ASYNC_TO_LDS_B32),
     E(GLOBAL_LOAD_ASYNC_TO_LDS_B32_SADDR, GLOBAL_LOAD_ASYNC_TO_LDS_B32),
-    E(GLOBAL_LOAD_ASYNC_TO_LDS_B64,       GLOBAL_LOAD_ASYNC_TO_LDS_B64),
+    E(GLOBAL_LOAD_ASYNC_TO_LDS_B64, GLOBAL_LOAD_ASYNC_TO_LDS_B64),
     E(GLOBAL_LOAD_ASYNC_TO_LDS_B64_SADDR, GLOBAL_LOAD_ASYNC_TO_LDS_B64),
-    E(GLOBAL_LOAD_ASYNC_TO_LDS_B128,      GLOBAL_LOAD_ASYNC_TO_LDS_B128),
-    E(GLOBAL_LOAD_ASYNC_TO_LDS_B128_SADDR,GLOBAL_LOAD_ASYNC_TO_LDS_B128),
+    E(GLOBAL_LOAD_ASYNC_TO_LDS_B128, GLOBAL_LOAD_ASYNC_TO_LDS_B128),
+    E(GLOBAL_LOAD_ASYNC_TO_LDS_B128_SADDR, GLOBAL_LOAD_ASYNC_TO_LDS_B128),
 
     // ---------------------------------------------------------------------
     // FLAT VMEM prefetch (gfx1250 RDNA4 -- VFLAT 0x05D, hint-class).
@@ -1366,10 +1666,20 @@ static const Entry kCanonTable[] = {
     // `FLAT_PREFETCH_B8{,_SADDR}_gfx1250` (plain VGPR_64 / SADDR) lift
     // to `int_amdgcn_flat_prefetch`.
     // ---------------------------------------------------------------------
-    E(GLOBAL_PREFETCH_B8,       GLOBAL_PREFETCH_B8),
+    E(GLOBAL_PREFETCH_B8, GLOBAL_PREFETCH_B8),
     E(GLOBAL_PREFETCH_B8_SADDR, GLOBAL_PREFETCH_B8),
-    E(FLAT_PREFETCH_B8,         FLAT_PREFETCH_B8),
-    E(FLAT_PREFETCH_B8_SADDR,   FLAT_PREFETCH_B8),
+    E(FLAT_PREFETCH_B8, FLAT_PREFETCH_B8),
+    E(FLAT_PREFETCH_B8_SADDR, FLAT_PREFETCH_B8),
+
+    // FLAT WMMA load-with-transpose (gfx1250 wave32).
+    E(GLOBAL_LOAD_TR_B128_w32, GLOBAL_LOAD_TR16_B128),
+    E(GLOBAL_LOAD_TR_B128_w32_SADDR, GLOBAL_LOAD_TR16_B128),
+    E(GLOBAL_LOAD_TR_B64_w32, GLOBAL_LOAD_TR8_B64),
+    E(GLOBAL_LOAD_TR_B64_w32_SADDR, GLOBAL_LOAD_TR8_B64),
+    E(GLOBAL_LOAD_TR4_B64, GLOBAL_LOAD_TR4_B64),
+    E(GLOBAL_LOAD_TR4_B64_SADDR, GLOBAL_LOAD_TR4_B64),
+    E(GLOBAL_LOAD_TR6_B96, GLOBAL_LOAD_TR6_B96),
+    E(GLOBAL_LOAD_TR6_B96_SADDR, GLOBAL_LOAD_TR6_B96),
 };
 
 #undef SMEM3
@@ -1391,8 +1701,7 @@ constexpr unsigned KNumEncodingFamilies =
 // opcode across all subtarget generations. This is ~O(N * 15) work at init
 // time (N ~= 70k AMDGPU opcodes on recent LLVM), which is well under a
 // millisecond on modern hardware and done once per raiser.
-DenseMap<unsigned, unsigned>
-buildMcToPseudoMap(unsigned NumOpc) {
+DenseMap<unsigned, unsigned> buildMcToPseudoMap(unsigned NumOpc) {
   DenseMap<unsigned, unsigned> Result;
   for (unsigned P = 0; P < NumOpc; ++P) {
     for (unsigned Gen = 0; Gen < KNumEncodingFamilies; ++Gen) {
@@ -1463,8 +1772,7 @@ static constexpr uint64_t KSemanticShapeMask =
 // instruction's dispatch identity: same family, same atomic kind, same MAI
 // classification, same def arity. A violation means LLVM renamed or
 // repurposed a pseudo in a way our alias map cannot safely collapse.
-static bool sameSemanticShape(const MCInstrDesc &Src,
-                              const MCInstrDesc &Tgt) {
+static bool sameSemanticShape(const MCInstrDesc &Src, const MCInstrDesc &Tgt) {
   return (Src.TSFlags & KSemanticShapeMask) ==
              (Tgt.TSFlags & KSemanticShapeMask) &&
          Src.getNumDefs() == Tgt.getNumDefs();
@@ -1489,8 +1797,7 @@ static bool nosdstDropsScalarDef(const MCInstrDesc &Src,
 // LLVM does not expose a helper for this collapse, so we match on pseudo name
 // at init time. Name lookups are confined to this one-shot scan over
 // `MCII.getNumOpcodes()`; runtime lookups remain pure DenseMap hits.
-DenseMap<unsigned, unsigned>
-buildPseudoAliasMap(const MCInstrInfo &MCII) {
+DenseMap<unsigned, unsigned> buildPseudoAliasMap(const MCInstrInfo &MCII) {
   unsigned NumOpc = MCII.getNumOpcodes();
 
   llvm::StringMap<unsigned> ByName;
@@ -1614,8 +1921,7 @@ buildPseudoAliasMap(const MCInstrInfo &MCII) {
 
 // Build a reverse DPP map: DPP opcode -> base VOP opcode. LLVM only provides
 // forward mappings (base -> DPP32 / DPP64), so we invert by scanning.
-DenseMap<unsigned, unsigned>
-buildDppToBaseMap(unsigned NumOpc) {
+DenseMap<unsigned, unsigned> buildDppToBaseMap(unsigned NumOpc) {
   DenseMap<unsigned, unsigned> Result;
   for (unsigned P = 0; P < NumOpc; ++P) {
     int D32 = AMDGPU::getDPPOp32(P);
@@ -1634,8 +1940,7 @@ buildDppToBaseMap(unsigned NumOpc) {
 //   pseudo -> base VOP          (strip DPP / SDWA)
 //   e32 -> e64                  (collapse VOP encoding variants)
 //   SADDR -> VADDR              (FLAT/GLOBAL global-saddr table)
-unsigned canonicalize(unsigned Mc,
-                      const MCInstrInfo &MCII,
+unsigned canonicalize(unsigned Mc, const MCInstrInfo &MCII,
                       const DenseMap<unsigned, unsigned> &McToPseudo,
                       const DenseMap<unsigned, unsigned> &PseudoAlias,
                       const DenseMap<unsigned, unsigned> &DppToBase) {
@@ -1687,10 +1992,10 @@ unsigned canonicalize(unsigned Mc,
 
 // Parse a canonical vector-compare pseudo name into (predicate, bits, kind).
 // Accepted shape: `V_CMP_<PRED>_<TYPE><BITS>_e64` where
-//   PRED  ∈ {EQ, NE, GT, GE, LT, LE, LG, NEQ, NLT, NLE, NGT, NGE, NLG, U, O,
+//   PRED  in {EQ, NE, GT, GE, LT, LE, LG, NEQ, NLT, NLE, NGT, NGE, NLG, U, O,
 //            CLASS}
-//   TYPE  ∈ {U, I, F} (CLASS only ever appears with TYPE=F)
-//   BITS  ∈ {16, 32, 64}
+//   TYPE  in {U, I, F} (CLASS only ever appears with TYPE=F)
+//   BITS  in {16, 32, 64}
 // and an optional `V_CMPX_` prefix plays the role of `V_CMP_`. Returns
 // `std::nullopt` for anything else; caller is responsible for only passing
 // compare-family pseudos.
@@ -1702,8 +2007,8 @@ unsigned canonicalize(unsigned Mc,
 // hard-coded in LLVM's TableGen for these instructions.
 //
 // CLASS is special: `V_CMP_CLASS_F<bits>` is *not* a predicate compare. src1
-// is an i32 mask of FP classes (signaling NaN, quiet NaN, ±inf, ±normal,
-// ±subnormal, ±0), and the result lane bit is set iff src0's IEEE class
+// is an i32 mask of FP classes (signaling NaN, quiet NaN, +/-inf, +/-normal,
+// +/-subnormal, +/-0), and the result lane bit is set iff src0's IEEE class
 // matches any enabled bit in the mask. We collapse it onto the same
 // `V_CMP` / `V_CMPX` CanonicalOps and signal the special-case lift via
 // `VCmpMeta::isClass`; the dispatch in handle-valu-vcmp.cpp branches on
@@ -1748,37 +2053,53 @@ std::optional<VCmpMeta> parseVCmpPseudoName(llvm::StringRef Name) {
     M.IsFloat = true;
     // Float predicates: ordered variants set the O-prefix predicates;
     // N-prefixed AMDGPU names select the "unordered-or-..." complements.
-    if (predTok == "EQ")        M.Pred = CmpInst::FCMP_OEQ;
-    else if (predTok == "GT")   M.Pred = CmpInst::FCMP_OGT;
-    else if (predTok == "GE")   M.Pred = CmpInst::FCMP_OGE;
-    else if (predTok == "LT")   M.Pred = CmpInst::FCMP_OLT;
-    else if (predTok == "LE")   M.Pred = CmpInst::FCMP_OLE;
+    if (predTok == "EQ")
+      M.Pred = CmpInst::FCMP_OEQ;
+    else if (predTok == "GT")
+      M.Pred = CmpInst::FCMP_OGT;
+    else if (predTok == "GE")
+      M.Pred = CmpInst::FCMP_OGE;
+    else if (predTok == "LT")
+      M.Pred = CmpInst::FCMP_OLT;
+    else if (predTok == "LE")
+      M.Pred = CmpInst::FCMP_OLE;
     // LG ("less or greater"), NE, and NEQ all mean "ordered and !=" in
     // AMDGPU's model and all lower to FCMP_ONE.
     else if (predTok == "LG" || predTok == "NE" || predTok == "NEQ")
-                                M.Pred = CmpInst::FCMP_ONE;
-    else if (predTok == "NLT")  M.Pred = CmpInst::FCMP_UGE;
-    else if (predTok == "NLE")  M.Pred = CmpInst::FCMP_UGT;
-    else if (predTok == "NGT")  M.Pred = CmpInst::FCMP_ULE;
-    else if (predTok == "NGE")  M.Pred = CmpInst::FCMP_ULT;
+      M.Pred = CmpInst::FCMP_ONE;
+    else if (predTok == "NLT")
+      M.Pred = CmpInst::FCMP_UGE;
+    else if (predTok == "NLE")
+      M.Pred = CmpInst::FCMP_UGT;
+    else if (predTok == "NGT")
+      M.Pred = CmpInst::FCMP_ULE;
+    else if (predTok == "NGE")
+      M.Pred = CmpInst::FCMP_ULT;
     // NLG ("not (less or greater)") is the unordered-or-equal complement.
-    else if (predTok == "NLG")  M.Pred = CmpInst::FCMP_UEQ;
-    else if (predTok == "U")    M.Pred = CmpInst::FCMP_UNO;
-    else if (predTok == "O")    M.Pred = CmpInst::FCMP_ORD;
-    else return std::nullopt;
+    else if (predTok == "NLG")
+      M.Pred = CmpInst::FCMP_UEQ;
+    else if (predTok == "U")
+      M.Pred = CmpInst::FCMP_UNO;
+    else if (predTok == "O")
+      M.Pred = CmpInst::FCMP_ORD;
+    else
+      return std::nullopt;
   } else if (TypeCh == 'U' || TypeCh == 'I') {
     const bool IsSigned = TypeCh == 'I';
-    if (predTok == "EQ")        M.Pred = CmpInst::ICMP_EQ;
-    else if (predTok == "NE")   M.Pred = CmpInst::ICMP_NE;
-    else if (predTok == "GT")   M.Pred = IsSigned ? CmpInst::ICMP_SGT
-                                                   : CmpInst::ICMP_UGT;
-    else if (predTok == "GE")   M.Pred = IsSigned ? CmpInst::ICMP_SGE
-                                                   : CmpInst::ICMP_UGE;
-    else if (predTok == "LT")   M.Pred = IsSigned ? CmpInst::ICMP_SLT
-                                                   : CmpInst::ICMP_ULT;
-    else if (predTok == "LE")   M.Pred = IsSigned ? CmpInst::ICMP_SLE
-                                                   : CmpInst::ICMP_ULE;
-    else return std::nullopt;
+    if (predTok == "EQ")
+      M.Pred = CmpInst::ICMP_EQ;
+    else if (predTok == "NE")
+      M.Pred = CmpInst::ICMP_NE;
+    else if (predTok == "GT")
+      M.Pred = IsSigned ? CmpInst::ICMP_SGT : CmpInst::ICMP_UGT;
+    else if (predTok == "GE")
+      M.Pred = IsSigned ? CmpInst::ICMP_SGE : CmpInst::ICMP_UGE;
+    else if (predTok == "LT")
+      M.Pred = IsSigned ? CmpInst::ICMP_SLT : CmpInst::ICMP_ULT;
+    else if (predTok == "LE")
+      M.Pred = IsSigned ? CmpInst::ICMP_SLE : CmpInst::ICMP_ULE;
+    else
+      return std::nullopt;
   } else {
     return std::nullopt;
   }
@@ -1809,15 +2130,14 @@ void OpcodeMap::build(const MCInstrInfo &MCII) {
   // once as gfx12-rename `E(S_ADD_U64, S_ADD_NC_U64)`) with the
   // second row silently losing the routing race and leaving every
   // `s_add_u64` lift routed through the wrong CanonicalOp -- see commit
-  // eaee0a0e88 for the repair.  The loop below now aborts loudly on
+  // eaee0a0e88 for the repair.  The loop below now returns an error on
   // duplicate keys so a future add that re-introduces the collision
   // is caught at transpiler init time instead of quietly miscompiling
   // everything under the duplicated opcode.
   //
-  // `report_fatal_error` is used (rather than `assert`) so the check
-  // is active in release builds too -- the cost is a single
-  // `try_emplace` per table row at process start, which is
-  // negligible for a ~800-entry table.
+  // A returned error (rather than `assert`) keeps the check active in
+  // release builds too -- the cost is a single `try_emplace` per table
+  // row at process start, which is negligible for a ~800-entry table.
   //
   // "Same CanonicalOp twice" is also rejected.  In principle a redundant
   // row that maps the same MC opcode to the same CanonicalOp is just
@@ -1834,9 +2154,9 @@ void OpcodeMap::build(const MCInstrInfo &MCII) {
       std::string Msg;
       raw_string_ostream Os(Msg);
       Os << "opcode-map.cpp: kCanonTable maps MC opcode '"
-         << MCII.getName(E.Opc)
-         << "' (enum value " << E.Opc << ") to TWO CanonicalOps: "
-         << "first = CanonicalOp::" << canonicalOpName(existing->second)
+         << MCII.getName(E.Opc) << "' (enum value " << E.Opc
+         << ") to TWO CanonicalOps: " << "first = CanonicalOp::"
+         << canonicalOpName(existing->second)
          << ", second = CanonicalOp::" << canonicalOpName(E.Sem);
       if (existing->second == E.Sem) {
         Os << ".  (Both targets are the same -- the row is redundant; "
@@ -1855,9 +2175,9 @@ void OpcodeMap::build(const MCInstrInfo &MCII) {
   }
 
   const unsigned NumOpc = MCII.getNumOpcodes();
-  const auto McToPseudo  = buildMcToPseudoMap(NumOpc);
+  const auto McToPseudo = buildMcToPseudoMap(NumOpc);
   const auto PseudoAlias = buildPseudoAliasMap(MCII);
-  const auto DppToBase   = buildDppToBaseMap(NumOpc);
+  const auto DppToBase = buildDppToBaseMap(NumOpc);
 
   Map.clear();
   Vcmp.clear();
@@ -1879,7 +2199,7 @@ void OpcodeMap::build(const MCInstrInfo &MCII) {
     if (Canon >= NumOpc)
       continue;
     llvm::StringRef CanonName = MCII.getName(Canon);
-    const bool IsCmp  = CanonName.starts_with("V_CMP_");
+    const bool IsCmp = CanonName.starts_with("V_CMP_");
     const bool IsCmpX = CanonName.starts_with("V_CMPX_");
     if (!IsCmp && !IsCmpX)
       continue;
@@ -1888,8 +2208,8 @@ void OpcodeMap::build(const MCInstrInfo &MCII) {
       Vcmp.try_emplace(Mc, *Meta);
     }
     // Names that start with V_CMP_ but don't parse (e.g. a hypothetical
-    // future family) are left as CanonicalOp::Unknown so the raiser reports them
-    // loudly rather than silently producing wrong IR.
+    // future family) are left as CanonicalOp::Unknown so the raiser reports
+    // them loudly rather than silently producing wrong IR.
   }
 }
 

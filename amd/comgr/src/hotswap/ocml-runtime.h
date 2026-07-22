@@ -10,8 +10,7 @@
 #define HOTSWAP_TRANSPILER_OCML_RUNTIME_H
 
 #include "llvm/ADT/StringRef.h"
-
-#include <string>
+#include "llvm/Support/Error.h"
 
 namespace llvm {
 class FunctionCallee;
@@ -36,9 +35,9 @@ bool moduleUsesOCMLRuntime(const llvm::Module &M);
 
 // Link the embedded OCML/device-library bitcode needed by the module, inline
 // the helper call chain, and DCE linked library bodies that are no longer
-// reachable. Returns false after printing a precise diagnostic on failure.
-bool linkOCMLRuntime(llvm::Module &M, llvm::StringRef TargetProcessor,
-                     unsigned TargetWaveSize, std::string &FailureDetail);
+// reachable. Returns an Error carrying a precise diagnostic on failure.
+llvm::Error linkOCMLRuntime(llvm::Module &M, llvm::StringRef TargetProcessor,
+                            unsigned TargetWaveSize);
 
 } // namespace COMGR::hotswap
 

@@ -551,6 +551,27 @@ install(FILES
   COMPONENT amd-comgr
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/${AMD_COMGR_PACKAGE_PREFIX}")
 
+# Re-assert full-static linkage right before the LLVM/Clang lib lists are
+# resolved. COMGR_STATIC_LLVM sets these OFF near the top (line ~182), but in a
+# super-project build comgr's own find_package(Clang/LLD) is guarded to the
+# top-level case (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR) and the
+# packages instead arrive via the dependency provider, whose ClangConfig.cmake /
+# LLVMConfig.cmake do a plain `set(CLANG_LINK_CLANG_DYLIB ON)` /
+# `set(LLVM_LINK_LLVM_DYLIB ON)`. Those plain sets create normal variables that
+# SHADOW the earlier OFF, so comgr would link the shared libclang-cpp.so (which
+# NEEDs libLLVM.so) and the shared libLLVM.so. When the cross-gen hotswap
+# transpiler ALSO links the static AMDGPU archives, the AMDGPU backend then
+# exists twice in one process (static + the dylib), and its cl::opt globals
+# (e.g. amdhsa-code-object-version) register twice -> abort on load. Forcing the
+# flags OFF here (last write before use) makes comgr fully static: LLVM/Clang/LLD
+# all come from static archives, no libLLVM.so / libclang-cpp.so NEEDED, AMDGPU
+# present exactly once. comgr's version script (local: *;) keeps the symbols
+# hidden. This matches comgr's documented design (see compiler/CMakeLists.txt).
+if(COMGR_STATIC_LLVM)
+  set(LLVM_LINK_LLVM_DYLIB OFF)
+  set(CLANG_LINK_CLANG_DYLIB OFF)
+endif()
+
 if(NOT CLANG_LINK_CLANG_DYLIB)
   set(CLANG_LIBS
     clangBasic

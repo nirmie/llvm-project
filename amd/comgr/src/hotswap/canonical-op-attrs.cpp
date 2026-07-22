@@ -9,6 +9,7 @@
 #include "canonical-op-attrs.h"
 
 #include "opcode-map.h"
+#include "raise-failure.h"
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h" // AMDGPU::EXEC, EXEC_LO, EXEC_HI
 #include "Utils/AMDGPUBaseInfo.h"            // AMDGPU::mc2PseudoReg
@@ -58,7 +59,8 @@ public:
   }
 
 private:
-  CanonicalOpAttrs Entries[static_cast<std::size_t>(CanonicalOp::CanonicalOp_COUNT)] = {};
+  CanonicalOpAttrs
+      Entries[static_cast<std::size_t>(CanonicalOp::CanonicalOp_COUNT)] = {};
 };
 
 const AttrTable &theTable() {
@@ -69,8 +71,7 @@ const AttrTable &theTable() {
 static bool descImplicitlyDefinesEXEC(const MCInstrDesc &Desc) {
   for (MCPhysReg R : Desc.implicit_defs()) {
     MCRegister Reg = AMDGPU::mc2PseudoReg(R);
-    if (Reg == AMDGPU::EXEC || Reg == AMDGPU::EXEC_LO ||
-        Reg == AMDGPU::EXEC_HI)
+    if (Reg == AMDGPU::EXEC || Reg == AMDGPU::EXEC_LO || Reg == AMDGPU::EXEC_HI)
       return true;
   }
   return false;
@@ -78,27 +79,35 @@ static bool descImplicitlyDefinesEXEC(const MCInstrDesc &Desc) {
 
 } // namespace
 
-const CanonicalOpAttrs &getCanonicalOpAttrs(CanonicalOp Op) { return theTable()[Op]; }
+const CanonicalOpAttrs &getCanonicalOpAttrs(CanonicalOp Op) {
+  return theTable()[Op];
+}
 
-void verifyExecAttrCoverage(const MCInstrInfo &MCII, const OpcodeMap &OpcMap) {
+llvm::Error verifyExecAttrCoverage(const MCInstrInfo &MCII,
+                                   const OpcodeMap &OpcMap) {
   for (unsigned Mc = 0, End = MCII.getNumOpcodes(); Mc < End; ++Mc) {
     const MCInstrDesc &Desc = MCII.get(Mc);
     if (!descImplicitlyDefinesEXEC(Desc))
       continue;
+
     CanonicalOp Sop = OpcMap.lookup(Mc);
     if (Sop == CanonicalOp::Unknown)
       continue; // covered by the generic unsupported-opcode path
+
     if (getCanonicalOpAttrs(Sop).RoutesExecThroughStoreExec)
       continue;
-    report_fatal_error(Twine("transpiler: MC opcode ") + MCII.getName(Mc) +
-                       " (#" + Twine(Mc) +
-                       ") declares EXEC as an implicit def but its CanonicalOp "
-                       "(" + canonicalOpName(Sop) +
-                       ") is not marked routesExecThroughStoreExec. Audit "
-                       "the handler's EXEC write path against SPE before "
-                       "declaring the CanonicalOp in that handler's "
-                       "get*Attrs() registration.");
+
+    return RaiseFailure::internalFailure(
+        "MC opcode " + MCII.getName(Mc) + " (#" + Twine(Mc) +
+        ") declares EXEC as an implicit def but its CanonicalOp "
+        "(" +
+        canonicalOpName(Sop) +
+        ") is not marked routesExecThroughStoreExec. Audit "
+        "the handler's EXEC write path against SPE before "
+        "declaring the CanonicalOp in that handler's "
+        "get*Attrs() registration.");
   }
+  return llvm::Error::success();
 }
 
 } // namespace COMGR::hotswap

@@ -9,7 +9,7 @@
 #include "raise-context.h"
 
 #include "MCTargetDesc/AMDGPUMCTargetDesc.h" // AMDGPU::VCC, AMDGPU::EXEC, ...
-#include "SIDefines.h"                        // AMDGPU::HWEncoding::*
+#include "SIDefines.h"                       // AMDGPU::HWEncoding::*
 #include "Utils/AMDGPUBaseInfo.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
@@ -29,6 +29,34 @@
 using namespace llvm;
 
 namespace COMGR::hotswap {
+
+RaiseContext::RaiseContext(
+    LLVMContext &C, Module &M, IRBuilder<> &B, AllocaRegFile &Regs,
+    const WaveProjection &Projection, const MCState &Mc, const ISAProfile &Isa,
+    ISAProfile TargetIsa, unsigned TargetCodeObjectVersion,
+    KernargLayout &Kernargs, const UserSgprLayout *Layout, Function *Kernel,
+    BasicBlock *ThreadLoopLatch, DenseMap<uint64_t, BasicBlock *> &OffsetToBb,
+    ArrayRef<uint8_t> SourceTextBytes, uint64_t SourceTextBaseAddress,
+    ArrayRef<TextSection::ImageSection> SourceImageSections,
+    uint64_t KernelStartOffset, uint64_t KernelEndOffset)
+    : C(C), M(M), B(B), Regs(Regs), Projection(Projection), Mc(Mc), Isa(Isa),
+      TargetIsa(TargetIsa), TargetCodeObjectVersion(TargetCodeObjectVersion),
+      Kernargs(Kernargs), Layout(Layout), Kernel(Kernel),
+      ThreadLoopLatch(ThreadLoopLatch), OffsetToBb(OffsetToBb),
+      SourceTextBytes(SourceTextBytes),
+      SourceTextBaseAddress(SourceTextBaseAddress),
+      SourceImageSections(SourceImageSections),
+      KernelStartOffset(KernelStartOffset), KernelEndOffset(KernelEndOffset) {
+  I1Ty = Type::getInt1Ty(C);
+  I8Ty = Type::getInt8Ty(C);
+  I16Ty = Type::getInt16Ty(C);
+  I32Ty = Type::getInt32Ty(C);
+  I64Ty = Type::getInt64Ty(C);
+  F32Ty = Type::getFloatTy(C);
+  F16Ty = Type::getHalfTy(C);
+  F64Ty = Type::getDoubleTy(C);
+  PtrGlobalTy = PointerType::get(C, 1);
+}
 
 BasicBlock *RaiseContext::lookupBB(uint64_t Addr) {
   auto It = OffsetToBb.find(Addr);
@@ -73,10 +101,10 @@ static bool hasVectorRegOperand(const DecodedInst &Di,
   return false;
 }
 
-void RaiseContext::computeVGPRAdjust(const DecodedInst &Di) {
+Error RaiseContext::computeVGPRAdjust(const DecodedInst &Di) {
   std::fill_n(CurrentVgprAdjust, KMaxOps, 0u);
   if (VgprMsBs == 0)
-    return;
+    return Error::success();
 
   // The low byte of the S_SET_VGPR_MSB immediate holds four 2-bit MSB fields,
   // one per slot, that form bits [9:8] of the VGPR address (i.e. extend the
@@ -96,15 +124,15 @@ void RaiseContext::computeVGPRAdjust(const DecodedInst &Di) {
   // directly via applyVopdVGPRMsb.
   unsigned Opc = Di.Inst.getOpcode();
   const MCInstrDesc &Desc = Mc.InstrInfo->get(Opc);
-  const AMDGPU::OpName *Ops =
-      AMDGPU::getVGPRLoweringOperandTables(Desc).first;
+  const AMDGPU::OpName *Ops = AMDGPU::getVGPRLoweringOperandTables(Desc).first;
   if (!Ops) {
     if (ignoresVGPRMsb(Opc) || !hasVectorRegOperand(Di, *Mc.RegInfo) ||
         Desc.isPseudo() || Desc.isMetaInstruction())
-      return;
-    report_fatal_error(Twine("transpiler: S_SET_VGPR_MSB has no "
-                             "operand-role table for vector instruction ") +
-                       Di.Mnemonic);
+      return Error::success();
+    return createStringError(
+        Twine("transpiler: S_SET_VGPR_MSB has no "
+              "operand-role table for vector instruction ") +
+        Di.Mnemonic);
   }
 
   for (unsigned Slot = 0; Slot != 4; ++Slot) {
@@ -125,12 +153,13 @@ void RaiseContext::computeVGPRAdjust(const DecodedInst &Di) {
     if (OpIdx < 0)
       continue;
     if (static_cast<unsigned>(OpIdx) >= KMaxOps)
-      report_fatal_error(Twine("transpiler: S_SET_VGPR_MSB operand index ") +
-                         Twine(OpIdx) +
-                         " exceeds CurrentVgprAdjust capacity " +
-                         Twine(KMaxOps) + " for " + Di.Mnemonic);
+      return createStringError("transpiler: S_SET_VGPR_MSB operand index " +
+                               Twine(OpIdx) +
+                               " exceeds CurrentVgprAdjust capacity " +
+                               Twine(KMaxOps) + " for " + Di.Mnemonic);
     CurrentVgprAdjust[OpIdx] = Adjust;
   }
+  return Error::success();
 }
 
 // Count how many 32-bit sub-registers make up `reg`. A 32-bit register has
@@ -340,8 +369,7 @@ ParsedReg RaiseContext::parseReg(MCRegister Reg, int MciOpIdx) const {
   // on gfx8), so we cannot use the raw encoding as the logical 0..15
   // index. Locate the lane inside TTMP_32RegClass instead; the class is
   // defined as `(add (sequence "TTMP%u", 0, 15))` so position == index.
-  const MCRegisterClass &TTMP32 =
-      MRI.getRegClass(AMDGPU::TTMP_32RegClassID);
+  const MCRegisterClass &TTMP32 = MRI.getRegClass(AMDGPU::TTMP_32RegClassID);
   if (int Idx = findIndexInClass(TTMP32, Lane); Idx >= 0) {
     Pr.RegKind = ParsedReg::TTMP;
     Pr.BaseIdx = Idx;
@@ -360,8 +388,8 @@ ParsedReg RaiseContext::parseReg(MCRegister Reg, int MciOpIdx) const {
   }
 
   report_fatal_error(Twine("transpiler: parseReg could not classify '") +
-                     MRI.getName(Reg) + "' (enc=0x" +
-                     Twine::utohexstr(Enc) + ")");
+                     MRI.getName(Reg) + "' (enc=0x" + Twine::utohexstr(Enc) +
+                     ")");
 }
 
 Value *RaiseContext::readOp32(const DecodedInst &Di, unsigned OpIdx) {
@@ -371,12 +399,11 @@ Value *RaiseContext::readOp32(const DecodedInst &Di, unsigned OpIdx) {
       if (Projection.sourceWaveScopedLaneOps()) {
         Value *Mask = Regs.readVCCAsWaveMask(B, Regs.ExecTy);
         Value *Lo = B.CreateTrunc(Mask, I32Ty, "vcc_src_wave_lo");
-        Value *Hi = B.CreateTrunc(B.CreateLShr(Mask, Isa.WaveSize),
-                                  I32Ty, "vcc_src_wave_hi");
+        Value *Hi = B.CreateTrunc(B.CreateLShr(Mask, Isa.WaveSize), I32Ty,
+                                  "vcc_src_wave_hi");
         Value *Lane = Projection.emitLaneIdx(B);
-        Value *Upper =
-            B.CreateICmpUGE(Lane, ConstantInt::get(I32Ty, Isa.WaveSize),
-                            "vcc_src_wave_upper");
+        Value *Upper = B.CreateICmpUGE(
+            Lane, ConstantInt::get(I32Ty, Isa.WaveSize), "vcc_src_wave_upper");
         return B.CreateSelect(Upper, Hi, Lo, "vcc_src_wave_mask");
       }
       // Reading VCC as an i32 (wave32 wave-mask, or low 32 bits on
@@ -424,9 +451,8 @@ Value *RaiseContext::readOp32(const DecodedInst &Di, unsigned OpIdx) {
     if (Pr.RegKind == ParsedReg::OTHER) {
       recordReadFailure(RaiseFailure::unsupportedInstructionForm(
           Di, "operand-read",
-          (Twine("readOp32 saw unmodeled register '") +
-           Mc.RegInfo->getName(Di.getReg(OpIdx)) + "' in " + Di.Mnemonic)
-              .str()));
+          Twine("readOp32 saw unmodeled register '") +
+              Mc.RegInfo->getName(Di.getReg(OpIdx)) + "' in " + Di.Mnemonic));
       return UndefValue::get(I32Ty);
     }
     Value *V = Regs.readReg32(B, Pr);
@@ -444,6 +470,36 @@ Value *RaiseContext::readOp32(const DecodedInst &Di, unsigned OpIdx) {
   errs() << "transpiler: readOp32 unresolvable operand " << OpIdx << " in "
          << Di.Mnemonic << "\n";
   return UndefValue::get(I32Ty);
+}
+
+Value *RaiseContext::readOpSourceWaveMask32(const DecodedInst &Di,
+                                            unsigned OpIdx) {
+  if (!Di.isReg(OpIdx))
+    return readOp32(Di, OpIdx);
+
+  ParsedReg Pr = parseReg(Di.getReg(OpIdx), OpIdx);
+  if (Pr.RegKind == ParsedReg::EXEC)
+    return Projection.emitCurrentSourceWaveMask(B, Regs.loadExec(B),
+                                                "exec_srcwave_mask");
+  if (Pr.RegKind == ParsedReg::VCC)
+    return Projection.emitCurrentSourceWaveMask(
+        B, Regs.readVCCAsWaveMask(B, Regs.ExecTy), "vcc_srcwave_mask");
+  if (Pr.RegKind == ParsedReg::SGPR && Pr.BaseIdx >= 0) {
+    Value *Fallback = readOp32(Di, OpIdx);
+    if (Value *ShadowValid = loadSgprWaveMaskValid(Pr.BaseIdx)) {
+      Value *ShadowExec = loadSgprWaveMaskExec(Pr.BaseIdx);
+      if (ShadowExec->getType() != Regs.ExecTy)
+        ShadowExec =
+            B.CreateZExtOrTrunc(ShadowExec, Regs.ExecTy, "sgpr_mask_exec_cast");
+      Value *ShadowMask = Projection.emitCurrentSourceWaveMask(
+          B, ShadowExec, "sgpr_srcwave_mask_shadow");
+      return B.CreateSelect(ShadowValid, ShadowMask, Fallback,
+                            "sgpr_srcwave_mask");
+    }
+    return Fallback;
+  }
+
+  return readOp32(Di, OpIdx);
 }
 
 Value *RaiseContext::readOp64(const DecodedInst &Di, unsigned OpIdx) {
@@ -482,9 +538,8 @@ Value *RaiseContext::readOp64(const DecodedInst &Di, unsigned OpIdx) {
     if (Pr.RegKind == ParsedReg::OTHER) {
       recordReadFailure(RaiseFailure::unsupportedInstructionForm(
           Di, "operand-read",
-          (Twine("readOp64 saw unmodeled register '") +
-           Mc.RegInfo->getName(Di.getReg(OpIdx)) + "' in " + Di.Mnemonic)
-              .str()));
+          Twine("readOp64 saw unmodeled register '") +
+              Mc.RegInfo->getName(Di.getReg(OpIdx)) + "' in " + Di.Mnemonic));
       return UndefValue::get(I64Ty);
     }
     Value *V = Regs.readReg64(B, Pr);
@@ -505,10 +560,10 @@ Value *RaiseContext::readOp64(const DecodedInst &Di, unsigned OpIdx) {
 }
 
 Value *RaiseContext::emitUpdateDpp(Value *OldVal, Value *Src, uint16_t Ctrl,
-                                    uint8_t RowMask, uint8_t BankMask,
-                                    bool BoundCtrl) {
+                                   uint8_t RowMask, uint8_t BankMask,
+                                   bool BoundCtrl) {
   // P5 lowering -- see the DPP row of hotswap/docs/wave-size-
-  // translation.md §5.3: lift the DPP src-pathway modifier through
+  // translation.md sec. 5.3: lift the DPP src-pathway modifier through
   // `llvm.amdgcn.update.dpp`. The intrinsic is type-overloaded
   // (`llvm_any_ty`). We route through integer overloads sized to match
   // the input's bit-width and bitcast through when the input is a
@@ -551,9 +606,9 @@ Value *RaiseContext::emitUpdateDpp(Value *OldVal, Value *Src, uint16_t Ctrl,
   Function *Fn = Intrinsic::getOrInsertDeclaration(
       &M, Intrinsic::amdgcn_update_dpp, {IntTy});
   Value *Result =
-      B.CreateCall(Fn, {OldInt, SrcInt, B.getInt32(Ctrl),
-                         B.getInt32(RowMask), B.getInt32(BankMask),
-                         B.getInt1(BoundCtrl)},
+      B.CreateCall(Fn,
+                   {OldInt, SrcInt, B.getInt32(Ctrl), B.getInt32(RowMask),
+                    B.getInt32(BankMask), B.getInt1(BoundCtrl)},
                    "dpp");
   if (Result->getType() != OrigTy)
     Result = B.CreateBitCast(Result, OrigTy);
@@ -565,6 +620,15 @@ Value *RaiseContext::emitLaneIdx() {
   return Projection.emitLaneIdx(B);
 }
 
+Value *RaiseContext::freezeMemAddr(Value *Addr) {
+  // See the header for the correctness argument. Only cross-widening
+  // wave32 -> wave64 lifts can leak an undef address into a memory op via
+  // the reg-file first-def phi; other directions keep byte-identical IR.
+  if (!Isa.isWave32() || TargetIsa.isWave32())
+    return Addr;
+  return B.CreateFreeze(Addr, "mem_addr_frozen");
+}
+
 Value *RaiseContext::emitLaneActiveBit() {
   // Memoisation (see RaiseContext::resetLaneActiveCache docs).
   //
@@ -573,11 +637,11 @@ Value *RaiseContext::emitLaneActiveBit() {
   //
   //   Each emitUnderExec diamond is structurally linear:
   //
-  //     preBB ──┬─▶ doBB ──▶ skipBB
-  //             └────────────▶ skipBB   (the conditional skip edge)
+  //     preBB --+-> doBB --> skipBB
+  //             +------------> skipBB   (the conditional skip edge)
   //
   //   Chaining N emitUnderExecs yields
-  //     preBB -> (doBB1 -> skipBB1) -> (doBB2 -> skipBB2) -> … -> skipBBN
+  //     preBB -> (doBB1 -> skipBB1) -> (doBB2 -> skipBB2) -> ... -> skipBBN
   //
   //   where every successor BB has preBB on its dominator path. So an
   //   i1 defined in preBB dominates every subsequent doBB/skipBB emitted
@@ -690,7 +754,6 @@ void RaiseContext::emitUnderExec(llvm::function_ref<void()> Body) {
   B.SetInsertPoint(SkipBb);
 }
 
-
 Value *RaiseContext::readOpExecWidth(const DecodedInst &Di, unsigned OpIdx) {
   // All callers expect the returned value at `regs.execTy` (the EXEC
   // alloca storage width). Under modulo-replication `execTy` matches
@@ -702,7 +765,7 @@ Value *RaiseContext::readOpExecWidth(const DecodedInst &Di, unsigned OpIdx) {
   // write side: `(v << W_src) | v` lifts a wave32 scalar wave mask
   // to a wave64 scalar wave mask where target lane K and K+W_src
   // agree. This keeps the save/restore round trip `s_mov_b32 sN,
-  // exec_lo; …; s_mov_b32 exec_lo, sN` behaving as the wave32
+  // exec_lo; ...; s_mov_b32 exec_lo, sN` behaving as the wave32
   // author expected, and matches the replication done inside
   // `WaveNativeProjection::extractLaneBitFromWaveMask` on the VCC
   // consumer side.
@@ -766,7 +829,7 @@ Value *RaiseContext::readOpExecWidth(const DecodedInst &Di, unsigned OpIdx) {
   // (lane-31 bit), etc. An earlier `ConstantInt::getSigned(srcTy,
   // di.getImm(opIdx))` misinterpreted the container as a SIGNED
   // value and, on a wave32 source whose immediate reads as
-  // `uint32_t ≥ 0x80000000`, tripped APInt's signed-range assertion
+  // `uint32_t >= 0x80000000`, tripped APInt's signed-range assertion
   // (`isIntN(BitWidth, val) && "Value is not an N-bit signed
   // value"`) -- because `(int64_t)0xFFFF0000 == +4294901760` is
   // outside `[-2^31, 2^31 - 1]`.
@@ -791,8 +854,7 @@ Value *RaiseContext::readOpExecWidth(const DecodedInst &Di, unsigned OpIdx) {
   // (GPT-OSS `_bitmatrix_metadata_compute_stage2`'s `s_and_b32
   // sN, sM, 0xFFFF0000` sites) no longer traps here.
   Type *SrcTy = Isa.isWave32() ? I32Ty : I64Ty;
-  uint64_t SrcMask =
-      Isa.isWave32() ? 0xFFFFFFFFull : 0xFFFFFFFFFFFFFFFFull;
+  uint64_t SrcMask = Isa.isWave32() ? 0xFFFFFFFFull : 0xFFFFFFFFFFFFFFFFull;
   if (std::optional<int64_t> Val = evalOperandAsConst(Di.Inst, OpIdx)) {
     uint64_t Bits = static_cast<uint64_t>(*Val) & SrcMask;
     Value *Narrow = ConstantInt::get(SrcTy, Bits, /*IsSigned=*/false);

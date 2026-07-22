@@ -14,6 +14,7 @@
 #include "raise-context.h"
 
 #include "llvm/IR/Value.h"
+#include "llvm/Support/Error.h"
 
 namespace COMGR::hotswap {
 
@@ -24,12 +25,12 @@ namespace COMGR::hotswap {
 // LLVM's addrspace(8) buffer-resource pointer via
 // `llvm.amdgcn.make.buffer.rsrc`; cross-widening MUBUF loads use that
 // form so LLVM preserves raw-pointer buffer semantics instead of
-// consuming Hotswap-synthesised descriptor dwords. `voffset` is the per-lane i32 byte offset
-// (vaddr + imm). `soffset` is the SGPR byte offset (defaults to 0).
-// `auxFlags` is always a zero i32 -- the raw buffer intrinsics take it
-// but today's raiser doesn't surface cpol/th/scope (see the
-// "auxFlags is hard-coded to 0" item in
-// hotswap/docs/buffer-store-lowering.md §"Known limitations").
+// consuming Hotswap-synthesised descriptor dwords. `voffset` is the per-lane
+// i32 byte offset (vaddr + imm). `soffset` is the SGPR byte offset (defaults to
+// 0). `auxFlags` is always a zero i32 -- the raw buffer intrinsics take it but
+// today's raiser doesn't surface cpol/th/scope (see the "auxFlags is hard-coded
+// to 0" item in hotswap/docs/buffer-store-lowering.md sec. "Known
+// limitations").
 //
 // For stores and atomics, `stData` is the VGPR source carrying the data.
 // For loads it's a default-constructed ParsedReg (kind == OTHER).
@@ -64,12 +65,13 @@ struct MubufAddr {
 // order inside an encoding can vary between LLVM versions so the
 // classifier keys on `ParsedReg::Kind` rather than position.
 //
-// Fails loudly via `report_fatal_error` on unrecognised shapes (no
-// SRSRC found, or cannot read SRSRC dwords). `diagLabel` names the
-// caller for the error message (e.g. `"MUBUF"` or `"MUBUF_LDS"`).
-MubufAddr decodeMubufAddr(RaiseContext &Ctx, const DecodedInst &Di,
-                          OpResolver &Op, bool IsStore,
-                          llvm::StringRef DiagLabel);
+// Returns an error on unrecognised shapes (no SRSRC found, or cannot read
+// SRSRC dwords). `diagLabel` names the caller for the error message (e.g.
+// `"MUBUF"` or `"MUBUF_LDS"`).
+llvm::Expected<MubufAddr> decodeMubufAddr(RaiseContext &Ctx,
+                                          const DecodedInst &Di, OpResolver &Op,
+                                          bool IsStore,
+                                          llvm::StringRef DiagLabel);
 
 } // namespace COMGR::hotswap
 

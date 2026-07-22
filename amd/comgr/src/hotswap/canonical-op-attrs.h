@@ -12,6 +12,7 @@
 #include "canonical-op.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/Error.h"
 
 namespace llvm {
 class MCInstrInfo;
@@ -25,7 +26,7 @@ class OpcodeMap;
 // translation gates. Grows incrementally as new per-writer predicates
 // are needed (today only `routesExecThroughStoreExec`; the wave-size-
 // obliviousness predicate from hotswap/docs/wave-size-translation.md
-// §7's decision procedure will attach here too).
+// sec. 7's decision procedure will attach here too).
 //
 // Default-constructed attrs mean "no declared guarantees" -- the gate
 // aborts for any EXEC-writer encountered that does not have its
@@ -63,8 +64,8 @@ llvm::ArrayRef<CanonicalOpAttrSpec> getHandlerSOP1Attrs();
 llvm::ArrayRef<CanonicalOpAttrSpec> getHandlerSOP2Attrs();
 llvm::ArrayRef<CanonicalOpAttrSpec> getHandlerValuVcmpAttrs();
 
-// O(1) lookup keyed on CanonicalOp. Returns a default-constructed CanonicalOpAttrs
-// for SemOps that have no declared attrs (fail-closed).
+// O(1) lookup keyed on CanonicalOp. Returns a default-constructed
+// CanonicalOpAttrs for SemOps that have no declared attrs (fail-closed).
 const CanonicalOpAttrs &getCanonicalOpAttrs(CanonicalOp Op);
 
 // Startup invariant: for every MC opcode whose MCInstrDesc declares
@@ -77,9 +78,9 @@ const CanonicalOpAttrs &getCanonicalOpAttrs(CanonicalOp Op);
 // runtime operand values.
 //
 // Called once at raiser init from the same slot that runs
-// `verifyMFMACoverage`. Fails loudly via `report_fatal_error`.
-void verifyExecAttrCoverage(const llvm::MCInstrInfo &MCII,
-                             const OpcodeMap &OpcMap);
+// `verifyMFMACoverage`.
+llvm::Error verifyExecAttrCoverage(const llvm::MCInstrInfo &MCII,
+                                   const OpcodeMap &OpcMap);
 
 } // namespace COMGR::hotswap
 

@@ -31,12 +31,14 @@
 #include "hotswap/translation-cache.h"
 
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <chrono>
-#include <cstdlib>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <string>
@@ -48,6 +50,9 @@ using namespace COMGR;
 namespace {
 
 using TimingClock = std::chrono::steady_clock;
+
+constexpr unsigned DefaultHotswapComgrOptLevel = 2;
+constexpr unsigned MaxHotswapComgrOptLevel = 3;
 
 double secondsBetween(TimingClock::time_point start, TimingClock::time_point end) {
   return std::chrono::duration<double>(end - start).count();
@@ -76,7 +81,6 @@ struct HotswapComgrTimings {
   double cacheLookupKeyElfHeaderSeconds = 0.0;
   double cacheLookupKeyRulesHashSeconds = 0.0;
   double cacheLookupKeyLoadedImageIdentitySeconds = 0.0;
-  double cacheLookupKeyLlvmToolIdentitySeconds = 0.0;
   double cacheLookupKeyKernelNamesSeconds = 0.0;
   double cacheLookupKeyMaterialBuildSeconds = 0.0;
   double cacheLookupKeyHashSeconds = 0.0;
@@ -92,9 +96,8 @@ struct HotswapComgrTimings {
   double pipelineCreateTempDirSeconds = 0.0;
   double pipelineRaiseSeconds = 0.0;
   double pipelineWriteIrSeconds = 0.0;
+  double pipelineOptSeconds = 0.0;
   double pipelineLlcSeconds = 0.0;
-  double pipelineReadAsmSeconds = 0.0;
-  double pipelineLlvmMcSeconds = 0.0;
   double pipelineLinkSeconds = 0.0;
   double pipelineReadHsacoSeconds = 0.0;
   double pipelineCollectMetadataSeconds = 0.0;
@@ -104,7 +107,6 @@ struct HotswapComgrTimings {
   double cacheWriteKeyElfHeaderSeconds = 0.0;
   double cacheWriteKeyRulesHashSeconds = 0.0;
   double cacheWriteKeyLoadedImageIdentitySeconds = 0.0;
-  double cacheWriteKeyLlvmToolIdentitySeconds = 0.0;
   double cacheWriteKeyKernelNamesSeconds = 0.0;
   double cacheWriteKeyMaterialBuildSeconds = 0.0;
   double cacheWriteKeyHashSeconds = 0.0;
@@ -131,8 +133,6 @@ std::string timingJson(const HotswapComgrTimings &Timings) {
        Timings.cacheLookupKeyRulesHashSeconds},
       {"cache_lookup_key_loaded_image_identity_seconds",
        Timings.cacheLookupKeyLoadedImageIdentitySeconds},
-      {"cache_lookup_key_llvm_tool_identity_seconds",
-       Timings.cacheLookupKeyLlvmToolIdentitySeconds},
       {"cache_lookup_key_kernel_names_seconds",
        Timings.cacheLookupKeyKernelNamesSeconds},
       {"cache_lookup_key_material_build_seconds",
@@ -153,9 +153,8 @@ std::string timingJson(const HotswapComgrTimings &Timings) {
       {"pipeline_create_temp_dir_seconds", Timings.pipelineCreateTempDirSeconds},
       {"pipeline_raise_seconds", Timings.pipelineRaiseSeconds},
       {"pipeline_write_ir_seconds", Timings.pipelineWriteIrSeconds},
+      {"pipeline_opt_seconds", Timings.pipelineOptSeconds},
       {"pipeline_llc_seconds", Timings.pipelineLlcSeconds},
-      {"pipeline_read_asm_seconds", Timings.pipelineReadAsmSeconds},
-      {"pipeline_llvm_mc_seconds", Timings.pipelineLlvmMcSeconds},
       {"pipeline_link_seconds", Timings.pipelineLinkSeconds},
       {"pipeline_read_hsaco_seconds", Timings.pipelineReadHsacoSeconds},
       {"pipeline_collect_metadata_seconds",
@@ -170,8 +169,6 @@ std::string timingJson(const HotswapComgrTimings &Timings) {
        Timings.cacheWriteKeyRulesHashSeconds},
       {"cache_write_key_loaded_image_identity_seconds",
        Timings.cacheWriteKeyLoadedImageIdentitySeconds},
-      {"cache_write_key_llvm_tool_identity_seconds",
-       Timings.cacheWriteKeyLlvmToolIdentitySeconds},
       {"cache_write_key_kernel_names_seconds",
        Timings.cacheWriteKeyKernelNamesSeconds},
       {"cache_write_key_material_build_seconds",
@@ -202,8 +199,6 @@ void addLookupTimings(HotswapComgrTimings &Timings,
   Timings.cacheLookupKeyRulesHashSeconds += lookup.keyBuild.rulesHashSeconds;
   Timings.cacheLookupKeyLoadedImageIdentitySeconds +=
       lookup.keyBuild.loadedImageIdentitySeconds;
-  Timings.cacheLookupKeyLlvmToolIdentitySeconds +=
-      lookup.keyBuild.llvmToolIdentitySeconds;
   Timings.cacheLookupKeyKernelNamesSeconds +=
       lookup.keyBuild.kernelNamesSeconds;
   Timings.cacheLookupKeyMaterialBuildSeconds +=
@@ -225,9 +220,8 @@ void addPipelineTimings(HotswapComgrTimings &Timings,
   Timings.pipelineCreateTempDirSeconds += pipeline.createTempDirSeconds;
   Timings.pipelineRaiseSeconds += pipeline.raiseSeconds;
   Timings.pipelineWriteIrSeconds += pipeline.writeIrSeconds;
+  Timings.pipelineOptSeconds += pipeline.optSeconds;
   Timings.pipelineLlcSeconds += pipeline.llcSeconds;
-  Timings.pipelineReadAsmSeconds += pipeline.readAsmSeconds;
-  Timings.pipelineLlvmMcSeconds += pipeline.llvmMcSeconds;
   Timings.pipelineLinkSeconds += pipeline.linkSeconds;
   Timings.pipelineReadHsacoSeconds += pipeline.readHsacoSeconds;
   Timings.pipelineCollectMetadataSeconds += pipeline.collectMetadataSeconds;
@@ -242,8 +236,6 @@ void addWriteTimings(HotswapComgrTimings &Timings,
   Timings.cacheWriteKeyRulesHashSeconds += write.keyBuild.rulesHashSeconds;
   Timings.cacheWriteKeyLoadedImageIdentitySeconds +=
       write.keyBuild.loadedImageIdentitySeconds;
-  Timings.cacheWriteKeyLlvmToolIdentitySeconds +=
-      write.keyBuild.llvmToolIdentitySeconds;
   Timings.cacheWriteKeyKernelNamesSeconds += write.keyBuild.kernelNamesSeconds;
   Timings.cacheWriteKeyMaterialBuildSeconds +=
       write.keyBuild.materialBuildSeconds;
@@ -274,6 +266,7 @@ struct HotswapTranspileResult {
   std::string FailReason;
   std::string FailDetail;
   std::string timingJson;
+  std::string kernelName;
 
   static HotswapTranspileResult *convert(
       amd_comgr_hotswap_transpile_result_t result) {
@@ -310,9 +303,122 @@ amd_comgr_status_t createExecutableData(llvm::StringRef Hsaco,
   return createDataObject(AMD_COMGR_DATA_KIND_EXECUTABLE, Hsaco, output);
 }
 
-bool hasFlag(const amd_comgr_hotswap_transpile_options_t *options,
-             amd_comgr_hotswap_transpile_option_flags_t flag) {
-  return options && (options->flags & static_cast<uint64_t>(flag));
+struct ResolvedHotswapOptions {
+  const char *CacheDirectory = nullptr;
+  const char *CacheSkipKernels = nullptr;
+  const char *HotswapRulesPath = nullptr;
+  bool CacheDisable = false;
+  bool CacheReadonly = false;
+  bool StrictMode = false;
+  bool AssumeHipGlobalOffsetZero = false;
+  std::string KernelName;
+  unsigned OptLevel = DefaultHotswapComgrOptLevel;
+};
+
+bool hasFlag(uint64_t flags, uint64_t flag) { return flags & flag; }
+
+bool hasOptionsFlag(const amd_comgr_hotswap_transpile_options_t *options,
+                    amd_comgr_hotswap_transpile_option_flags_t flag) {
+  return options && hasFlag(options->flags, static_cast<uint64_t>(flag));
+}
+
+bool hasOptionsV2Flag(const amd_comgr_hotswap_transpile_options_v2_t *options,
+                      amd_comgr_hotswap_transpile_options_v2_flags_t flag) {
+  return options && hasFlag(options->flags, static_cast<uint64_t>(flag));
+}
+
+llvm::Expected<std::string>
+getKernelNameOption(const amd_comgr_hotswap_transpile_options_v2_t *options) {
+  if (!hasOptionsV2Flag(options,
+                        AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_V2_USE_KERNEL_NAME))
+    return std::string();
+  if (!options->kernel_name || options->kernel_name[0] == '\0')
+    return llvm::createStringError(
+        "hotswap v2 options set USE_KERNEL_NAME without a kernel name");
+  return std::string(options->kernel_name);
+}
+
+llvm::Expected<unsigned>
+getOptLevelOption(const amd_comgr_hotswap_transpile_options_v2_t *options) {
+  if (!hasOptionsV2Flag(options,
+                        AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_V2_USE_OPT_LEVEL))
+    return DefaultHotswapComgrOptLevel;
+  if (options->opt_level > MaxHotswapComgrOptLevel)
+    return llvm::createStringError(
+        "hotswap v2 opt_level must be between 0 and 3");
+  return options->opt_level;
+}
+
+llvm::Expected<ResolvedHotswapOptions> resolveOptions(
+    const amd_comgr_hotswap_transpile_options_t *options) {
+  ResolvedHotswapOptions Resolved;
+  if (!options) {
+    Resolved.CacheDisable = true;
+    return Resolved;
+  }
+  if (options->size < sizeof(amd_comgr_hotswap_transpile_options_t))
+    return llvm::createStringError(
+        "hotswap options size " + std::to_string(options->size) +
+        " is smaller than expected " +
+        std::to_string(sizeof(amd_comgr_hotswap_transpile_options_t)));
+
+  Resolved.CacheDirectory = options->cache_directory;
+  Resolved.CacheSkipKernels = options->cache_skip_kernels;
+  Resolved.HotswapRulesPath = options->hotswap_rules_path;
+  Resolved.CacheDisable = hasOptionsFlag(
+      options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_CACHE_DISABLE);
+  Resolved.CacheReadonly = hasOptionsFlag(
+      options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_CACHE_READONLY);
+  Resolved.StrictMode =
+      hasOptionsFlag(options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_STRICT);
+  Resolved.AssumeHipGlobalOffsetZero = hasOptionsFlag(
+      options,
+      AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_ASSUME_HIP_GLOBAL_OFFSET_ZERO);
+  return Resolved;
+}
+
+llvm::Expected<ResolvedHotswapOptions>
+resolveOptionsV2(const amd_comgr_hotswap_transpile_options_v2_t *options) {
+  ResolvedHotswapOptions Resolved;
+  if (!options) {
+    Resolved.CacheDisable = true;
+    return Resolved;
+  }
+  if (options->version != AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_VERSION_2)
+    return llvm::createStringError(
+        "unsupported hotswap options version " +
+        std::to_string(options->version) + " (expected " +
+        std::to_string(AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_VERSION_2) + ")");
+
+  llvm::Expected<std::string> KernelName = getKernelNameOption(options);
+  if (!KernelName)
+    return KernelName.takeError();
+  llvm::Expected<unsigned> OptLevel = getOptLevelOption(options);
+  if (!OptLevel)
+    return OptLevel.takeError();
+
+  Resolved.CacheDirectory = options->cache_directory;
+  Resolved.CacheSkipKernels = options->cache_skip_kernels;
+  Resolved.HotswapRulesPath = options->hotswap_rules_path;
+  Resolved.CacheDisable = hasOptionsV2Flag(
+      options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_V2_CACHE_DISABLE);
+  Resolved.CacheReadonly = hasOptionsV2Flag(
+      options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_V2_CACHE_READONLY);
+  Resolved.StrictMode =
+      hasOptionsV2Flag(options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_V2_STRICT);
+  Resolved.AssumeHipGlobalOffsetZero = hasOptionsV2Flag(
+      options,
+      AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_V2_ASSUME_HIP_GLOBAL_OFFSET_ZERO);
+  Resolved.KernelName = std::move(*KernelName);
+  Resolved.OptLevel = *OptLevel;
+  return Resolved;
+}
+
+amd_comgr_status_t invalidOptions(llvm::Error err,
+                                  llvm::StringRef functionName) {
+  llvm::errs() << functionName << ": " << llvm::toString(std::move(err))
+               << "\n";
+  return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
 }
 
 std::string pipelineFailReason(const COMGR::hotswap::PipelineResult &pipeline) {
@@ -381,7 +487,8 @@ void fillResult(HotswapTranspileResult &result, llvm::StringRef sourceGfx,
                 llvm::StringRef cacheObjectPath = "",
                 llvm::StringRef FailReason = "",
                 llvm::StringRef FailDetail = "",
-                llvm::StringRef timingJson = "") {
+                llvm::StringRef timingJson = "",
+                llvm::StringRef kernelName = "") {
   result.sourceGfx = sourceGfx.str();
   result.targetGfx = targetGfx.str();
   result.success = success;
@@ -395,6 +502,7 @@ void fillResult(HotswapTranspileResult &result, llvm::StringRef sourceGfx,
   result.FailReason = FailReason.str();
   result.FailDetail = FailDetail.str();
   result.timingJson = timingJson.str();
+  result.kernelName = kernelName.str();
   if (pipeline) {
     result.LiftedCount = pipeline->LiftedCount;
     result.TotalCount = pipeline->TotalCount;
@@ -413,12 +521,9 @@ amd_comgr_status_t returnResult(HotswapTranspileResult &&value,
   return AMD_COMGR_STATUS_SUCCESS;
 }
 
-} // namespace
-
-amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
+amd_comgr_status_t hotswapTranspileWithResolvedOptions(
     amd_comgr_data_t input, const char *source_isa_name,
-    const char *target_isa_name,
-    const amd_comgr_hotswap_transpile_options_t *options,
+    const char *target_isa_name, const ResolvedHotswapOptions &Options,
     amd_comgr_data_t *output,
     amd_comgr_hotswap_transpile_result_t *result) {
   const bool CollectTimings = HotSwapTimingEnabled();
@@ -434,8 +539,6 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
   if (!InputP || !InputP->Data ||
       InputP->DataKind != AMD_COMGR_DATA_KIND_EXECUTABLE || !source_isa_name ||
       !target_isa_name || !output)
-    return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
-  if (options && options->size < sizeof(amd_comgr_hotswap_transpile_options_t))
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
 
   // Validate both ISA names through the same parser the byte-level
@@ -461,39 +564,41 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
   CacheRequest.TargetIsa = target_isa_name;
   CacheRequest.CodeIsa = source_isa_name;
   CacheRequest.HotswapRulesPath =
-      options && options->hotswap_rules_path ? options->hotswap_rules_path : "";
+      Options.HotswapRulesPath ? Options.HotswapRulesPath : "";
   CacheRequest.CacheDirectory =
-      options && options->cache_directory ? options->cache_directory : "";
+      Options.CacheDirectory ? Options.CacheDirectory : "";
   CacheRequest.CacheSkipKernels =
-      options && options->cache_skip_kernels ? options->cache_skip_kernels : "";
-  CacheRequest.StrictMode =
-      hasFlag(options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_STRICT);
-  CacheRequest.AssumeHipGlobalOffsetZero = hasFlag(
-      options,
-      AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_ASSUME_HIP_GLOBAL_OFFSET_ZERO);
+      Options.CacheSkipKernels ? Options.CacheSkipKernels : "";
+  CacheRequest.KernelName = Options.KernelName;
+  CacheRequest.StrictMode = Options.StrictMode;
+  CacheRequest.AssumeHipGlobalOffsetZero = Options.AssumeHipGlobalOffsetZero;
   CacheRequest.CacheDisabled =
-      !options || hasFlag(options,
-                          AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_CACHE_DISABLE) ||
-      CacheRequest.CacheDirectory.empty();
-  CacheRequest.CacheReadonly =
-      hasFlag(options, AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_CACHE_READONLY);
+      Options.CacheDisable || CacheRequest.CacheDirectory.empty();
+  CacheRequest.CacheReadonly = Options.CacheReadonly;
   CacheRequest.CollectTimings = CollectTimings;
+  CacheRequest.OptLevel = Options.OptLevel;
 
-  auto listKernelsStart = timingStart(CollectTimings);
-  llvm::Expected<llvm::SmallVector<std::string>> KernelNamesOrErr =
-      COMGR::hotswap::listKernelNames(InputBuf);
-  Timings.listKernelsSeconds =
-      timingElapsed(CollectTimings, listKernelsStart);
-  if (!KernelNamesOrErr) {
-    llvm::errs() << "amd_comgr_hotswap_transpile: listKernelNames failed: "
-                 << llvm::toString(KernelNamesOrErr.takeError()) << "\n";
-    return AMD_COMGR_STATUS_ERROR;
+  std::string SkippedKernel;
+  if (!CacheRequest.KernelName.empty()) {
+    llvm::SmallVector<std::string, 1> KernelNames{CacheRequest.KernelName};
+    SkippedKernel = COMGR::hotswap::skippedKernelForTranslationCache(
+        KernelNames, CacheRequest.CacheSkipKernels);
+  } else {
+    auto listKernelsStart = timingStart(CollectTimings);
+    llvm::Expected<llvm::SmallVector<std::string>> KernelNamesOrErr =
+        COMGR::hotswap::listKernelNames(InputBuf);
+    Timings.listKernelsSeconds =
+        timingElapsed(CollectTimings, listKernelsStart);
+    if (!KernelNamesOrErr) {
+      llvm::errs() << "amd_comgr_hotswap_transpile: listKernelNames failed: "
+                   << llvm::toString(KernelNamesOrErr.takeError()) << "\n";
+      return AMD_COMGR_STATUS_ERROR;
+    }
+    const llvm::SmallVector<std::string> KernelNames =
+        std::move(*KernelNamesOrErr);
+    SkippedKernel = COMGR::hotswap::skippedKernelForTranslationCache(
+        KernelNames, CacheRequest.CacheSkipKernels);
   }
-  const llvm::SmallVector<std::string> KernelNames =
-      std::move(*KernelNamesOrErr);
-  const std::string SkippedKernel =
-      COMGR::hotswap::skippedKernelForTranslationCache(
-          KernelNames, CacheRequest.CacheSkipKernels);
 
   COMGR::hotswap::TranslationCacheStatus CacheStatus =
       COMGR::hotswap::TranslationCacheStatus::Disabled;
@@ -524,7 +629,8 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
                  false, lookupStatusFromCacheStatus(Lookup.Status),
                  AMD_COMGR_HOTSWAP_CACHE_WRITE_NOT_ATTEMPTED, Lookup.Reason,
                  nullptr, Lookup.key, Lookup.MetadataPath, Lookup.ObjectPath,
-                 "cache_invalid", Lookup.Reason, finalTimingJson());
+                 "cache_invalid", Lookup.Reason, finalTimingJson(),
+                 CacheRequest.KernelName);
       if (amd_comgr_status_t ResultStatus =
               returnResult(std::move(Result), result))
         return ResultStatus;
@@ -537,14 +643,8 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
     }
   }
 
-  // Drive the same all-kernels merge path that raise_cli.cpp's --write-Hsaco
-  // mode falls back on for whole-file flows. We pass hotswap's defaults for
-  // the writelane / wave-native toggles (both on, post-graduation) — the
-  // public comgr surface intentionally hides those knobs since they are
-  // either correctness-preserving rewrites (writelane) or projection
-  // strategies (wave-native) that callers should not have to reason about.
-  // If an opt-out is ever needed at the comgr boundary it should land as a
-  // separate options struct rather than overloading this entry point.
+  // A named-kernel request is independent of other metadata kernels in the
+  // object; an unnamed request translates and relinks the complete code object.
   if (!CacheHit) {
     COMGR::hotswap::ScopedStrictMode StrictMode(CacheRequest.StrictMode);
     COMGR::hotswap::PipelineOptions PipelineOptions;
@@ -554,10 +654,18 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
     PipelineOptions.CollectTimings = CollectTimings;
     PipelineOptions.AssumeHipGlobalOffsetZero =
         CacheRequest.AssumeHipGlobalOffsetZero;
-    Pipeline = COMGR::hotswap::runPipelineAllKernels(InputBuf,
-                                                 SourceIdent.Processor.str(),
-                                                 TargetIdent.Processor.str(),
-                                                 PipelineOptions);
+    PipelineOptions.OptLevel = CacheRequest.OptLevel;
+    if (!CacheRequest.KernelName.empty()) {
+      Pipeline = COMGR::hotswap::runPipeline(InputBuf,
+                                             SourceIdent.Processor,
+                                             TargetIdent.Processor,
+                                             CacheRequest.KernelName,
+                                             PipelineOptions);
+    } else {
+      Pipeline = COMGR::hotswap::runPipelineAllKernels(
+          InputBuf, SourceIdent.Processor, TargetIdent.Processor,
+          PipelineOptions);
+    }
     addPipelineTimings(Timings, Pipeline.Timings);
   }
 
@@ -569,7 +677,7 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
                AMD_COMGR_HOTSWAP_CACHE_WRITE_NOT_ATTEMPTED, CacheDetail,
                &Pipeline, CacheKey, CacheMetadataPath, CacheObjectPath,
                pipelineFailReason(Pipeline), pipelineFailDetail(Pipeline),
-               finalTimingJson());
+               finalTimingJson(), CacheRequest.KernelName);
     if (amd_comgr_status_t ResultStatus =
             returnResult(std::move(Result), result))
       return ResultStatus;
@@ -597,7 +705,7 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
                  false, lookupStatusFromCacheStatus(CacheStatus),
                  CacheWriteStatus, Write.Reason, &Pipeline, Write.key,
                  Write.MetadataPath, Write.ObjectPath, "cache_write_failed",
-                 Write.Reason, finalTimingJson());
+                 Write.Reason, finalTimingJson(), CacheRequest.KernelName);
       if (amd_comgr_status_t ResultStatus =
               returnResult(std::move(Result), result))
         return ResultStatus;
@@ -607,7 +715,8 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
 
   amd_comgr_data_t OutputData = {0};
   auto createOutputDataStart = timingStart(CollectTimings);
-  if (auto Status = createExecutableData(Pipeline.Hsaco->getBuffer(), &OutputData))
+  if (auto Status =
+          createExecutableData(Pipeline.Hsaco->getBuffer(), &OutputData))
     return Status;
   Timings.createOutputDataSeconds =
       timingElapsed(CollectTimings, createOutputDataStart);
@@ -616,7 +725,8 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
   fillResult(Result, CacheRequest.SourceGfx, CacheRequest.TargetGfx, true,
              CacheHit, lookupStatusFromCacheStatus(CacheStatus),
              CacheWriteStatus, CacheDetail, &Pipeline, CacheKey,
-             CacheMetadataPath, CacheObjectPath, "", "", finalTimingJson());
+             CacheMetadataPath, CacheObjectPath, "", "", finalTimingJson(),
+             CacheRequest.KernelName);
   if (amd_comgr_status_t ResultStatus =
           returnResult(std::move(Result), result)) {
     amd_comgr_release_data(OutputData);
@@ -627,44 +737,42 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
   return AMD_COMGR_STATUS_SUCCESS;
 }
 
+} // namespace
+
+amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options(
+    amd_comgr_data_t input, const char *source_isa_name,
+    const char *target_isa_name,
+    const amd_comgr_hotswap_transpile_options_t *options,
+    amd_comgr_data_t *output,
+    amd_comgr_hotswap_transpile_result_t *result) {
+  llvm::Expected<ResolvedHotswapOptions> Resolved =
+      resolveOptions(options);
+  if (!Resolved)
+    return invalidOptions(Resolved.takeError(),
+                          "amd_comgr_hotswap_transpile_with_options");
+  return hotswapTranspileWithResolvedOptions(
+      input, source_isa_name, target_isa_name, *Resolved, output, result);
+}
+
+amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_with_options_v2(
+    amd_comgr_data_t input, const char *source_isa_name,
+    const char *target_isa_name,
+    const amd_comgr_hotswap_transpile_options_v2_t *options,
+    amd_comgr_data_t *output,
+    amd_comgr_hotswap_transpile_result_t *result) {
+  llvm::Expected<ResolvedHotswapOptions> Resolved = resolveOptionsV2(options);
+  if (!Resolved)
+    return invalidOptions(Resolved.takeError(),
+                          "amd_comgr_hotswap_transpile_with_options_v2");
+  return hotswapTranspileWithResolvedOptions(
+      input, source_isa_name, target_isa_name, *Resolved, output, result);
+}
+
 amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile(
     amd_comgr_data_t input, const char *source_isa_name,
     const char *target_isa_name, amd_comgr_data_t *output) {
   return amd_comgr_hotswap_transpile_with_options(
       input, source_isa_name, target_isa_name, nullptr, output, nullptr);
-}
-
-// ROCr-loader entry point for cross-generation HotSwap. The runtime dlopens
-// this name (see rocr-runtime .../core/runtime/hotswap.cpp). With the
-// entry-trampolines flag set it forwards to the full transpiler; otherwise it
-// falls back to the in-place stepping patcher (amd_comgr_hotswap_rewrite).
-//
-// The transpiler reads cache directory / skip-list / rules / strict-mode from
-// the environment (HSA_HOTSWAP_CACHE_DIR, etc.), so the minimal ROCr options
-// (size + flags) map cleanly onto the transpile options here. These are always
-// HIP-launched kernels in the cross-gen path, so HIP global-offset-zero is
-// assumed.
-amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_rewrite_with_options(
-    amd_comgr_data_t input, const char *source_isa_name,
-    const char *target_isa_name,
-    const amd_comgr_hotswap_rewrite_options_t *options,
-    amd_comgr_data_t *output) {
-  const uint64_t flags = options ? options->flags : 0;
-  const bool entry_trampolines =
-      (flags & AMD_COMGR_HOTSWAP_REWRITE_ENTRY_TRAMPOLINES) != 0;
-  if (!entry_trampolines) {
-    // No transpile requested: behave like the stepping patcher.
-    return amd_comgr_hotswap_rewrite(input, source_isa_name, target_isa_name,
-                                     output);
-  }
-  amd_comgr_hotswap_transpile_options_t topts{};
-  topts.size = sizeof(topts);
-  topts.cache_directory = nullptr;    // comgr reads HSA_HOTSWAP_CACHE_DIR
-  topts.cache_skip_kernels = nullptr;
-  topts.hotswap_rules_path = nullptr;
-  topts.flags = AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_ASSUME_HIP_GLOBAL_OFFSET_ZERO;
-  return amd_comgr_hotswap_transpile_with_options(
-      input, source_isa_name, target_isa_name, &topts, output, nullptr);
 }
 
 amd_comgr_status_t AMD_COMGR_API amd_comgr_destroy_hotswap_transpile_result(
@@ -748,6 +856,9 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_result_get_string(
   case AMD_COMGR_HOTSWAP_TRANSPILE_RESULT_TIMING_JSON:
     Field = &Result->timingJson;
     break;
+  case AMD_COMGR_HOTSWAP_TRANSPILE_RESULT_KERNEL_NAME:
+    Field = &Result->kernelName;
+    break;
   }
   if (!Field)
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
@@ -762,4 +873,34 @@ amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_transpile_result_get_string(
   std::memcpy(value, Field->c_str(), Required);
   *size = Required;
   return AMD_COMGR_STATUS_SUCCESS;
+}
+
+// Cross-gen shim: ROCr's loader-native HotSwap (rocm-systems core/runtime/
+// hotswap.cpp) dlopens the symbol `amd_comgr_hotswap_rewrite_with_options` for
+// the cross-generation entry-trampoline path. Upstream martin-luecke comgr does
+// not export that name (it exposes amd_comgr_hotswap_rewrite for B0/A0 stepping
+// and amd_comgr_hotswap_transpile[_with_options] for raise-to-IR). This shim
+// bridges them: with the ENTRY_TRAMPOLINES flag it runs the full raise-to-IR
+// transpile; otherwise it falls back to the byte-level stepping rewrite.
+amd_comgr_status_t AMD_COMGR_API amd_comgr_hotswap_rewrite_with_options(
+    amd_comgr_data_t input, const char *source_isa_name,
+    const char *target_isa_name,
+    const amd_comgr_hotswap_rewrite_options_t *options,
+    amd_comgr_data_t *output) {
+  const uint64_t flags = options ? options->flags : 0;
+  const bool entry_trampolines =
+      (flags & AMD_COMGR_HOTSWAP_REWRITE_ENTRY_TRAMPOLINES) != 0;
+  if (!entry_trampolines) {
+    // No transpile requested: behave like the stepping patcher.
+    return amd_comgr_hotswap_rewrite(input, source_isa_name, target_isa_name,
+                                     output);
+  }
+  amd_comgr_hotswap_transpile_options_t topts{};
+  topts.size = sizeof(topts);
+  topts.cache_directory = nullptr;    // comgr reads HSA_HOTSWAP_CACHE_DIR
+  topts.cache_skip_kernels = nullptr;
+  topts.hotswap_rules_path = nullptr;
+  topts.flags = AMD_COMGR_HOTSWAP_TRANSPILE_OPTIONS_ASSUME_HIP_GLOBAL_OFFSET_ZERO;
+  return amd_comgr_hotswap_transpile_with_options(
+      input, source_isa_name, target_isa_name, &topts, output, nullptr);
 }

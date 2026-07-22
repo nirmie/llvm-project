@@ -14,7 +14,6 @@ struct TranslationCacheKeyBuildTimings {
   double elfHeaderSeconds = 0.0;
   double rulesHashSeconds = 0.0;
   double loadedImageIdentitySeconds = 0.0;
-  double llvmToolIdentitySeconds = 0.0;
   double kernelNamesSeconds = 0.0;
   double materialBuildSeconds = 0.0;
   double keyHashSeconds = 0.0;
@@ -53,7 +52,9 @@ struct TranslationCacheRequest {
   std::string HotswapRulesPath;
   std::string CacheDirectory;
   std::string CacheSkipKernels;
+  std::string KernelName;
   int OrigMach = -1;
+  unsigned OptLevel = 0;
   bool EnableWritelaneRewrite = true;
   bool EnableWaveNative = true;
   bool AssumeHipGlobalOffsetZero = false;
@@ -94,14 +95,16 @@ struct TranslationCacheWrite {
 
 const char *translationCacheStatusString(TranslationCacheStatus Status);
 
-TranslationCacheLookup lookupTranslationCache(
-    const TranslationCacheRequest &request);
+TranslationCacheLookup
+lookupTranslationCache(const TranslationCacheRequest &request);
 
-TranslationCacheWrite writeTranslationCache(
-    const TranslationCacheRequest &request, const PipelineResult &Result);
+TranslationCacheWrite
+writeTranslationCache(const TranslationCacheRequest &request,
+                      const PipelineResult &Result);
 
-std::string skippedKernelForTranslationCache(
-    llvm::ArrayRef<std::string> kernelNames, llvm::StringRef skipList);
+std::string
+skippedKernelForTranslationCache(llvm::ArrayRef<std::string> kernelNames,
+                                 llvm::StringRef skipList);
 
 std::string sha256Hex(llvm::MemoryBufferRef buffer);
 

@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "user-sgpr-layout.h"
+#include "hotswap/raise-failure.h"
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
@@ -36,19 +37,32 @@ int appendSource(llvm::SmallVectorImpl<UserSgprLayout::Entry> &Entries,
 
 const char *sourceName(UserSgprLayout::Source S) {
   switch (S) {
-  case UserSgprLayout::Source::Unset:                return "Unset";
-  case UserSgprLayout::Source::PrivateSegmentBuffer: return "PrivateSegmentBuffer";
-  case UserSgprLayout::Source::DispatchPtr:          return "DispatchPtr";
-  case UserSgprLayout::Source::QueuePtr:             return "QueuePtr";
-  case UserSgprLayout::Source::KernargSegmentPtr:    return "KernargSegmentPtr";
-  case UserSgprLayout::Source::DispatchId:           return "DispatchId";
-  case UserSgprLayout::Source::FlatScratchInit:      return "FlatScratchInit";
-  case UserSgprLayout::Source::PrivateSegmentSize:   return "PrivateSegmentSize";
-  case UserSgprLayout::Source::PreloadedKernarg:     return "PreloadedKernarg";
-  case UserSgprLayout::Source::WorkgroupIdX:         return "WorkgroupIdX";
-  case UserSgprLayout::Source::WorkgroupIdY:         return "WorkgroupIdY";
-  case UserSgprLayout::Source::WorkgroupIdZ:         return "WorkgroupIdZ";
-  case UserSgprLayout::Source::WorkgroupInfo:        return "WorkgroupInfo";
+  case UserSgprLayout::Source::Unset:
+    return "Unset";
+  case UserSgprLayout::Source::PrivateSegmentBuffer:
+    return "PrivateSegmentBuffer";
+  case UserSgprLayout::Source::DispatchPtr:
+    return "DispatchPtr";
+  case UserSgprLayout::Source::QueuePtr:
+    return "QueuePtr";
+  case UserSgprLayout::Source::KernargSegmentPtr:
+    return "KernargSegmentPtr";
+  case UserSgprLayout::Source::DispatchId:
+    return "DispatchId";
+  case UserSgprLayout::Source::FlatScratchInit:
+    return "FlatScratchInit";
+  case UserSgprLayout::Source::PrivateSegmentSize:
+    return "PrivateSegmentSize";
+  case UserSgprLayout::Source::PreloadedKernarg:
+    return "PreloadedKernarg";
+  case UserSgprLayout::Source::WorkgroupIdX:
+    return "WorkgroupIdX";
+  case UserSgprLayout::Source::WorkgroupIdY:
+    return "WorkgroupIdY";
+  case UserSgprLayout::Source::WorkgroupIdZ:
+    return "WorkgroupIdZ";
+  case UserSgprLayout::Source::WorkgroupInfo:
+    return "WorkgroupInfo";
   }
   return "<invalid>";
 }
@@ -64,7 +78,8 @@ unsigned decodeUserSgprCount(uint32_t ComputePgmRsrc2,
                              const ISAProfile &SourceProfile) {
   using namespace llvm::amdhsa;
   const unsigned Width = userSgprCountFieldWidth(SourceProfile);
-  return (ComputePgmRsrc2 >> COMPUTE_PGM_RSRC2_GFX6_GFX120_USER_SGPR_COUNT_SHIFT) &
+  return (ComputePgmRsrc2 >>
+          COMPUTE_PGM_RSRC2_GFX6_GFX120_USER_SGPR_COUNT_SHIFT) &
          ((1u << Width) - 1u);
 }
 
@@ -80,10 +95,9 @@ std::string formatMetadataMismatch(const KernelMeta &Meta,
   std::string Detail;
   llvm::raw_string_ostream Os(Detail);
   Os << "transpiler: UserSgprLayout::fromKernelMeta: kernel '" << Meta.Name
-     << "' has compute_pgm_rsrc2.USER_SGPR_COUNT="
-     << DecodedUserSgprCount << " (decoded as " << UserSgprCountWidth
-     << "-bit field for source ISA '" << SourceIsa
-     << "') but kernel_code_properties + kernarg_preload imply "
+     << "' has compute_pgm_rsrc2.USER_SGPR_COUNT=" << DecodedUserSgprCount
+     << " (decoded as " << UserSgprCountWidth << "-bit field for source ISA '"
+     << SourceIsa << "') but kernel_code_properties + kernarg_preload imply "
      << static_cast<unsigned>(Layout.UserSgprCount)
      << ". KD is inconsistent -- refusing to guess the layout. Raw KD fields:"
      << " compute_pgm_rsrc1=0x" << llvm::utohexstr(Meta.ComputePgmRsrc1)
@@ -146,23 +160,14 @@ std::string formatMetadataMismatch(const KernelMeta &Meta,
 
 } // namespace
 
-bool UserSgprLayout::tryFromKernelMeta(const KernelMeta &Meta,
-                                       const ISAProfile &SourceProfile,
-                                       llvm::StringRef SourceIsa,
-                                       UserSgprLayout &Layout,
-                                       std::string &FailureDetail) {
+llvm::Error UserSgprLayout::tryFromKernelMeta(const KernelMeta &Meta,
+                                              const ISAProfile &SourceProfile,
+                                              llvm::StringRef SourceIsa,
+                                              UserSgprLayout &Layout) {
   Layout = UserSgprLayout();
-  FailureDetail.clear();
 
-  if (!Meta.HasKernelDescriptor) {
-    FailureDetail =
-        (llvm::Twine("transpiler: UserSgprLayout::fromKernelMeta: kernel '") +
-         Meta.Name +
-         "' has no parsed kernel descriptor. Cannot derive user-SGPR ABI; "
-         "refuse the lift instead of guessing a hardcoded layout.")
-            .str();
-    return false;
-  }
+  if (!Meta.HasKernelDescriptor)
+    return RaiseFailure::missingKernelDescriptor(Meta.Name);
 
   using namespace llvm::amdhsa;
 
@@ -229,13 +234,11 @@ bool UserSgprLayout::tryFromKernelMeta(const KernelMeta &Meta,
   const unsigned UserSgprCountWidth = userSgprCountFieldWidth(SourceProfile);
   const unsigned PgmRsrc2UserSgprCount =
       decodeUserSgprCount(Meta.ComputePgmRsrc2, SourceProfile);
-  if (PgmRsrc2UserSgprCount != Layout.UserSgprCount) {
-    FailureDetail =
-        formatMetadataMismatch(Meta, SourceIsa, Layout, PgmRsrc2UserSgprCount,
-                               UserSgprCountWidth, PreloadLen,
-                               PreloadOffsetDwords);
-    return false;
-  }
+  if (PgmRsrc2UserSgprCount != Layout.UserSgprCount)
+    return RaiseFailure::userSgprLayoutMismatch(
+        Meta.Name, formatMetadataMismatch(
+                       Meta, SourceIsa, Layout, PgmRsrc2UserSgprCount,
+                       UserSgprCountWidth, PreloadLen, PreloadOffsetDwords));
 
   // Workgroup ID SGPRs sit immediately above the user-SGPR region.
   if (Meta.ComputePgmRsrc2 & COMPUTE_PGM_RSRC2_ENABLE_SGPR_WORKGROUP_ID_X)
@@ -251,17 +254,7 @@ bool UserSgprLayout::tryFromKernelMeta(const KernelMeta &Meta,
     Layout.WorkgroupInfoSgpr =
         appendSource(Layout.Entries, Source::WorkgroupInfo, 1);
 
-  return true;
-}
-
-UserSgprLayout UserSgprLayout::fromKernelMeta(const KernelMeta &Meta,
-                                              const ISAProfile &SourceProfile,
-                                              llvm::StringRef SourceIsa) {
-  UserSgprLayout Layout;
-  std::string FailureDetail;
-  if (!tryFromKernelMeta(Meta, SourceProfile, SourceIsa, Layout, FailureDetail))
-    llvm::report_fatal_error(llvm::StringRef(FailureDetail));
-  return Layout;
+  return llvm::Error::success();
 }
 
 std::string UserSgprLayout::toString() const {
