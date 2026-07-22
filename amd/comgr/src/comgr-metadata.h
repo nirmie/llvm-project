@@ -11,16 +11,23 @@
 
 #include "comgr.h"
 #include "llvm/MC/TargetRegistry.h"
-#include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 
 namespace COMGR {
 namespace metadata {
 
-amd_comgr_status_t getMetadataRoot(DataObject *DataP, DataMeta *MetaP);
-// HotSwap: MemoryBufferRef overload for the transpiler (no DataObject wrapper).
+// Buffer-friendly overloads. The `DataObject *` entries below are
+// one-line forwarders so callers without a `DataObject` (e.g. the
+// hotswap transpiler running over raw HSACO bytes) can reach the same
+// note walker / ISA-string formatter without going through the
+// public C `amd_comgr_create_data` ceremony.
 amd_comgr_status_t getMetadataRoot(llvm::MemoryBufferRef MB, DataMeta *MetaP);
+amd_comgr_status_t getElfIsaName(llvm::MemoryBufferRef MB,
+                                 std::string &IsaName);
+
+amd_comgr_status_t getMetadataRoot(DataObject *DataP, DataMeta *MetaP);
+amd_comgr_status_t getElfIsaName(DataObject *DataP, std::string &IsaName);
 
 size_t getIsaCount();
 
@@ -30,8 +37,6 @@ amd_comgr_status_t getIsaMetadata(llvm::StringRef IsaName,
                                   llvm::msgpack::Document &MetaP);
 
 bool isValidIsaName(llvm::StringRef IsaName);
-
-amd_comgr_status_t getElfIsaName(DataObject *DataP, std::string &IsaName);
 
 amd_comgr_status_t lookUpCodeObject(DataObject *DataP,
                                     amd_comgr_code_object_info_t *QueryList,

@@ -24,12 +24,10 @@
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Support/AMDGPUMetadata.h"
 #include "llvm/Support/BinaryStreamReader.h"
-#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstddef>
-#include <iostream>
 
 using namespace llvm;
 using namespace llvm::object;
@@ -40,8 +38,6 @@ namespace metadata {
 template <typename ELFT> using Elf_Note = typename ELFT::Note;
 
 namespace {
-// HotSwap: parse an ELF straight from a MemoryBufferRef (no DataObject needed).
-// Used by the transpiler's listKernelNames/extractKernelMeta.
 Expected<std::unique_ptr<ELFObjectFileBase>>
 getELFObjectFileBase(MemoryBufferRef MB) {
   Expected<std::unique_ptr<ObjectFile>> ObjOrErr =
@@ -56,17 +52,8 @@ getELFObjectFileBase(MemoryBufferRef MB) {
 
 Expected<std::unique_ptr<ELFObjectFileBase>>
 getELFObjectFileBase(DataObject *DataP) {
-  std::unique_ptr<MemoryBuffer> Buf =
-      MemoryBuffer::getMemBuffer(StringRef(DataP->Data, DataP->Size));
-
-  Expected<std::unique_ptr<ObjectFile>> ObjOrErr =
-      ObjectFile::createELFObjectFile(*Buf);
-
-  if (auto Err = ObjOrErr.takeError()) {
-    return std::move(Err);
-  }
-
-  return unique_dyn_cast<ELFObjectFileBase>(std::move(*ObjOrErr));
+  return getELFObjectFileBase(
+      MemoryBufferRef(StringRef(DataP->Data, DataP->Size), ""));
 }
 
 // PAL currently produces MsgPack metadata in a note with this ID.
@@ -265,13 +252,8 @@ amd_comgr_status_t getElfMetadataRoot(const ELFObjectFile<ELFT> *Obj,
 }
 } // namespace
 
-amd_comgr_status_t getMetadataRoot(DataObject *DataP, DataMeta *MetaP) {
-  auto ObjOrErr = getELFObjectFileBase(DataP);
-  if (errorToBool(ObjOrErr.takeError())) {
-    return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
-  }
-  auto *Obj = ObjOrErr->get();
-
+namespace {
+amd_comgr_status_t getMetadataRoot(ELFObjectFileBase *Obj, DataMeta *MetaP) {
   if (auto *ELF32LE = dyn_cast<ELF32LEObjectFile>(Obj)) {
     return getElfMetadataRoot(ELF32LE, MetaP);
   }
@@ -284,27 +266,25 @@ amd_comgr_status_t getMetadataRoot(DataObject *DataP, DataMeta *MetaP) {
   auto *ELF64BE = dyn_cast<ELF64BEObjectFile>(Obj);
   return getElfMetadataRoot(ELF64BE, MetaP);
 }
+} // namespace
 
-// HotSwap: parse AMDGPU metadata directly from a MemoryBufferRef, so the
-// transpiler can read kernel metadata without wrapping bytes in a DataObject.
+amd_comgr_status_t getMetadataRoot(DataObject *DataP, DataMeta *MetaP) {
+  auto ObjOrErr = getELFObjectFileBase(DataP);
+  if (errorToBool(ObjOrErr.takeError())) {
+    return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
+  }
+  auto *Obj = ObjOrErr->get();
+
+  return getMetadataRoot(Obj, MetaP);
+}
+
 amd_comgr_status_t getMetadataRoot(MemoryBufferRef Buf, DataMeta *MetaP) {
   auto ObjOrErr = getELFObjectFileBase(Buf);
   if (errorToBool(ObjOrErr.takeError())) {
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
   }
   auto *Obj = ObjOrErr->get();
-
-  if (auto *ELF32LE = dyn_cast<ELF32LEObjectFile>(Obj)) {
-    return getElfMetadataRoot(ELF32LE, MetaP);
-  }
-  if (auto *ELF64LE = dyn_cast<ELF64LEObjectFile>(Obj)) {
-    return getElfMetadataRoot(ELF64LE, MetaP);
-  }
-  if (auto *ELF32BE = dyn_cast<ELF32BEObjectFile>(Obj)) {
-    return getElfMetadataRoot(ELF32BE, MetaP);
-  }
-  auto *ELF64BE = dyn_cast<ELF64BEObjectFile>(Obj);
-  return getElfMetadataRoot(ELF64BE, MetaP);
+  return getMetadataRoot(Obj, MetaP);
 }
 
 struct IsaInfo {
@@ -443,8 +423,8 @@ amd_comgr_status_t getElfIsaNameFromElfHeader(const ELFObjectFile<ELFT> *Obj,
 }
 } // namespace
 
-amd_comgr_status_t getElfIsaName(DataObject *DataP, std::string &IsaName) {
-  auto ObjOrErr = getELFObjectFileBase(DataP);
+amd_comgr_status_t getElfIsaName(MemoryBufferRef MB, std::string &IsaName) {
+  auto ObjOrErr = getELFObjectFileBase(MB);
   if (errorToBool(ObjOrErr.takeError())) {
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
   }
@@ -454,6 +434,11 @@ amd_comgr_status_t getElfIsaName(DataObject *DataP, std::string &IsaName) {
     return getElfIsaNameFromElfHeader(ELF64LE, IsaName);
   else
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
+}
+
+amd_comgr_status_t getElfIsaName(DataObject *DataP, std::string &IsaName) {
+  return getElfIsaName(MemoryBufferRef(StringRef(DataP->Data, DataP->Size), ""),
+                       IsaName);
 }
 
 amd_comgr_status_t getIsaIndex(StringRef IsaString, size_t &Index) {
