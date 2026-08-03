@@ -55,6 +55,11 @@ cl::opt<std::string> IsaOpt("isa", cl::value_desc("arch"),
                             cl::desc("Source ISA; defaults to the ELF e_flags "
                                      "when not given."));
 
+cl::opt<std::string>
+    TargetOpt("target", cl::value_desc("arch"),
+              cl::desc("Compilation target ISA for cross-gen raising (e.g. "
+                       "gfx942); empty (default) raises for the source ISA."));
+
 cl::opt<std::string> KernelOpt(
     "kernel", cl::value_desc("name"),
     cl::desc("Restrict output to this kernel instead of every kernel."));
@@ -259,7 +264,7 @@ int runEmitIr(const COMGR::hotswap::CodeObjectInfo &Info,
     llvm::Expected<COMGR::hotswap::RaiseResult> RaisedOrErr =
         COMGR::hotswap::raiseToIR(Text.Bytes, Isa, Target, **MetaOrErr,
                                   ExtentOrErr->Offset, ExtentOrErr->Size,
-                                  /*CompilationTargetIsa=*/"",
+                                  /*CompilationTargetIsa=*/TargetOpt,
                                   /*EnableWritelaneRewrite=*/true,
                                   /*EnableWaveNative=*/true,
                                   /*AssumeHipGlobalOffsetZero=*/false,

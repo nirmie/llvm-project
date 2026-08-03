@@ -66,6 +66,47 @@ static const Entry kCanonTable[] = {
     // is refused by the raiser's dispatch.
     E(S_MOV_B32, S_MOV_B32),
     E(S_ENDPGM, S_ENDPGM),
+
+    // vadd cross-gen PoC coverage. canonicalize() collapses MC/e32/variant
+    // forms onto these base pseudos, so map the base pseudo name here.
+    // SOP2.
+    E(S_ADD_I32, S_ADD_I32),
+    E(S_AND_B32, S_AND_B32),
+    E(S_MUL_I32, S_MUL_I32),
+    E(S_BFE_U32, S_BFE_U32),
+    E(S_CSELECT_B32, S_CSELECT_B32),
+    // SOPC.
+    E(S_CMP_EQ_U32, S_CMP_EQ_U32),
+    // Hardware-register query.
+    E(S_GETREG_B32, S_GETREG_B32),
+    // SMEM kernarg loads. The gfx12 s_load_b{32,64,128} mnemonics are the
+    // TableGen S_LOAD_DWORD{,X2,X4} pseudos, each with three operand-source
+    // forms (IMM / SGPR / SGPR_IMM). canonicalize() does not collapse these
+    // onto a common base, so list all three per width.
+    E(S_LOAD_DWORD_IMM, S_LOAD_B32),
+    E(S_LOAD_DWORD_SGPR, S_LOAD_B32),
+    E(S_LOAD_DWORD_SGPR_IMM, S_LOAD_B32),
+    E(S_LOAD_DWORDX2_IMM, S_LOAD_B64),
+    E(S_LOAD_DWORDX2_SGPR, S_LOAD_B64),
+    E(S_LOAD_DWORDX2_SGPR_IMM, S_LOAD_B64),
+    E(S_LOAD_DWORDX4_IMM, S_LOAD_B128),
+    E(S_LOAD_DWORDX4_SGPR, S_LOAD_B128),
+    E(S_LOAD_DWORDX4_SGPR_IMM, S_LOAD_B128),
+    // VALU.
+    E(V_ADD_F32_e64, V_ADD_F32),
+    E(V_MAD_U32_e64, V_MAD_U32),
+    E(V_NOP_e32, V_NOP),
+    // FLAT/global memory.
+    E(GLOBAL_LOAD_DWORD, GLOBAL_LOAD_DWORD),
+    E(GLOBAL_STORE_DWORD, GLOBAL_STORE_DWORD),
+    // Scheduling / no-effect ops lifted as no-ops.
+    E(GLOBAL_PREFETCH_B8, GLOBAL_PREFETCH_B8),
+    E(S_SETREG_IMM32_B32, S_SETREG_IMM32_B32),
+    E(S_CLAUSE, S_CLAUSE),
+    E(S_DELAY_ALU, S_DELAY_ALU),
+    E(S_WAIT_KMCNT, S_WAIT_KMCNT),
+    E(S_WAIT_LOADCNT, S_WAIT_LOADCNT),
+    E(S_WAIT_XCNT, S_WAIT_XCNT),
 };
 
 #undef E

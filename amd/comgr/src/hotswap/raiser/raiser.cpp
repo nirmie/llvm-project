@@ -1147,8 +1147,9 @@ static Expected<RaiseResult> raiseToIRImpl(
         [&]() -> llvm::Expected<HandlerResult> {
       // The dispatch grows one instruction-family edge per patch: an opcode
       // whose handler has not landed yet falls through to the unhandled path
-      // below and refuses cleanly. This milestone lifts the scalar-move /
-      // program-end pair, so only the SOPP and SOP1 arms are wired.
+      // below and refuses cleanly. Scalar / memory family bits are mutually
+      // exclusive; the VALU bit coexists with VOP3, but every vector opcode
+      // carries it, so a single VALU arm covers VOP1/VOP2/VOP3.
       const uint64_t Flags = Di.TargetSpecificFlags;
       const unsigned Opc = Di.Inst.getOpcode();
 
@@ -1156,6 +1157,18 @@ static Expected<RaiseResult> raiseToIRImpl(
         return handleSOPP(Ctx, Di, Op);
       else if (Flags & SIInstrFlags::SOP1)
         return handleSOP1(Ctx, Di, Op);
+      else if (Flags & SIInstrFlags::SOP2)
+        return handleSOP2(Ctx, Di, Op);
+      else if (Flags & SIInstrFlags::SOPC)
+        return handleSOPC(Ctx, Di, Op);
+      else if (Flags & SIInstrFlags::SOPK)
+        return handleSOPK(Ctx, Di, Op);
+      else if (Flags & SIInstrFlags::SMRD)
+        return handleSMEM(Ctx, Di, Op);
+      else if (Flags & SIInstrFlags::FLAT)
+        return handleFLAT(Ctx, Di, Op);
+      else if (Flags & SIInstrFlags::VALU)
+        return handleVALU(Ctx, Di, Op);
 
       StringRef Format = formatName(Di.TargetSpecificFlags, Opc);
       return RaiseFailure::unsupportedInstructionForm(

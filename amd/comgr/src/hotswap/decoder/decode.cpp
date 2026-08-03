@@ -393,6 +393,19 @@ Expected<DecodeResult> decodeKernel(const MCState &Mc, const OpcodeMap &OpcMap,
     Di.TargetSpecificFlags = Desc.TSFlags;
     Di.FirstSrcIdx = Desc.getNumDefs();
 
+    // Decode the scale_offset bit (CPol::SCAL) out of the cpol operand so the
+    // FLAT/GLOBAL address handlers can consume a typed boolean. gfx12+
+    // FLAT/GLOBAL forms carry the bit in cpol; forms without a cpol operand
+    // leave HasScaleOffset false.
+    int CpolIdx =
+        AMDGPU::getNamedOperandIdx(Inst.getOpcode(), AMDGPU::OpName::cpol);
+    if (CpolIdx >= 0 &&
+        static_cast<unsigned>(CpolIdx) < Inst.getNumOperands() &&
+        Inst.getOperand(static_cast<unsigned>(CpolIdx)).isImm())
+      Di.HasScaleOffset =
+          (Inst.getOperand(static_cast<unsigned>(CpolIdx)).getImm() &
+           AMDGPU::CPol::SCAL) != 0;
+
     if (Error E = buildSrcMap(Di, Desc))
       return E;
     if (Error E = driftCheckTiedIn(Mc, Di, Desc))

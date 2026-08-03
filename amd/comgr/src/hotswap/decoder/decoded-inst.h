@@ -55,6 +55,11 @@ struct DecodedInst {
   // Byte offset of this instruction within the kernel's .text.
   uint64_t Offset = 0;
 
+  // gfx12+ FLAT/GLOBAL scale_offset bit (CPol::SCAL): when set, the per-lane
+  // VGPR address operand is scaled by the access element size. Decoded from the
+  // cpol operand; false on ISAs / forms without one.
+  bool HasScaleOffset = false;
+
   // Number of leading MCInst operands that are definitions (results); the
   // logical sources start at operand index FirstSrcIdx.
   unsigned NumDefs = 0;
