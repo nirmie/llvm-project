@@ -124,13 +124,18 @@ if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
       "(SIDefines.h); set LLVM_MAIN_SRC_DIR to the llvm source directory.")
   endif()
 
+  if(HOTSWAP_LLVM_BINARY_DIR)
+    set(HOTSWAP_CLI_AMDGPU_BIN_DIR "${HOTSWAP_LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+  else()
+    set(HOTSWAP_CLI_AMDGPU_BIN_DIR "${LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+  endif()
   target_include_directories(hotswap_transpile_cli PRIVATE
     ${LLVM_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${CMAKE_CURRENT_BINARY_DIR}/../include
     "${HOTSWAP_CLI_AMDGPU_SRC_DIR}"
     "${HOTSWAP_CLI_AMDGPU_SRC_DIR}/Utils"
-    "${LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+    "${HOTSWAP_CLI_AMDGPU_BIN_DIR}")
   # The decoder and raiser OBJECT libraries carry the AMDGPU MC/CodeGen/AsmParser
   # LLVM components (needed for the LLVMInitializeAMDGPU* registration in
   # standalone-init.cpp) as PUBLIC usage requirements, so linking them is enough.

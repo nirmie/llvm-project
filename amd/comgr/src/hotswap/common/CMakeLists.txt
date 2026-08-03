@@ -32,6 +32,13 @@ if(NOT TARGET hotswap::common)
 endif()
 
 llvm_update_compile_flags(hotswap-common)
+# LLVM is built without RTTI; match it explicitly. HotswapError derives from
+# llvm::ErrorInfo<>, so with RTTI on this TU emits `typeinfo for ErrorInfoBase`
+# which the -fno-rtti Support library never defines -> undefined reference at
+# link. llvm_update_compile_flags does not add this in a standalone comgr build.
+if(NOT LLVM_ENABLE_RTTI AND NOT MSVC)
+  target_compile_options(hotswap-common PRIVATE -fno-rtti)
+endif()
 set_target_properties(hotswap-common PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Public include root (src/) so consumers can `#include "hotswap/common/...".

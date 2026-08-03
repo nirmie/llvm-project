@@ -95,7 +95,9 @@ static const Entry kCanonTable[] = {
     // VALU.
     E(V_ADD_F32_e64, V_ADD_F32),
     E(V_MAD_U32_e64, V_MAD_U32),
-    E(V_NOP_e32, V_NOP),
+    // canonicalize() promotes e32 -> e64 via getVOPe64 before lookup, so map the
+    // e64 form.
+    E(V_NOP_e64, V_NOP),
     // FLAT/global memory.
     E(GLOBAL_LOAD_DWORD, GLOBAL_LOAD_DWORD),
     E(GLOBAL_STORE_DWORD, GLOBAL_STORE_DWORD),

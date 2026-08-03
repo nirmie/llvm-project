@@ -49,6 +49,13 @@ endif()
 # RTTI-off LLVM libs produces undefined-reference errors for `typeinfo` symbols
 # on any class with a virtual method.
 llvm_update_compile_flags(hotswap-rewriter)
+# LLVM is built without RTTI; match it explicitly so TUs that touch llvm::Error /
+# ErrorInfo<> do not emit `typeinfo for ErrorInfoBase` against the -fno-rtti
+# Support library. llvm_update_compile_flags omits this in a standalone comgr
+# build.
+if(NOT LLVM_ENABLE_RTTI AND NOT MSVC)
+  target_compile_options(hotswap-rewriter PRIVATE -fno-rtti)
+endif()
 
 set_target_properties(hotswap-rewriter PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

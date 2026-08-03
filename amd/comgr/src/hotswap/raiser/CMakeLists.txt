@@ -53,6 +53,13 @@ endif()
 # RTTI-on TUs with RTTI-off LLVM libs produces undefined-reference errors
 # for `typeinfo` symbols on any class with a virtual method.
 llvm_update_compile_flags(hotswap-raiser)
+# LLVM is built without RTTI; match it explicitly. RaiseFailure derives from
+# llvm::ErrorInfo<>, so with RTTI on this TU emits `typeinfo for ErrorInfoBase`
+# which the -fno-rtti Support library never defines -> undefined reference at
+# link. llvm_update_compile_flags omits this in a standalone comgr build.
+if(NOT LLVM_ENABLE_RTTI AND NOT MSVC)
+  target_compile_options(hotswap-raiser PRIVATE -fno-rtti)
+endif()
 
 set_target_properties(hotswap-raiser PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -98,8 +105,17 @@ if(NOT HOTSWAP_AMDGPU_SRC_DIR)
     "hotswap-raiser: cannot find the LLVM AMDGPU target sources "
     "(SIDefines.h); set LLVM_MAIN_SRC_DIR to the llvm source directory.")
 endif()
+# The generated AMDGPUGen*.inc live in the LLVM *build* tree. In a superbuild
+# LLVM_BINARY_DIR is derived from an install/dist LLVM_DIR (which strips the
+# .inc), so prefer the explicit HOTSWAP_LLVM_BINARY_DIR build-tree override when
+# it is set; fall back to LLVM_BINARY_DIR for in-tree monorepo builds.
+if(HOTSWAP_LLVM_BINARY_DIR)
+  set(HOTSWAP_AMDGPU_BIN_DIR "${HOTSWAP_LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+else()
+  set(HOTSWAP_AMDGPU_BIN_DIR "${LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+endif()
 target_include_directories(hotswap-raiser PRIVATE
   "${HOTSWAP_AMDGPU_SRC_DIR}"
   "${HOTSWAP_AMDGPU_SRC_DIR}/Utils"
-  "${LLVM_BINARY_DIR}/lib/Target/AMDGPU"
+  "${HOTSWAP_AMDGPU_BIN_DIR}"
 )

@@ -31,6 +31,16 @@ Expected<HandlerResult> handleSOPK(RaiseContext &Ctx, const DecodedInst &Di,
                                    OpResolver &Op) {
   HandlerResult Hr;
 
+  // s_setreg_imm32_b32 (SOPK-encoded) writes a mode/scheduler hardware register
+  // the transpiler does not model (e.g. WAVE_MODE). Dropping the write matches
+  // the s_getreg IB_STS2/MODE read-as-zero policy below: the raised IR runs
+  // under the target's default mode and the backend re-establishes whatever it
+  // needs.
+  if (Di.CanonOp == CanonicalOp::S_SETREG_IMM32_B32) {
+    Hr.Handled = true;
+    return Hr;
+  }
+
   if (Di.CanonOp == CanonicalOp::S_GETREG_B32) {
     // Operand layout: dst(0), simm16(1). The hwreg id is the low 6 bits.
     if (Op.nSrcs() < 1 || !Di.isImm(Op.srcIdx(0))) {

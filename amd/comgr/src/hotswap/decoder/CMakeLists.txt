@@ -28,7 +28,12 @@ add_definitions(${LLVM_DEFINITIONS})
 # fixed component libraries unconditionally can pull both the dylib and the
 # static components into a dylib build, risking duplicate symbols. Kept PUBLIC
 # so consumers inherit the same set when they link this OBJECT library.
-if(LLVM_LINK_LLVM_DYLIB)
+# When comgr statically links LLVM (COMGR_STATIC_LLVM), the shared libLLVM.so is
+# built with hidden visibility and does NOT export the AMDGPU-internal symbols
+# the decoder needs (getMCOpcode, getNamedOperandIdx, isGFX12Plus, ...), so link
+# the static AMDGPU component archives even though LLVM_LINK_LLVM_DYLIB may be set
+# by the LLVM package. Only fall back to the dylib when NOT static.
+if(LLVM_LINK_LLVM_DYLIB AND NOT COMGR_STATIC_LLVM)
   set(HOTSWAP_LLVM_LIBS LLVM)
 else()
   set(HOTSWAP_LLVM_LIBS
@@ -67,6 +72,13 @@ if(NOT TARGET hotswap::decoder)
 endif()
 
 llvm_update_compile_flags(hotswap-decoder)
+# LLVM is built without RTTI; match it explicitly so TUs that touch llvm::Error /
+# ErrorInfo<> do not emit `typeinfo for ErrorInfoBase` against the -fno-rtti
+# Support library. llvm_update_compile_flags omits this in a standalone comgr
+# build.
+if(NOT LLVM_ENABLE_RTTI AND NOT MSVC)
+  target_compile_options(hotswap-decoder PRIVATE -fno-rtti)
+endif()
 set_target_properties(hotswap-decoder PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Public include root (src/) so consumers can `#include "hotswap/..."`.
@@ -102,10 +114,19 @@ if(NOT HOTSWAP_AMDGPU_SRC_DIR)
     "hotswap-decoder: cannot find the LLVM AMDGPU target sources "
     "(SIDefines.h); set LLVM_MAIN_SRC_DIR to the llvm source directory.")
 endif()
+# The generated AMDGPUGen*.inc live in the LLVM *build* tree. In a superbuild
+# LLVM_BINARY_DIR is derived from an install/dist LLVM_DIR (which strips the
+# .inc), so prefer the explicit HOTSWAP_LLVM_BINARY_DIR build-tree override when
+# it is set; fall back to LLVM_BINARY_DIR for in-tree monorepo builds.
+if(HOTSWAP_LLVM_BINARY_DIR)
+  set(HOTSWAP_AMDGPU_BIN_DIR "${HOTSWAP_LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+else()
+  set(HOTSWAP_AMDGPU_BIN_DIR "${LLVM_BINARY_DIR}/lib/Target/AMDGPU")
+endif()
 target_include_directories(hotswap-decoder PRIVATE
   "${HOTSWAP_AMDGPU_SRC_DIR}"
   "${HOTSWAP_AMDGPU_SRC_DIR}/Utils"
-  "${LLVM_BINARY_DIR}/lib/Target/AMDGPU"
+  "${HOTSWAP_AMDGPU_BIN_DIR}"
 )
 
 target_link_libraries(hotswap-decoder PUBLIC ${HOTSWAP_LLVM_LIBS})
