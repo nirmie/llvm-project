@@ -527,6 +527,18 @@ static Expected<RaiseResult> raiseToIRImpl(
     F->addFnAttr("amdgpu-flat-work-group-size",
                  std::to_string(MaxWg) + "," + std::to_string(MaxWg));
 
+    // Forbid AGPR allocation. The raised IR is register-pressure heavy relative
+    // to a from-source compile, so on gfx942 (CDNA3, unified VGPR/AGPR file) the
+    // backend both parks whole-wave temporaries in AGPRs and spills ArchVGPRs
+    // into AGPRs. The emitted COMPUTE_PGM_RSRC3 ACCUM_OFFSET then under-covers
+    // the kernel's ArchVGPR usage and the command processor rejects the dispatch
+    // with INVALID_DISPATCH_PARAMETERS. Pinning AGPR count to 0 keeps everything
+    // in ArchVGPRs (spilling to properly-sized scratch instead), yielding a
+    // self-consistent descriptor the CP accepts. Kernels that genuinely need
+    // AGPRs (MFMA) will need the ACCUM descriptor emitted correctly instead;
+    // tracked as a follow-up.
+    F->addFnAttr("amdgpu-agpr-alloc", "0");
+
     // Deliberately do NOT set "amdgpu-waves-per-eu".  Pinning occupancy
     // constrains register allocation and caused spurious VGPR spills for
     // wide kernels (e.g. the Triton 128x128 matmul on gfx942), which then
@@ -568,6 +580,20 @@ static Expected<RaiseResult> raiseToIRImpl(
       F->addFnAttr("amdgpu-no-workitem-id-y");
     if (NumWorkitemDims < 3)
       F->addFnAttr("amdgpu-no-workitem-id-z");
+    // Suppress the workgroup-id (block-id) system SGPRs the source did not
+    // enable. The AMDGPU backend enables all three workgroup-id SGPRs by
+    // default; without these attributes a 1-D source kernel emits a target KD
+    // with ENABLE_SGPR_WORKGROUP_ID_Y/Z set, demanding system SGPRs the launch
+    // never supplies, so the command processor rejects the dispatch with
+    // INVALID_DISPATCH_PARAMETERS. Mirror the source's ComputePgmRsrc2 enables;
+    // the X id is always enabled. (The ttmp7 seeding below is gated on the same
+    // bits, so no workgroup_id_y/z intrinsic is emitted for a disabled dim.)
+    if (!(Meta.ComputePgmRsrc2 &
+          llvm::amdhsa::COMPUTE_PGM_RSRC2_ENABLE_SGPR_WORKGROUP_ID_Y))
+      F->addFnAttr("amdgpu-no-workgroup-id-y");
+    if (!(Meta.ComputePgmRsrc2 &
+          llvm::amdhsa::COMPUTE_PGM_RSRC2_ENABLE_SGPR_WORKGROUP_ID_Z))
+      F->addFnAttr("amdgpu-no-workgroup-id-z");
     F->addFnAttr("uniform-work-group-size", "true");
   }
 
@@ -833,10 +859,28 @@ static Expected<RaiseResult> raiseToIRImpl(
     // to the `~0u` mask and let `s_and ttmp7, 0xffff` consumers
     // tolerate the Z bits bleeding into their read (they already do
     // per the consumer pattern definition).
-    Value *WgIdY = B.CreateCall(FnWorkgroupIdY, {}, "ttmp7_wg_id_y");
-    Function *FnWorkgroupIdZ =
-        Intrinsic::getOrInsertDeclaration(&M, Intrinsic::amdgcn_workgroup_id_z);
-    Value *WgIdZ = B.CreateCall(FnWorkgroupIdZ, {}, "ttmp7_wg_id_z");
+    // Only materialise the workgroup_id_y/z intrinsics when the SOURCE kernel
+    // enabled those grid dimensions. Calling them unconditionally makes the
+    // AMDGPU backend set ENABLE_SGPR_WORKGROUP_ID_Y/Z in the emitted target KD,
+    // so a 1-D source kernel (only WORKGROUP_ID_X enabled) would demand 3
+    // workgroup-id system SGPRs the launch never supplies -- the CP rejects the
+    // dispatch with INVALID_DISPATCH_PARAMETERS. For a disabled dimension the
+    // source ttmp7 field is architecturally 0, so seed a constant 0 instead.
+    const bool SourceHasWgIdY =
+        Meta.ComputePgmRsrc2 &
+        llvm::amdhsa::COMPUTE_PGM_RSRC2_ENABLE_SGPR_WORKGROUP_ID_Y;
+    const bool SourceHasWgIdZ =
+        Meta.ComputePgmRsrc2 &
+        llvm::amdhsa::COMPUTE_PGM_RSRC2_ENABLE_SGPR_WORKGROUP_ID_Z;
+    Value *WgIdY = B.getInt32(0);
+    if (SourceHasWgIdY)
+      WgIdY = B.CreateCall(FnWorkgroupIdY, {}, "ttmp7_wg_id_y");
+    Value *WgIdZ = B.getInt32(0);
+    if (SourceHasWgIdZ) {
+      Function *FnWorkgroupIdZ = Intrinsic::getOrInsertDeclaration(
+          &M, Intrinsic::amdgcn_workgroup_id_z);
+      WgIdZ = B.CreateCall(FnWorkgroupIdZ, {}, "ttmp7_wg_id_z");
+    }
     Value *WgIdYLo = B.CreateAnd(WgIdY, B.getInt32(0xFFFF), "wg_id_y_lo16");
     Value *WgIdZHi = B.CreateShl(WgIdZ, B.getInt32(16), "wg_id_z_hi16");
     Value *Ttmp7Val = B.CreateOr(WgIdYLo, WgIdZHi, "ttmp7_val");

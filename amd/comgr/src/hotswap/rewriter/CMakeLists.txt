@@ -64,6 +64,13 @@ set_target_properties(hotswap-rewriter PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # to resolve to dllexport (not dllimport) on Windows.
 target_compile_definitions(hotswap-rewriter PRIVATE AMD_COMGR_EXPORT)
 
+# The cross-gen branch in rewriter.cpp calls the raise-to-IR pipeline
+# (runPipelineAllKernels), which is only compiled/linked when the transpile
+# path is enabled. Mirror the macro so the branch is guarded to that build.
+if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
+  target_compile_definitions(hotswap-rewriter PRIVATE COMGR_ENABLE_HOTSWAP_TRANSPILE=1)
+endif()
+
 # Include roots: LLVM headers, comgr's src/ (comgr.h, and the src/-relative
 # hotswap/common/*.h shared headers), and the generated amd_comgr.h under the
 # comgr build tree.
@@ -91,4 +98,10 @@ llvm_map_components_to_libnames(hotswap_rewriter_llvm_libs
   AMDGPUDisassembler
   AMDGPUInfo)
 
-target_link_libraries(hotswap-rewriter PUBLIC ${hotswap_rewriter_llvm_libs})
+# PRIVATE + cleared interface (see #3715): objects land in amd_comgr, which
+# already links the full curated static LLVM set. Keeping these deps out of the
+# interface prevents leaking a partial set (or the libLLVM.so that
+# llvm_map_components_to_libnames returns under a dylib config) onto amd_comgr's
+# link line -- the source of the duplicate AMDGPU cl::opt registration abort.
+target_link_libraries(hotswap-rewriter PRIVATE ${hotswap_rewriter_llvm_libs})
+set_target_properties(hotswap-rewriter PROPERTIES INTERFACE_LINK_LIBRARIES "")

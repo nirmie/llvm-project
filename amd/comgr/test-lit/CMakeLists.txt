@@ -139,9 +139,41 @@ if(COMGR_ENABLE_HOTSWAP_TRANSPILE)
   # The decoder and raiser OBJECT libraries carry the AMDGPU MC/CodeGen/AsmParser
   # LLVM components (needed for the LLVMInitializeAMDGPU* registration in
   # standalone-init.cpp) as PUBLIC usage requirements, so linking them is enough.
+  # The hotswap OBJECT libraries keep their LLVM deps PRIVATE with a cleared
+  # link interface (see src/hotswap/*/CMakeLists.txt and #3715), so this driver
+  # must name the LLVM components it needs itself. It exercises the full
+  # pipeline (decode + raise + opt + AMDGPU codegen + in-process LLD link), so
+  # it needs the same broad static set amd_comgr links, plus lld.
+  llvm_map_components_to_libnames(HOTSWAP_CLI_LLVM_LIBS
+    ${LLVM_TARGETS_TO_BUILD}
+    Analysis
+    AggressiveInstCombine
+    BinaryFormat
+    BitReader
+    BitWriter
+    CodeGen
+    Core
+    InstCombine
+    Instrumentation
+    ipo
+    IRReader
+    Linker
+    MC
+    MCDisassembler
+    MCParser
+    Object
+    Passes
+    ScalarOpts
+    Support
+    Target
+    TargetParser
+    TransformUtils
+    Vectorize)
   target_link_libraries(hotswap_transpile_cli
     PRIVATE hotswap::common hotswap::loader hotswap::decoder hotswap::raiser
-            comgr-object-utils)
+            comgr-object-utils
+            lldELF lldCommon
+            ${HOTSWAP_CLI_LLVM_LIBS})
   if(NOT WIN32)
     target_link_options(hotswap_transpile_cli PRIVATE -Wl,--gc-sections)
   endif()

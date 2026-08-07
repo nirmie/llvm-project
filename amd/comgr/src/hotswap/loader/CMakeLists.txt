@@ -62,6 +62,7 @@ endif()
 
 add_library(hotswap-loader OBJECT
   code-object-utils.cpp
+  pipeline-loader-shim.cpp
 )
 
 if(NOT TARGET hotswap::loader)
@@ -127,4 +128,8 @@ target_include_directories(hotswap-loader PRIVATE
   "${HOTSWAP_COMGR_BINARY_DIR}/include"
 )
 
-target_link_libraries(hotswap-loader PUBLIC ${HOTSWAP_LLVM_LIBS})
+# PRIVATE + cleared interface (see #3715): objects land in amd_comgr, which
+# already links the full curated static LLVM set; do not leak a partial LLVM set
+# (or libLLVM.so) onto its link line.
+target_link_libraries(hotswap-loader PRIVATE ${HOTSWAP_LLVM_LIBS})
+set_target_properties(hotswap-loader PROPERTIES INTERFACE_LINK_LIBRARIES "")

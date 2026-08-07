@@ -42,6 +42,7 @@ add_library(hotswap-raiser OBJECT
   handle-smem.cpp
   handle-valu.cpp
   handle-flat.cpp
+  pipeline.cpp
 )
 
 if(NOT TARGET hotswap::raiser)
@@ -68,16 +69,21 @@ target_include_directories(hotswap-raiser PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
 )
 
-# The wave projection lowers decoded instructions to IR, so it links the
-# decoder OBJECT library and inherits its curated LLVM component set (the
-# AMDGPU MC/Desc/Utils libraries the projection's register queries need).
+# The raiser + pipeline.cpp objects land directly in amd_comgr, which already
+# links the full curated static LLVM set (incl. AMDGPU CodeGen, the pass
+# pipeline libraries, and the in-process LLD ELF driver). Following #3715, keep
+# these LLVM deps PRIVATE and clear the interface so this OBJECT library
+# contributes only its objects and never leaks a partial (or dylib) LLVM set
+# onto amd_comgr's link line -- which is what caused the duplicate AMDGPU
+# cl::opt registration. Do NOT name libLLVM.so here.
 target_link_libraries(hotswap-raiser
-  PUBLIC
+  PRIVATE
     hotswap::decoder
     LLVMCore
     LLVMSupport
     LLVMTargetParser
 )
+set_target_properties(hotswap-raiser PROPERTIES INTERFACE_LINK_LIBRARIES "")
 
 # The wave projection consumes AMDGPU target-private headers (AMDGPUMCTargetDesc.h,
 # AMDGPUBaseInfo.h), which transitively include the TableGen-generated

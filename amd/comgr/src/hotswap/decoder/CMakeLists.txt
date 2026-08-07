@@ -129,4 +129,10 @@ target_include_directories(hotswap-decoder PRIVATE
   "${HOTSWAP_AMDGPU_BIN_DIR}"
 )
 
-target_link_libraries(hotswap-decoder PUBLIC ${HOTSWAP_LLVM_LIBS})
+# PRIVATE + cleared interface (see #3715): this OBJECT library's objects land in
+# amd_comgr, which already links the full curated static LLVM set. Propagating a
+# partial LLVM set onto amd_comgr's link line perturbs static-archive resolution
+# and, under a dylib config, mixes component archives with libLLVM.so -> the
+# duplicate AMDGPU cl::opt registration abort.
+target_link_libraries(hotswap-decoder PRIVATE ${HOTSWAP_LLVM_LIBS})
+set_target_properties(hotswap-decoder PROPERTIES INTERFACE_LINK_LIBRARIES "")

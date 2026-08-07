@@ -566,6 +566,20 @@ install(FILES
   COMPONENT amd-comgr
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/${AMD_COMGR_PACKAGE_PREFIX}")
 
+# Re-assert static linkage right before the CLANG_LIBS / LLVM_LIBS resolution.
+# COMGR_STATIC_LLVM sets these OFF near the top, but in the ROCm superbuild the
+# dep-provider's ClangConfig/LLVMConfig run afterward and set
+# CLANG_LINK_CLANG_DYLIB / LLVM_LINK_LLVM_DYLIB back ON, which selects the
+# clang-cpp + libLLVM.so dylibs. Those dylibs contain the AMDGPU backend, and
+# the hotswap raiser/decoder link the static AMDGPU archives (libLLVM.so hides
+# those internal symbols), so a dylib comgr ends up with AMDGPU twice and aborts
+# at load with "amdhsa-code-object-version registered more than once". Force the
+# static component lists so AMDGPU exists exactly once.
+if(COMGR_STATIC_LLVM)
+  set(LLVM_LINK_LLVM_DYLIB OFF)
+  set(CLANG_LINK_CLANG_DYLIB OFF)
+endif()
+
 if(NOT CLANG_LINK_CLANG_DYLIB)
   set(CLANG_LIBS
     clangBasic
@@ -614,6 +628,19 @@ else()
     Symbolize
     TargetParser
     TransformUtils
+    # The hotswap raise-to-IR transpiler's emit path (pipeline.cpp) runs the
+    # opt PassBuilder pipeline and AMDGPU object codegen in-process; pull the
+    # optimization/codegen components (with their transitive deps) into comgr's
+    # single curated static set so the hotswap OBJECT libraries need not
+    # propagate any LLVM libs of their own.
+    Passes
+    ipo
+    Vectorize
+    ScalarOpts
+    InstCombine
+    AggressiveInstCombine
+    Instrumentation
+    Analysis
     ${SPIRV_STATIC_LIB}
     )
 endif()

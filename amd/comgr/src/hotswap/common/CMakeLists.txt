@@ -46,7 +46,10 @@ target_include_directories(hotswap-common PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
 )
 
+# PRIVATE + cleared interface (see #3715): objects land in amd_comgr, which
+# already links the full curated static LLVM set.
 target_link_libraries(hotswap-common
-  PUBLIC
+  PRIVATE
     LLVMSupport
 )
+set_target_properties(hotswap-common PROPERTIES INTERFACE_LINK_LIBRARIES "")

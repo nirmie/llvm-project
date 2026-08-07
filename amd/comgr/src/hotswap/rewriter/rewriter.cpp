@@ -8,7 +8,12 @@
 #include "amd_comgr.h"
 #include "comgr.h"
 #include "internal.h"
+#ifdef COMGR_ENABLE_HOTSWAP_TRANSPILE
+#include "hotswap/raiser/pipeline.h"
+#endif
 
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/TargetParser/AMDGPUTargetParser.h"
 
 #include <optional>
@@ -208,17 +213,78 @@ hotswapRewrite(amd_comgr_data_t input, const char *source_isa_name,
       parseHotswapIsaName(target_isa_name, TargetIdent))
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
 
+  // Cross-gen retargeting (source processor != target processor): route through
+  // the raise-to-IR transpiler pipeline instead of the same-ISA B0/A0 byte
+  // rewriter. The source must be gfx1250; the target is the device ISA the
+  // kernel is being lowered to (e.g. gfx942). raiseToIR/runPipeline enforce the
+  // supported source/target pairs internally.
+  if (SourceIdent.Ident.Processor != TargetIdent.Ident.Processor) {
+#ifndef COMGR_ENABLE_HOTSWAP_TRANSPILE
+    hotswap::log() << "hotswap: error: " << ApiName
+                   << ": cross-gen retargeting requires the transpile path "
+                      "(COMGR_ENABLE_HOTSWAP_TRANSPILE)\n";
+    return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
+#else
+    if (SourceIdent.Ident.Processor != "gfx1250") {
+      hotswap::log() << "hotswap: error: " << ApiName
+                     << ": cross-gen retargeting requires a gfx1250 source, got '"
+                     << SourceIdent.Ident.Processor << "'\n";
+      return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
+    }
+
+    llvm::StringRef InputRef(reinterpret_cast<const char *>(InputP->Data),
+                             InputP->Size);
+    llvm::MemoryBufferRef InputBuf(InputRef, "hotswap-input");
+
+    hotswap::PipelineOptions PipelineOpts;
+    // HIP launches routed through comgr's hotswap runtime have zero HSA
+    // grid-global offset, so hidden_global_offset_* can be synthesized as zero.
+    PipelineOpts.AssumeHipGlobalOffsetZero = true;
+    // Use ModuloReplication rather than WaveNative for the wave32->wave64
+    // cross-widen. WaveNative's kernel-entry init_whole_wave forces the whole
+    // wave into WWM, which the gfx942 backend allocates into AGPRs; the emitted
+    // COMPUTE_PGM_RSRC3 ACCUM_OFFSET then under-covers the kernel's ArchVGPR
+    // usage and the command processor rejects the dispatch with
+    // INVALID_DISPATCH_PARAMETERS. ModuloReplication needs no whole-wave state
+    // and produces an AGPR-free descriptor for straight-line kernels.
+    // TODO(crossgen): make projection selection per-kernel -- WaveNative is only
+    // needed for cross-lane/matrix kernels; keep it for those once the ACCUM
+    // descriptor is emitted consistently.
+    PipelineOpts.EnableWaveNative = false;
+
+    hotswap::PipelineResult PipelineRes = hotswap::runPipelineAllKernels(
+        InputBuf, SourceIdent.Ident.Processor, TargetIdent.Ident.Processor,
+        PipelineOpts);
+    if (!PipelineRes.Success || !PipelineRes.Hsaco) {
+      hotswap::log() << "hotswap: error: " << ApiName
+                     << ": cross-gen transpile failed (kernel '"
+                     << PipelineRes.FailKernel << "': " << PipelineRes.FailDetail
+                     << ")\n";
+      return AMD_COMGR_STATUS_ERROR;
+    }
+
+    DataObject *OutputP =
+        DataObject::allocate(AMD_COMGR_DATA_KIND_EXECUTABLE);
+    if (!OutputP) {
+      hotswap::log() << "hotswap: error: " << ApiName
+                     << ": output data allocation failed\n";
+      return AMD_COMGR_STATUS_ERROR_OUT_OF_RESOURCES;
+    }
+    if (amd_comgr_status_t SetStatus =
+            OutputP->setData(std::move(PipelineRes.Hsaco))) {
+      OutputP->release();
+      return SetStatus;
+    }
+    *output = DataObject::convert(OutputP);
+    return AMD_COMGR_STATUS_SUCCESS;
+#endif // COMGR_ENABLE_HOTSWAP_TRANSPILE
+  }
+
   if (!isGfx12_5Processor(SourceIdent.Ident.Processor) ||
       !isGfx12_5Processor(TargetIdent.Ident.Processor)) {
     hotswap::log() << "hotswap: error: " << ApiName
-                   << ": only gfx125x processors are supported, got source '"
-                   << SourceIdent.Ident.Processor << "' and target '"
-                   << TargetIdent.Ident.Processor << "'\n";
-    return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
-  }
-  if (SourceIdent.Ident.Processor != TargetIdent.Ident.Processor) {
-    hotswap::log() << "hotswap: error: " << ApiName
-                   << ": processor retargeting is not supported, got source '"
+                   << ": only gfx125x processors are supported for same-ISA "
+                      "rewrite, got source '"
                    << SourceIdent.Ident.Processor << "' and target '"
                    << TargetIdent.Ident.Processor << "'\n";
     return AMD_COMGR_STATUS_ERROR_INVALID_ARGUMENT;
